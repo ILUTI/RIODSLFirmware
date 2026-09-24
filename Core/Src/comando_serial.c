@@ -41,7 +41,7 @@ static const ComandoSerial_Descriptor_t TABLA[] = {
     {"RPM_MIN",                         CALIB_ID_RPM_MIN,                         TIPO_X10},
     {"PID_KP",                          CALIB_ID_PID_KP,                          TIPO_S16_X100},
     {"PID_KI",                          CALIB_ID_PID_KI,                          TIPO_S16_X1000},
-    {"PID_KD",                          CALIB_ID_PID_KD,                          TIPO_S16_X1000},
+    {"TASA_LLENADO_PSI_S",              CALIB_ID_TASA_LLENADO_PSI_S,              TIPO_X100},
     {"SERVO_PULSO_MIN",                 CALIB_ID_SERVO_PULSO_MIN,                 TIPO_U16_RAW},
     {"SERVO_PULSO_MAX",                 CALIB_ID_SERVO_PULSO_MAX,                 TIPO_U16_RAW},
     {"TIMEOUT_SIN_COMANDO_S",           CALIB_ID_TIMEOUT_SIN_COMANDO_S,           TIPO_U16_RAW},
@@ -58,8 +58,11 @@ static const ComandoSerial_Descriptor_t TABLA[] = {
     {"RESET_REMOTO",                    CALIB_ID_RESET_REMOTO,                    TIPO_COMANDO},
     {"PRESION_OBJETIVO",                CALIB_ID_PRESION_OBJETIVO,                TIPO_X10},
     {"TASA_MAX_CAMBIO_RPM_LLENADO_S",   CALIB_ID_TASA_MAX_CAMBIO_RPM_LLENADO_S,   TIPO_X10},
-    {"PRESION_GANANCIA_RPM",            CALIB_ID_PRESION_GANANCIA_RPM,            TIPO_S16_X100},
-    {"PRESION_OFFSET_RPM",              CALIB_ID_PRESION_OFFSET_RPM,              TIPO_X10},
+    {"PRESION_REMOTO_PID_KP",           CALIB_ID_PRESION_REMOTO_PID_KP,           TIPO_S16_X100},
+    {"PRESION_REMOTO_PID_KI",           CALIB_ID_PRESION_REMOTO_PID_KI,           TIPO_S16_X1000},
+    {"PRESION_PID_KP",                  CALIB_ID_PRESION_PID_KP,                  TIPO_S16_X100},
+    {"PRESION_PID_KI",                  CALIB_ID_PRESION_PID_KI,                  TIPO_S16_X1000},
+    {"PRESION_OBJETIVO_REMOTO",         CALIB_ID_PRESION_OBJETIVO_REMOTO,         TIPO_X10},
 };
 #define TABLA_CANTIDAD (sizeof(TABLA) / sizeof(TABLA[0]))
 
@@ -135,6 +138,9 @@ static const char *EstadoTexto(CalibFlash_ProtocoloStatus_t status)
         case CALIB_STATUS_STORAGE_ERROR:          return "STORAGE_ERROR";
         case CALIB_STATUS_APPLY_ERROR:            return "APPLY_ERROR";
         case CALIB_STATUS_REJECTED_ENGINE_RUNNING:return "REJECTED_ENGINE_RUNNING";
+        case CALIB_STATUS_REJECTED_ENGINE_STOPPED:return "REJECTED_ENGINE_STOPPED";
+        case CALIB_STATUS_REJECTED_OBJETIVO_REMOTO_NO_CONFIGURADO:
+            return "REJECTED_OBJETIVO_REMOTO_NO_CONFIGURADO";
         default:                                  return "?";
     }
 }

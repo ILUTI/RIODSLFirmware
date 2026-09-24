@@ -38,7 +38,7 @@
  *
  * ⚠️ RECONSTRUIDO 2026-09-24: este archivo se perdió (revertido a una
  * versión vieja de git, probablemente por un "Discard Changes" desde
- * el IDE que afectó a todo Core/Inc/*.h) mientras el resto del
+ * el IDE que afecto a todo Core/Inc header) mientras el resto del
  * proyecto (los .c, README.md) seguía con todo el trabajo del
  * 2026-09-23 intacto. Reconstruido cruzando cada ID/función contra
  * Core/Src/calibracion_flash.c (que sí quedó intacto) y contra el

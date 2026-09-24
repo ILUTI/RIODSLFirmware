@@ -51,8 +51,8 @@ extern "C" {
 #define RAK3172_RX_BUFFER_SIZE        128U
 
 /* Tamaño máximo de un comando AT a transmitir (incluye "AT+...\r\n").
- * ⚠️ El uplink LIVE de 27 bytes en hex ocupa 54 caracteres + "AT+SEND=" +
- * FPort + ":" + "\r\n" (~66-70 bytes) -- 96U alcanza con margen, pero si
+ * ⚠️ El uplink LIVE de 28 bytes en hex ocupa 56 caracteres + "AT+SEND=" +
+ * FPort + ":" + "\r\n" (~68-72 bytes) -- 96U alcanza con margen, pero si
  * se agregan más campos al payload en el futuro, revisar este tamaño. */
 #define RAK3172_TX_BUFFER_SIZE        96U
 
@@ -186,11 +186,11 @@ bool RAK3172_GetUltimaRespuesta(char *destino, uint32_t tamDestino);
 bool RAK3172_EnviarRPM(float rpm);
 
 /**
- * Arma y envía el uplink LIVE extendido (27 bytes) del nodo motor:
+ * Arma y envía el uplink LIVE extendido (28 bytes) del nodo motor:
  * motorIdNumeric + RPM + presión + estado + fecha/hora + inicio de
- * operación + segundos transcurridos + lat/lon. Ver decoder.py del
- * lado AWS (_decodificar_live()) para el layout exacto de offsets --
- * cualquier cambio acá debe reflejarse allá.
+ * operación + segundos transcurridos + lat/lon + codigoAlerta. Ver
+ * decoder.py del lado AWS (_decodificar_live()) para el layout exacto
+ * de offsets -- cualquier cambio acá debe reflejarse allá.
  *
  * @param motorIdNumeric           Numérico del nodo (ej. 1 -> "DSL-0001").
  * @param rpm                      RPM actual.
@@ -206,13 +206,21 @@ bool RAK3172_EnviarRPM(float rpm);
  * @param segundosTranscurridos    Segundos desde inicioOperacionLocal.
  * @param latitud                  Latitud fija del sitio (sin GPS aún).
  * @param longitud                 Longitud fija del sitio (sin GPS aún).
+ * @param codigoAlerta             Snapshot de la alerta vigente en el
+ *                                 momento del envío (0=sin alerta, ver
+ *                                 ALERTA_* en main.c). En uplinks
+ *                                 disparados por un evento de alerta,
+ *                                 usar CalibFlash_ForzarReporte() para
+ *                                 que el timestamp del uplink coincida
+ *                                 con el momento del evento.
  * @return true si se pudo encolar el comando AT+SEND correspondiente.
  */
 bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
                                uint8_t estado, uint32_t fechaHoraLocal,
                                uint32_t inicioOperacionLocal,
                                uint32_t segundosTranscurridos,
-                               float latitud, float longitud);
+                               float latitud, float longitud,
+                               uint8_t codigoAlerta);
 
 /**
  * Arma y envía el Application ACK del protocolo Quick-Set (4 bytes:

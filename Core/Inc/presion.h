@@ -40,8 +40,17 @@ extern "C" {
 
 /* ==================== CONFIGURACION DEL CIRCUITO ==================== */
 
-/* Tension de referencia del ADC (VDDA del G431). */
-#define PRESION_VREF_ADC_V            3.3f
+/* Tension de referencia del ADC (VDDA del G431) usada como arranque,
+ * antes de la primera calibracion real via VREFINT -- ver
+ * PRESION_VREFINT_INTERVALO_MS y Presion_GetVdda() mas abajo. El valor
+ * medido real (Presion_GetVdda()) reemplaza esto en cuanto corre
+ * Presion_Init(). */
+#define PRESION_VREF_ADC_V_DEFAULT    3.3f
+
+/* Intervalo de refresco de la medicion de VDDA via VREFINT (ms) --
+ * VDDA varia lento (temperatura/carga de la fuente), no hace falta
+ * medirlo en cada vuelta del loop; ver ActualizarVdda() en presion.c. */
+#define PRESION_VREFINT_INTERVALO_MS  10000U
 
 /* Resolucion del ADC1 (12 bits, ver ADC1.Init.Resolution en el .ioc). */
 #define PRESION_ADC_CUENTAS_MAX       4095.0f
@@ -106,6 +115,12 @@ float Presion_GetCorrienteMa(void);
  * ultimo valor filtrado valido (no se actualiza con lecturas en falla).
  */
 bool Presion_SensorValido(void);
+
+/** VDDA real medido via VREFINT (voltios), refrescado cada
+ * PRESION_VREFINT_INTERVALO_MS -- lo reutiliza presion_voltaje.c
+ * (hadc2) para no duplicar la logica de VREFINT, ya que VDDA es el
+ * mismo riel fisico para ambos ADC. */
+float Presion_GetVdda(void);
 
 #ifdef __cplusplus
 }

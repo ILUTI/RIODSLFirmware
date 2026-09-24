@@ -15,12 +15,16 @@
  * máquina de estados Modo 0/1/2 (ver README sección 4.3) según la
  * presión, sin que este módulo tenga que cambiar.
  *
- * Ganancias (PID_KP/KI/KD) vienen de calibracion_flash.h -- mientras
+ * Ganancias (PID_KP/KI) vienen de calibracion_flash.h -- mientras
  * no se sintonicen en el motor real (ver README sección 9, método de
  * ganancia última / Ziegler-Nichols en lazo cerrado), quedan en sus
- * valores default (Kp=1.0, Ki=0, Kd=0), suficientes para validar que
+ * valores default (Kp=1.0, Ki=0), suficientes para validar que
  * el lazo completo mueve el servo en la dirección correcta, no para
  * un control ya afinado.
+ *
+ * Solo P+I (sin derivativo) -- PID_KD se eliminó del protocolo
+ * 2026-09-23: el ruido de RPM lo hacía inútil en la práctica (ver
+ * README sección 9).
  */
 
 #ifndef PID_H
@@ -33,17 +37,17 @@ extern "C" {
 #include <stdint.h>
 
 /**
- * Resetea el estado interno (integral, error anterior, ancla de
- * tiempo). Llamar siempre en el flanco de entrada a "PID activo" --
- * si el lazo llevaba rato sin correr, el primer cálculo después de un
- * Init usa un dt chico en vez de uno inflado por el tiempo inactivo.
+ * Resetea el estado interno (integral, ancla de tiempo). Llamar
+ * siempre en el flanco de entrada a "PID activo" -- si el lazo
+ * llevaba rato sin correr, el primer cálculo después de un Init usa
+ * un dt chico en vez de uno inflado por el tiempo inactivo.
  */
 void PID_Init(void);
 
 /**
  * Calcula la salida del lazo para este ciclo, en µs directos, ya
  * recortada contra SERVO_PULSO_MIN/MAX (vía CalibFlash). El paso de
- * integración/derivación se calcula por tiempo real transcurrido
+ * integración se calcula por tiempo real transcurrido
  * (HAL_GetTick()), no por conteo de llamadas.
  *
  * @param setpointRpm  RPM objetivo (el llamador es responsable de
