@@ -69,6 +69,7 @@ static const ComandoSerial_Descriptor_t TABLA[] = {
 static UART_HandleTypeDef *s_huart;
 static char     s_linea[COMANDO_SERIAL_LINEA_MAX];
 static uint8_t  s_indice;
+static uint8_t  s_rxByte;
 
 static const ComandoSerial_Descriptor_t *BuscarDescriptor(const char *nombre)
 {
@@ -192,31 +193,57 @@ void ComandoSerial_Init(UART_HandleTypeDef *huart)
 {
     s_huart = huart;
     s_indice = 0U;
+    HAL_UART_Receive_IT(s_huart, &s_rxByte, 1U);
 }
 
 void ComandoSerial_Update(void)
 {
-    /* Sondeo directo de la bandera RXNE (sin bloquear, sin IT/DMA) --
-     * un operador tipeando a mano nunca llega a saturar esto; leer el
-     * registro de datos limpia la bandera por hardware. */
-    while (__HAL_UART_GET_FLAG(s_huart, UART_FLAG_RXNE)) {
-        char c = (char)(s_huart->Instance->RDR & 0xFFU);
+    /* Sin trabajo propio -- ver ComandoSerial_RxCpltCallback(). */
+}
 
-        if (c == '\r' || c == '\n') {
-            printf("\r\n");
-            if (s_indice > 0U) {
-                s_linea[s_indice] = '\0';
-                ProcesarLinea(s_linea);
-                s_indice = 0U;
-            }
-        } else if (c == '\b' || c == 0x7F) {
-            if (s_indice > 0U) {
-                s_indice--;
-                printf("\b \b");
-            }
-        } else if (s_indice < (COMANDO_SERIAL_LINEA_MAX - 1U)) {
-            s_linea[s_indice++] = c;
-            HAL_UART_Transmit(s_huart, (uint8_t *)&c, 1U, 10U); /* eco local */
+void ComandoSerial_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    char c = (char)s_rxByte;
+
+    if (c == '\r' || c == '\n') {
+        printf("\r\n");
+        if (s_indice > 0U) {
+            s_linea[s_indice] = '\0';
+            ProcesarLinea(s_linea);
+            s_indice = 0U;
         }
+    } else if (c == '\b' || c == 0x7F) {
+        if (s_indice > 0U) {
+            s_indice--;
+            printf("\b \b");
+        }
+    } else if (s_indice < (COMANDO_SERIAL_LINEA_MAX - 1U)) {
+        s_linea[s_indice++] = c;
+        /* Eco local con timeout 0 (no bloqueante de verdad) -- esto
+         * corre DENTRO de la ISR de LPUART1, que comparte prioridad con
+         * TIM2 (captura de RPM, ver .ioc: todo a 0:0 con
+         * PriorityGroup=NVIC_PRIORITYGROUP_4, sin preferencia entre
+         * ellas) -- un timeout largo acá demoraria la captura de un
+         * pulso de RPM si coincide con esta ISR. Si el UART no está
+         * listo de inmediato (caso raro, solo con TX ya ocupado por el
+         * printf() de telemetría), se descarta ese carácter de eco --
+         * es cosmético (el operador ya tipeó el caracter, solo no lo ve
+         * reflejado en su terminal), nunca afecta qué se guarda en
+         * s_linea ni qué comando se procesa. */
+        HAL_UART_Transmit(s_huart, (uint8_t *)&c, 1U, 0U);
     }
+
+    /* Siempre rearmar, incluso si la línea se descartó por estar llena
+     * -- sin esto, un solo byte recibido deja el UART sordo para
+     * siempre (mismo motivo que RAK3172_ErrorCallback/GPS_ErrorCallback
+     * rearman su DMA circular tras un error). */
+    HAL_UART_Receive_IT(huart, &s_rxByte, 1U);
+}
+
+void ComandoSerial_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (s_huart == NULL || huart->Instance != s_huart->Instance) {
+        return;
+    }
+    HAL_UART_Receive_IT(s_huart, &s_rxByte, 1U);
 }

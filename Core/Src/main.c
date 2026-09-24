@@ -2837,6 +2837,17 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     }
 }
 
+/* Comando manual por serial (LPUART1, ver comando_serial.h) -- lee un
+ * byte a la vez por interrupción en vez de polling, para no perder
+ * caracteres mientras __io_putchar()/printf() satura el mismo UART con
+ * transmisiones bloqueantes (ver ComandoSerial_RxCpltCallback). */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == LPUART1) {
+        ComandoSerial_RxCpltCallback(huart);
+    }
+}
+
 /* Sin este callback, un solo error de UART (overrun/framing/ruido --
  * ej. el USB-a-PC metiendo ruido al plano de tierra, ver hallazgos de
  * hardware) deja la recepcion por DMA de esa UART muerta para el
@@ -2852,6 +2863,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         RAK3172_ErrorCallback(huart);
     } else if (huart->Instance == USART2) {
         GPS_ErrorCallback(huart);
+    } else if (huart->Instance == LPUART1) {
+        ComandoSerial_ErrorCallback(huart);
     }
 }
 /* USER CODE END 4 */
