@@ -355,7 +355,8 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
                                uint8_t estado, uint32_t fechaHoraLocal,
                                uint32_t inicioOperacionLocal,
                                uint32_t segundosTranscurridos,
-                               float latitud, float longitud)
+                               float latitud, float longitud,
+                               uint8_t codigoAlerta)
 {
     if (rpm < 0.0f) { rpm = 0.0f; }
     if (rpm > 6553.5f) { rpm = 6553.5f; }
@@ -367,7 +368,7 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
     int32_t latRaw = (int32_t)(latitud * 10000000.0f);
     int32_t lonRaw = (int32_t)(longitud * 10000000.0f);
 
-    /* Layout de 27 bytes -- DEBE coincidir byte a byte con
+    /* Layout de 28 bytes -- DEBE coincidir byte a byte con
      * decoder.py::_decodificar_live() del lado AWS. Cualquier cambio
      * acá tiene que reflejarse allá, y viceversa:
      *   0-1   motorIdNumeric   uint16 BE
@@ -379,8 +380,9 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
      *   15-18 segundosTranscurridos uint32 BE
      *   19-22 latitud          int32 BE, x10,000,000
      *   23-26 longitud         int32 BE, x10,000,000
+     *   27    codigoAlerta     uint8 (0=sin alerta, ver ALERTA_* en main.c)
      */
-    uint8_t payload[27];
+    uint8_t payload[28];
     payload[0]  = (uint8_t)((motorIdNumeric >> 8) & 0xFFU);
     payload[1]  = (uint8_t)(motorIdNumeric & 0xFFU);
     payload[2]  = (uint8_t)((rpmRaw >> 8) & 0xFFU);
@@ -408,9 +410,10 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
     payload[24] = (uint8_t)(((uint32_t)lonRaw >> 16) & 0xFFU);
     payload[25] = (uint8_t)(((uint32_t)lonRaw >> 8) & 0xFFU);
     payload[26] = (uint8_t)((uint32_t)lonRaw & 0xFFU);
+    payload[27] = codigoAlerta;
 
-    char payloadHex[27 * 2 + 1];
-    for (uint8_t i = 0; i < 27U; i++) {
+    char payloadHex[28 * 2 + 1];
+    for (uint8_t i = 0; i < 28U; i++) {
         snprintf(&payloadHex[i * 2], 3, "%02X", payload[i]);
     }
 

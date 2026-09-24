@@ -29,6 +29,10 @@ from pathlib import Path
 import numpy as np
 
 PID_TEST_PREFIX = "PID_TEST,"
+PRESION_PID_TEST_PREFIX = "PRESION_PID_TEST,"
+REMOTO_PID_TEST_PREFIX = "REMOTO_PID_TEST,"
+GANANCIA_CAL_PASO_PREFIX = "GANANCIA_CAL,PASO,"
+PRESION_GANANCIA_CAL_PASO_PREFIX = "PRESION_GANANCIA_CAL,PASO,"
 
 
 # ============================================================================
@@ -74,6 +78,210 @@ def parse_pid_test_log(path):
         rpm=np.asarray(rpm, dtype=float),
         pulso_us=np.asarray(pulso, dtype=float),
     )
+
+
+@dataclass
+class PresionLogData:
+    t_s: np.ndarray         # segundos relativos al primer dato
+    objetivo: np.ndarray    # PRESION_OBJETIVO vigente en cada muestra (psi)
+    presion: np.ndarray     # presion medida (psi)
+    setpoint_rpm: np.ndarray  # salida del lazo externo (RPM, ya con piso RPM_MIN)
+    rpm: np.ndarray         # RPM filtrada real (lazo interno)
+
+
+def parse_presion_pid_test_log(path):
+    """Extrae las lineas 'PRESION_PID_TEST,<ms>,<PRESION_OBJETIVO>,
+    <presion_medida>,<setpoint_rpm_crudo>,<rpm_filtrada>' -- mismo
+    formato/cadencia (200ms) que PID_TEST pero del lazo EXTERNO
+    (presion -> RPM, ver presion_pid.c), gateado en CONTROL_HABILITADO=7
+    && MODO=CALIB_MODO_PRESION_LOCAL (ver main.c)."""
+    t_ms, objetivo, presion, setpoint_rpm, rpm = [], [], [], [], []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for linea in f:
+            linea = linea.strip()
+            if not linea.startswith(PRESION_PID_TEST_PREFIX):
+                continue
+            partes = linea.split(",")
+            if len(partes) != 5 + 1:
+                continue
+            try:
+                t_ms.append(int(partes[1]))
+                objetivo.append(float(partes[2]))
+                presion.append(float(partes[3]))
+                setpoint_rpm.append(float(partes[4]))
+                rpm.append(float(partes[5]))
+            except ValueError:
+                continue
+
+    if not t_ms:
+        raise ValueError(f"No se encontraron lineas '{PRESION_PID_TEST_PREFIX}' validas en {path}")
+
+    t_ms_arr = np.asarray(t_ms, dtype=float)
+    return PresionLogData(
+        t_s=(t_ms_arr - t_ms_arr[0]) / 1000.0,
+        objetivo=np.asarray(objetivo, dtype=float),
+        presion=np.asarray(presion, dtype=float),
+        setpoint_rpm=np.asarray(setpoint_rpm, dtype=float),
+        rpm=np.asarray(rpm, dtype=float),
+    )
+
+
+@dataclass
+class RemotoLogData:
+    t_s: np.ndarray        # segundos relativos al primer dato (desde HAL_GetTick() ms)
+    set_rpm: np.ndarray    # SET_RPM mandado a mano (MODO=3, lazo abierto)
+    presion: np.ndarray    # PRESION reportada por el aspersor remoto (psi)
+
+
+def parse_remoto_pid_test_log(path):
+    """Extrae las lineas 'REMOTO_PID_TEST,<ms>,<SET_RPM>,<presion_remota>'
+    -- a diferencia de PID_TEST/PRESION_PID_TEST, estas lineas NO salen
+    cada 200ms sino solo cuando llega un reporte nuevo del aspersor
+    remoto (ver main.c) -- por eso el espaciado entre 't_s' consecutivos
+    de este log es MUY irregular (segundos a mas de 20 minutos), a
+    diferencia de los otros dos parsers de este archivo."""
+    t_ms, set_rpm, presion = [], [], []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for linea in f:
+            linea = linea.strip()
+            if not linea.startswith(REMOTO_PID_TEST_PREFIX):
+                continue
+            partes = linea.split(",")
+            if len(partes) != 3 + 1:
+                continue
+            try:
+                t_ms.append(int(partes[1]))
+                set_rpm.append(float(partes[2]))
+                presion.append(float(partes[3]))
+            except ValueError:
+                continue
+
+    if not t_ms:
+        raise ValueError(f"No se encontraron lineas '{REMOTO_PID_TEST_PREFIX}' validas en {path}")
+
+    t_ms_arr = np.asarray(t_ms, dtype=float)
+    return RemotoLogData(
+        t_s=(t_ms_arr - t_ms_arr[0]) / 1000.0,
+        set_rpm=np.asarray(set_rpm, dtype=float),
+        presion=np.asarray(presion, dtype=float),
+    )
+
+
+def parse_ganancia_cal_log(path):
+    """Extrae las lineas 'GANANCIA_CAL,PASO,pulso=<us>,rpm=<rpm>,salto=<rpm>'
+    del barrido en lazo abierto de CONTROL_HABILITADO=6 (ver main.c) --
+    devuelve (pulso_us, rpm) ordenados por pulso, listos para
+    peor_caso_K_ganancia_cal()."""
+    pulso, rpm = [], []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for linea in f:
+            linea = linea.strip()
+            if not linea.startswith(GANANCIA_CAL_PASO_PREFIX):
+                continue
+            campos = {}
+            for parte in linea.split(",")[2:]:
+                if "=" not in parte:
+                    continue
+                clave, _, valor = parte.partition("=")
+                campos[clave] = valor
+            try:
+                pulso.append(float(campos["pulso"]))
+                rpm.append(float(campos["rpm"]))
+            except (KeyError, ValueError):
+                continue
+
+    if not pulso:
+        raise ValueError(f"No se encontraron lineas '{GANANCIA_CAL_PASO_PREFIX}' validas en {path}")
+
+    orden = np.argsort(pulso)
+    return np.asarray(pulso)[orden], np.asarray(rpm)[orden]
+
+
+def peor_caso_K_ganancia_cal(pulso_us, rpm):
+    """Ganancia LOCAL (RPM por microsegundo) entre cada par de pasos
+    consecutivos del barrido, y el peor caso (maximo) -- mismo analisis
+    que se hizo a mano en README seccion 9 ('el K real se tomo del
+    mapeo de curva de ganancia... K=6.3 peor caso') para no repetir un
+    Kp/Ki que funciona en una zona del rango pero oscila en otra."""
+    if len(pulso_us) < 2:
+        raise ValueError("Hacen falta al menos 2 pasos del barrido para calcular una ganancia local.")
+    d_pulso = np.diff(pulso_us)
+    d_rpm = np.diff(rpm)
+    validos = d_pulso > 0
+    if not np.any(validos):
+        raise ValueError("El barrido no tiene pasos de pulso crecientes validos.")
+    k_local = d_rpm[validos] / d_pulso[validos]
+    idx_peor = int(np.argmax(k_local))
+    # pulso_us tiene 1 elemento mas que d_pulso/d_rpm/validos (son diferencias
+    # entre pasos consecutivos) -- pulso_us[:-1] es el pulso de INICIO de cada
+    # paso, alineado 1 a 1 con 'validos' para poder indexar con la misma mascara.
+    pulso_inicio_paso = pulso_us[:-1]
+    return {
+        "k_worst": float(k_local[idx_peor]),
+        "k_min": float(np.min(k_local)),
+        "k_max": float(np.max(k_local)),
+        "pulso_en_peor": float(pulso_inicio_paso[validos][idx_peor]),
+        "n_pasos": len(pulso_us),
+    }
+
+
+def parse_presion_ganancia_cal_log(path):
+    """Extrae las lineas 'PRESION_GANANCIA_CAL,PASO,rpm=<rpm>,psi=<psi>,
+    salto=<psi>' del barrido en lazo abierto de CONTROL_HABILITADO=11 (ver
+    main.c) -- devuelve (rpm, psi) ordenados por rpm, listos para
+    peor_caso_K_presion_ganancia_cal(). Mismo formato/proposito que
+    parse_ganancia_cal_log() de arriba, pero para el PID#2 (presion local)
+    en vez del PID#1."""
+    rpm, psi = [], []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for linea in f:
+            linea = linea.strip()
+            if not linea.startswith(PRESION_GANANCIA_CAL_PASO_PREFIX):
+                continue
+            campos = {}
+            for parte in linea.split(",")[2:]:
+                if "=" not in parte:
+                    continue
+                clave, _, valor = parte.partition("=")
+                campos[clave] = valor
+            try:
+                rpm.append(float(campos["rpm"]))
+                psi.append(float(campos["psi"]))
+            except (KeyError, ValueError):
+                continue
+
+    if not rpm:
+        raise ValueError(f"No se encontraron lineas '{PRESION_GANANCIA_CAL_PASO_PREFIX}' validas en {path}")
+
+    orden = np.argsort(rpm)
+    return np.asarray(rpm)[orden], np.asarray(psi)[orden]
+
+
+def peor_caso_K_presion_ganancia_cal(rpm, psi):
+    """Ganancia LOCAL (PSI por RPM) entre cada par de pasos consecutivos del
+    barrido de CONTROL_HABILITADO=11, y el peor caso (maximo) -- mismo
+    analisis que peor_caso_K_ganancia_cal() de arriba, pero para la relacion
+    RPM->presion del PID#2 en vez de pulso->RPM del PID#1."""
+    if len(rpm) < 2:
+        raise ValueError("Hacen falta al menos 2 pasos del barrido para calcular una ganancia local.")
+    d_rpm = np.diff(rpm)
+    d_psi = np.diff(psi)
+    validos = d_rpm > 0
+    if not np.any(validos):
+        raise ValueError("El barrido no tiene pasos de RPM crecientes validos.")
+    k_local = d_psi[validos] / d_rpm[validos]
+    idx_peor = int(np.argmax(k_local))
+    # rpm tiene 1 elemento mas que d_rpm/d_psi/validos (son diferencias entre
+    # pasos consecutivos) -- rpm[:-1] es el RPM de INICIO de cada paso,
+    # alineado 1 a 1 con 'validos' para poder indexar con la misma mascara.
+    rpm_inicio_paso = rpm[:-1]
+    return {
+        "k_worst": float(k_local[idx_peor]),
+        "k_min": float(np.min(k_local)),
+        "k_max": float(np.max(k_local)),
+        "rpm_en_peor": float(rpm_inicio_paso[validos][idx_peor]),
+        "n_pasos": len(rpm),
+    }
 
 
 def cmd_capture(args):
@@ -123,88 +331,142 @@ class StepIdentification:
     plant: PlantModel
 
 
-def _detectar_escalon(data: LogData, salto_minimo_rpm=20.0):
-    diffs = np.diff(data.set_rpm)
+def _suavizar(resp, t_s, ventana_s):
+    """Promedio movil centrado sobre 'resp', con ventana en segundos
+    convertida a muestras via el dt tipico del log (mediana de np.diff,
+    robusta a algun hueco/linea intercalada perdida). Se usa SOLO para
+    decidir 'cuando se movio'/'cuando llego al 63%' en
+    _identify_step_generico() -- la deteccion de escalon en lazo cerrado
+    compara una lectura contra un umbral chico (ej. 1 PSI), y con un
+    sensor ruidoso (ver README hardware, rizado del alternador acoplado
+    al GND) una sola muestra cruda puede cruzar ese umbral por ruido
+    puro, mucho antes o despues del movimiento real -- encontrado en
+    campo 2026-09-21 con el lazo de presion (tau salio ~0.001s, L salio
+    14.2s, ninguno de los dos creible). baseline/final NO se suavizan
+    aca porque ya salen de un promedio sobre pre_window_s/settle_window_s
+    (ver _identify_step_generico), que es igual de robusto."""
+    if len(t_s) < 3:
+        return resp
+    dt_tipico = float(np.median(np.diff(t_s)))
+    if dt_tipico <= 0:
+        return resp
+    n = max(1, int(round(ventana_s / dt_tipico)))
+    if n <= 1:
+        return resp
+    kernel = np.ones(n) / n
+    # 'same' + padding por reflexion en los bordes para no perder muestras
+    # ni sesgar el arranque/final con el borde implicito de np.convolve.
+    pad = n // 2
+    resp_pad = np.pad(resp, pad, mode="edge")
+    suavizado = np.convolve(resp_pad, kernel, mode="same")
+    return suavizado[pad:pad + len(resp)]
+
+
+def _detectar_escalon_generico(t_s, cmd, salto_minimo, nombre_cmd="setpoint"):
+    diffs = np.diff(cmd)
     if len(diffs) == 0:
         raise ValueError("El log no tiene suficientes muestras para detectar un escalon.")
     idx = int(np.argmax(np.abs(diffs)))
-    if abs(diffs[idx]) < salto_minimo_rpm:
+    if abs(diffs[idx]) < salto_minimo:
         raise ValueError(
-            f"No se detecto un escalon claro en SET_RPM (mayor salto encontrado: "
-            f"{diffs[idx]:.1f} RPM, minimo esperado {salto_minimo_rpm}) -- "
+            f"No se detecto un escalon claro en {nombre_cmd} (mayor salto encontrado: "
+            f"{diffs[idx]:.2f}, minimo esperado {salto_minimo}) -- "
             "especificar --step-time-s a mano si el escalon es mas chico."
         )
     return idx + 1  # indice de la primera muestra DESPUES del escalon
 
 
-def identify_step(data: LogData, kp_used, step_time_s=None,
-                   pre_window_s=2.0, settle_window_s=3.0,
-                   umbral_movimiento_rpm=5.0):
-    """Identifica (K, tau, L) de la planta real a partir de un escalon de
-    SET_RPM capturado en lazo cerrado con ganancia Kp=kp_used conocida
-    (Ki=Kd=0 en la prueba, ver README seccion 9)."""
+def _identify_step_generico(t_s, cmd, resp, kp_used, step_time_s,
+                             pre_window_s, settle_window_s, umbral_movimiento,
+                             salto_minimo, nombre_cmd, suavizado_s=0.0,
+                             umbral_movimiento_frac=0.2):
+    """Nucleo compartido de identificacion FOPDT en lazo cerrado (Kp puro,
+    Ki=Kd=0 durante la prueba) -- usado tanto por identify_step() (lazo
+    interno RPM<-servo) como por identify_step_presion() (lazo externo
+    presion<-RPM). 'cmd' es el setpoint mandado (SET_RPM u OBJETIVO),
+    'resp' es la variable controlada real (RPM o presion).
+
+    'suavizado_s' (segundos, 0 = sin suavizar) aplica un promedio movil
+    a 'resp' (ver _suavizar()) ANTES de decidir 'cuando se movio' y
+    'cuando cruzo el 63%' -- baseline_resp/final_resp siguen calculados
+    sobre 'resp' crudo (ya son un promedio sobre toda la ventana, no
+    hace falta suavizarlos de nuevo)."""
     if kp_used <= 0:
         raise ValueError("kp_used debe ser > 0 (es la Kp usada durante la prueba real).")
 
     if step_time_s is None:
-        step_idx = _detectar_escalon(data)
-        step_time_s = float(data.t_s[step_idx])
+        step_idx = _detectar_escalon_generico(t_s, cmd, salto_minimo, nombre_cmd)
+        step_time_s = float(t_s[step_idx])
 
-    pre_mask = (data.t_s >= step_time_s - pre_window_s) & (data.t_s < step_time_s)
+    pre_mask = (t_s >= step_time_s - pre_window_s) & (t_s < step_time_s)
     if not np.any(pre_mask):
         raise ValueError(
             "No hay suficientes datos ANTES del escalon -- capturar mas tiempo "
-            "en reposo antes de mandar SET_RPM (pre_window_s="
-            f"{pre_window_s}s)."
+            f"en reposo antes de mandar el escalon (pre_window_s={pre_window_s}s)."
         )
-    baseline_rpm = float(np.mean(data.rpm[pre_mask]))
-    baseline_set = float(np.mean(data.set_rpm[pre_mask]))
+    baseline_resp = float(np.mean(resp[pre_mask]))
+    baseline_cmd = float(np.mean(cmd[pre_mask]))
 
-    post_mask = data.t_s >= step_time_s
-    settle_mask = post_mask & (data.t_s >= data.t_s[-1] - settle_window_s)
+    post_mask = t_s >= step_time_s
+    settle_mask = post_mask & (t_s >= t_s[-1] - settle_window_s)
     if not np.any(settle_mask):
         raise ValueError(
             "No hay suficientes datos AL FINAL del log -- capturar hasta que "
-            f"la RPM se estabilice (settle_window_s={settle_window_s}s)."
+            f"la respuesta se estabilice (settle_window_s={settle_window_s}s)."
         )
-    final_rpm = float(np.mean(data.rpm[settle_mask]))
-    final_set = float(np.mean(data.set_rpm[settle_mask]))
+    final_resp = float(np.mean(resp[settle_mask]))
+    final_cmd = float(np.mean(cmd[settle_mask]))
 
-    delta_set_rpm = final_set - baseline_set
-    delta_rpm_ss = final_rpm - baseline_rpm
+    delta_cmd = final_cmd - baseline_cmd
+    delta_resp_ss = final_resp - baseline_resp
 
-    if delta_set_rpm == 0:
-        raise ValueError("delta_SET_RPM salio 0 -- no se detecto un cambio real de setpoint.")
+    if delta_cmd == 0:
+        raise ValueError(f"delta_{nombre_cmd} salio 0 -- no se detecto un cambio real de setpoint.")
 
-    G_cl = delta_rpm_ss / delta_set_rpm
+    G_cl = delta_resp_ss / delta_cmd
     if not (0.0 < G_cl < 0.999):
         raise ValueError(
             f"G_cl={G_cl:.3f} fuera del rango esperado (0,1) para un lazo P puro "
-            "estable -- revisar los datos (¿la RPM realmente subio hacia el "
-            "nuevo setpoint, sin haber saturado el servo?)."
+            "estable -- revisar los datos (¿la respuesta realmente se movio hacia "
+            "el nuevo setpoint, sin haber saturado, y con Ki=0 durante la prueba?)."
         )
 
-    moved = post_mask & (np.abs(data.rpm - baseline_rpm) > umbral_movimiento_rpm)
+    resp_suave = _suavizar(resp, t_s, suavizado_s) if suavizado_s > 0.0 else resp
+
+    # Umbral EFECTIVO = el mayor entre el piso absoluto (umbral_movimiento,
+    # para no disparar con puro ruido cuando delta_resp_ss es chico) y una
+    # fraccion del cambio real medido (umbral_movimiento_frac) -- un piso
+    # fijo solo tiene sentido para lazos con delta grande (RPM); en el
+    # lazo de presion, con control P puro, delta_resp_ss suele ser chico
+    # (ej. 1.36 PSI de un escalon de 5 PSI en OBJETIVO, G_cl<1) y un piso
+    # fijo de 1.0 PSI terminaba siendo ~75% del cambio total -- "se movio"
+    # se detectaba casi al final del transitorio real, no al principio,
+    # y eso indefinia L/tau (encontrado en campo 2026-09-21).
+    umbral_efectivo = max(umbral_movimiento, umbral_movimiento_frac * abs(delta_resp_ss))
+
+    moved = post_mask & (np.abs(resp_suave - baseline_resp) > umbral_efectivo)
     if not np.any(moved):
         raise ValueError(
-            "La RPM nunca se movio mas de umbral_movimiento_rpm tras el escalon "
-            "-- revisar los datos o bajar ese umbral."
+            f"La respuesta nunca se movio mas de {umbral_efectivo:.3f} tras el escalon "
+            "-- revisar los datos, bajar --umbral-movimiento/--umbral-movimiento-frac, "
+            "o bajar --suavizado-s si esta de mas (un suavizado muy largo puede diluir "
+            "un cambio chico)."
         )
-    t_movio = float(data.t_s[moved][0])
+    t_movio = float(t_s[moved][0])
     L_cl = max(t_movio - step_time_s, 0.0)
 
-    objetivo_63 = baseline_rpm + 0.632 * delta_rpm_ss
-    despues_de_moverse = data.t_s >= t_movio
-    if delta_rpm_ss > 0:
-        cruzo = despues_de_moverse & (data.rpm >= objetivo_63)
+    objetivo_63 = baseline_resp + 0.632 * delta_resp_ss
+    despues_de_moverse = t_s >= t_movio
+    if delta_resp_ss > 0:
+        cruzo = despues_de_moverse & (resp_suave >= objetivo_63)
     else:
-        cruzo = despues_de_moverse & (data.rpm <= objetivo_63)
+        cruzo = despues_de_moverse & (resp_suave <= objetivo_63)
     if not np.any(cruzo):
         raise ValueError(
-            "La RPM nunca llego al 63.2% del cambio total -- ¿la captura "
+            "La respuesta nunca llego al 63.2% del cambio total -- ¿la captura "
             "termino antes de que se estabilizara del todo?"
         )
-    t_63 = float(data.t_s[cruzo][0])
+    t_63 = float(t_s[cruzo][0])
     tau_cl = max(t_63 - t_movio, 1e-3)
 
     K = G_cl / (kp_used * (1.0 - G_cl))
@@ -212,33 +474,232 @@ def identify_step(data: LogData, kp_used, step_time_s=None,
     L = L_cl
 
     return StepIdentification(
-        step_time_s=step_time_s, delta_set_rpm=delta_set_rpm,
-        baseline_rpm=baseline_rpm, final_rpm=final_rpm,
-        delta_rpm_ss=delta_rpm_ss, G_cl=G_cl, L_cl=L_cl, tau_cl=tau_cl,
+        step_time_s=step_time_s, delta_set_rpm=delta_cmd,
+        baseline_rpm=baseline_resp, final_rpm=final_resp,
+        delta_rpm_ss=delta_resp_ss, G_cl=G_cl, L_cl=L_cl, tau_cl=tau_cl,
         kp_used=kp_used, plant=PlantModel(K=K, tau=tau, L=L),
     )
 
 
-def cmd_identify(args):
-    data = parse_pid_test_log(args.log)
-    resultado = identify_step(data, kp_used=args.kp, step_time_s=args.step_time_s)
+def identify_step(data: LogData, kp_used, step_time_s=None,
+                   pre_window_s=2.0, settle_window_s=3.0,
+                   umbral_movimiento_rpm=5.0, suavizado_s=0.0,
+                   umbral_movimiento_frac=0.2):
+    """Identifica (K, tau, L) del lazo INTERNO (motor+servo) a partir de un
+    escalon de SET_RPM capturado en lazo cerrado con ganancia Kp=kp_used
+    conocida (Ki=Kd=0 en la prueba, ver README seccion 9). El tacometro
+    es bastante menos ruidoso que el sensor de presion, por eso
+    suavizado_s por default es 0 (sin suavizar) -- subirlo si un log en
+    particular sale con L/tau poco creibles (ver identify_step_presion)."""
+    return _identify_step_generico(
+        data.t_s, data.set_rpm, data.rpm, kp_used, step_time_s,
+        pre_window_s, settle_window_s, umbral_movimiento_rpm,
+        salto_minimo=20.0, nombre_cmd="SET_RPM", suavizado_s=suavizado_s,
+        umbral_movimiento_frac=umbral_movimiento_frac)
 
-    print(f"Escalon detectado en t={resultado.step_time_s:.2f}s (log tiene {len(data.t_s)} muestras)")
-    print(f"  SET_RPM:      {resultado.baseline_rpm + resultado.delta_set_rpm - resultado.delta_set_rpm:.1f} "
-          f"-> delta={resultado.delta_set_rpm:.1f} RPM")
-    print(f"  RPM medida:   {resultado.baseline_rpm:.1f} -> {resultado.final_rpm:.1f} "
-          f"(delta_ss={resultado.delta_rpm_ss:.1f})")
+
+def identify_step_presion(data: PresionLogData, kp_used, step_time_s=None,
+                           pre_window_s=2.0, settle_window_s=3.0,
+                           umbral_movimiento_psi=0.3, suavizado_s=3.0,
+                           umbral_movimiento_frac=0.2):
+    """Identifica (K, tau, L) del lazo EXTERNO (presion -> RPM) a partir de
+    un escalon de PRESION_OBJETIVO capturado en lazo cerrado con ganancia
+    PRESION_PID_KP=kp_used conocida (PRESION_PID_KI=0 en la prueba --
+    mismo motivo que el lazo interno: con Ki activo el error de estado
+    estable se borra y la formula de K se indefine, ver README seccion 9).
+    K sale en PSI por RPM de correccion (delta sobre RPM_MIN).
+
+    suavizado_s=3.0 por default (a diferencia de identify_step): el
+    sensor de presion (PresionV, GPT203 sin acondicionar) tiene bastante
+    mas ruido que el tacometro, y la constante de tiempo real de este
+    lazo (~60-120s, confirmado en campo 2026-09-21) deja de sobra 3s de
+    margen para suavizar sin perder informacion real de la dinamica.
+
+    umbral_movimiento_psi bajado de 1.0 a 0.3 (2026-09-21): con control
+    P puro, delta_resp_ss suele ser chico (G_cl<1), y el piso absoluto
+    solo debe evitar disparar con puro ruido -- el umbral EFECTIVO real
+    (ver _identify_step_generico) termina dominado por
+    umbral_movimiento_frac de todas formas si el escalon es chico."""
+    return _identify_step_generico(
+        data.t_s, data.objetivo, data.presion, kp_used, step_time_s,
+        pre_window_s, settle_window_s, umbral_movimiento_psi,
+        salto_minimo=1.0, nombre_cmd="PRESION_OBJETIVO", suavizado_s=suavizado_s,
+        umbral_movimiento_frac=umbral_movimiento_frac)
+
+
+def _identify_step_abierto_generico(t_s, cmd, resp, step_time_s,
+                                      pre_window_s, settle_window_s, umbral_movimiento,
+                                      salto_minimo, nombre_cmd, suavizado_s=0.0,
+                                      umbral_movimiento_frac=0.2):
+    """Identificacion FOPDT en LAZO ABIERTO -- a diferencia de
+    _identify_step_generico() (usada por identify_step/identify_step_presion),
+    esta NO asume que hay un PID ya cerrado con una Kp conocida durante la
+    prueba: el 'cmd' mandado es directamente lo que se aplica a la planta
+    (ej. SET_RPM en MODO=3/MANUAL_BANCO), asi que la ganancia sale directo
+    de delta_resp_ss/delta_cmd, sin la transformacion lazo-cerrado->
+    lazo-abierto que usa la version de arriba (esa exige 0<G_cl<1, que
+    solo tiene sentido con realimentacion negativa ya activa).
+
+    Pensada para el lazo REMOTO (MODO=2): 'cmd'=SET_RPM, 'resp'=PRESION
+    remota, con pre_window_s/settle_window_s tipicamente en MINUTOS (no
+    segundos) porque el aspersor reporta con cadencia muy espaciada e
+    irregular (ver REMOTO_PID_TEST en main.c) -- cada muestra ya es un
+    reporte discreto y deliberado, no una lectura ADC ruidosa, por eso
+    suavizado_s default es 0 (sin suavizar), a diferencia de
+    identify_step_presion()."""
+    if step_time_s is None:
+        step_idx = _detectar_escalon_generico(t_s, cmd, salto_minimo, nombre_cmd)
+        step_time_s = float(t_s[step_idx])
+
+    pre_mask = (t_s >= step_time_s - pre_window_s) & (t_s < step_time_s)
+    if not np.any(pre_mask):
+        raise ValueError(
+            "No hay suficientes datos ANTES del escalon -- capturar mas tiempo "
+            f"en reposo antes de mandar el escalon (pre_window_s={pre_window_s}s), "
+            "o esperar a que llegue al menos un reporte remoto mas antes de probar."
+        )
+    baseline_resp = float(np.mean(resp[pre_mask]))
+    baseline_cmd = float(np.mean(cmd[pre_mask]))
+
+    post_mask = t_s >= step_time_s
+    settle_mask = post_mask & (t_s >= t_s[-1] - settle_window_s)
+    if not np.any(settle_mask):
+        raise ValueError(
+            "No hay suficientes datos AL FINAL del log -- capturar hasta que "
+            f"la presion remota se estabilice (settle_window_s={settle_window_s}s)."
+        )
+    final_resp = float(np.mean(resp[settle_mask]))
+    final_cmd = float(np.mean(cmd[settle_mask]))
+
+    delta_cmd = final_cmd - baseline_cmd
+    delta_resp_ss = final_resp - baseline_resp
+
+    if delta_cmd == 0:
+        raise ValueError(f"delta_{nombre_cmd} salio 0 -- no se detecto un cambio real de setpoint.")
+
+    K = delta_resp_ss / delta_cmd  # ganancia de planta EN LAZO ABIERTO, directa (sin transformar)
+
+    resp_suave = _suavizar(resp, t_s, suavizado_s) if suavizado_s > 0.0 else resp
+
+    umbral_efectivo = max(umbral_movimiento, umbral_movimiento_frac * abs(delta_resp_ss))
+
+    moved = post_mask & (np.abs(resp_suave - baseline_resp) > umbral_efectivo)
+    if not np.any(moved):
+        raise ValueError(
+            f"La presion remota nunca se movio mas de {umbral_efectivo:.3f} tras el "
+            "escalon -- revisar los datos, o bajar --umbral-movimiento/--umbral-movimiento-frac."
+        )
+    t_movio = float(t_s[moved][0])
+    L = max(t_movio - step_time_s, 0.0)
+
+    objetivo_63 = baseline_resp + 0.632 * delta_resp_ss
+    despues_de_moverse = t_s >= t_movio
+    if delta_resp_ss > 0:
+        cruzo = despues_de_moverse & (resp_suave >= objetivo_63)
+    else:
+        cruzo = despues_de_moverse & (resp_suave <= objetivo_63)
+    if not np.any(cruzo):
+        raise ValueError(
+            "La presion remota nunca llego al 63.2% del cambio total -- ¿la captura "
+            "termino antes de que se estabilizara del todo? con la cadencia tan lenta "
+            "del aspersor, puede hacer falta capturar mucho mas tiempo."
+        )
+    t_63 = float(t_s[cruzo][0])
+    tau = max(t_63 - t_movio, 1e-3)
+
+    return StepIdentification(
+        step_time_s=step_time_s, delta_set_rpm=delta_cmd,
+        baseline_rpm=baseline_resp, final_rpm=final_resp,
+        delta_rpm_ss=delta_resp_ss, G_cl=float("nan"), L_cl=L, tau_cl=tau,
+        kp_used=float("nan"), plant=PlantModel(K=K, tau=tau, L=L),
+    )
+
+
+def identify_step_remoto(data: RemotoLogData, step_time_s=None,
+                          pre_window_s=1800.0, settle_window_s=600.0,
+                          umbral_movimiento_psi=0.3, suavizado_s=0.0,
+                          umbral_movimiento_frac=0.2):
+    """Identifica (K, tau, L) del lazo REMOTO (SET_RPM -> presion del
+    aspersor) a partir de un escalon real de SET_RPM en MODO=3
+    (MANUAL_BANCO, lazo ABIERTO -- ver _identify_step_abierto_generico()).
+    K sale en PSI (remotos) por RPM.
+
+    pre_window_s/settle_window_s son GRANDES por default (30min/10min)
+    porque el aspersor puede tardar 20-25min en reportar de nuevo si esta
+    en 0 PSI -- con ventanas chicas (como las de identify/identify-presion)
+    es facil que no haya NINGUN dato adentro y la identificacion falle."""
+    return _identify_step_abierto_generico(
+        data.t_s, data.set_rpm, data.presion, step_time_s,
+        pre_window_s, settle_window_s, umbral_movimiento_psi,
+        salto_minimo=20.0, nombre_cmd="SET_RPM", suavizado_s=suavizado_s,
+        umbral_movimiento_frac=umbral_movimiento_frac)
+
+
+def _imprimir_identificacion(resultado, unidad_cmd, unidad_resp, unidad_K, n_muestras):
+    print(f"Escalon detectado en t={resultado.step_time_s:.2f}s (log tiene {n_muestras} muestras)")
+    print(f"  Setpoint ({unidad_cmd}): delta={resultado.delta_set_rpm:.2f}")
+    print(f"  Respuesta ({unidad_resp}): {resultado.baseline_rpm:.2f} -> {resultado.final_rpm:.2f} "
+          f"(delta_ss={resultado.delta_rpm_ss:.2f})")
     print(f"  G_cl (lazo cerrado) = {resultado.G_cl:.4f}")
     print(f"  L_cl (tiempo muerto observado)   = {resultado.L_cl:.3f} s")
     print(f"  tau_cl (constante de tiempo, lazo cerrado) = {resultado.tau_cl:.3f} s")
     print()
     print(f"Modelo de planta identificado (con Kp={resultado.kp_used} durante la prueba):")
-    print(f"  K   = {resultado.plant.K:.6f}  RPM por microsegundo de correccion")
+    print(f"  K   = {resultado.plant.K:.6f}  {unidad_K}")
     print(f"  tau = {resultado.plant.tau:.3f} s")
     print(f"  L   = {resultado.plant.L:.3f} s")
+
+
+def _imprimir_identificacion_abierto(resultado, unidad_cmd, unidad_resp, unidad_K, n_muestras):
+    print(f"Escalon detectado en t={resultado.step_time_s:.2f}s (log tiene {n_muestras} muestras)")
+    print(f"  Setpoint ({unidad_cmd}): delta={resultado.delta_set_rpm:.2f}")
+    print(f"  Respuesta ({unidad_resp}): {resultado.baseline_rpm:.2f} -> {resultado.final_rpm:.2f} "
+          f"(delta_ss={resultado.delta_rpm_ss:.2f})")
+    print()
+    print("Modelo de planta identificado (lazo ABIERTO, sin PID activo durante la prueba):")
+    print(f"  K   = {resultado.plant.K:.6f}  {unidad_K}")
+    print(f"  tau = {resultado.plant.tau:.3f} s")
+    print(f"  L   = {resultado.plant.L:.3f} s")
+
+
+def cmd_identify(args):
+    data = parse_pid_test_log(args.log)
+    resultado = identify_step(data, kp_used=args.kp, step_time_s=args.step_time_s,
+                               suavizado_s=args.suavizado_s,
+                               umbral_movimiento_frac=args.umbral_movimiento_frac,
+                               umbral_movimiento_rpm=args.umbral_movimiento_rpm)
+    _imprimir_identificacion(resultado, "RPM", "RPM", "RPM por microsegundo de correccion", len(data.t_s))
     print()
     print("Siguiente paso:")
     print(f"  python pid_tuning.py tune --K {resultado.plant.K:.6f} "
+          f"--tau {resultado.plant.tau:.3f} --L {resultado.plant.L:.3f}")
+
+
+def cmd_identify_presion(args):
+    data = parse_presion_pid_test_log(args.log)
+    resultado = identify_step_presion(data, kp_used=args.kp, step_time_s=args.step_time_s,
+                                       suavizado_s=args.suavizado_s,
+                                       umbral_movimiento_frac=args.umbral_movimiento_frac,
+                                       umbral_movimiento_psi=args.umbral_movimiento_psi)
+    _imprimir_identificacion(resultado, "PSI (PRESION_OBJETIVO)", "PSI", "PSI por RPM de correccion", len(data.t_s))
+    print()
+    print("Siguiente paso (SIMC, no hace falta buscar Ku/Tu con tiempo muerto tan chico):")
+    print(f"  python pid_tuning.py simc --K {resultado.plant.K:.6f} "
+          f"--tau {resultado.plant.tau:.3f} --L {resultado.plant.L:.3f}")
+
+
+def cmd_identify_remoto(args):
+    data = parse_remoto_pid_test_log(args.log)
+    resultado = identify_step_remoto(data, step_time_s=args.step_time_s,
+                                      pre_window_s=args.pre_window_s,
+                                      settle_window_s=args.settle_window_s,
+                                      suavizado_s=args.suavizado_s,
+                                      umbral_movimiento_frac=args.umbral_movimiento_frac,
+                                      umbral_movimiento_psi=args.umbral_movimiento_psi)
+    _imprimir_identificacion_abierto(resultado, "RPM (SET_RPM)", "PSI (remota)", "PSI por RPM", len(data.t_s))
+    print()
+    print("Siguiente paso (SIMC):")
+    print(f"  python pid_tuning.py simc --K {resultado.plant.K:.6f} "
           f"--tau {resultado.plant.tau:.3f} --L {resultado.plant.L:.3f}")
 
 
@@ -506,6 +967,172 @@ def cmd_simc(args):
 
 
 # ============================================================================
+# 7. Pipeline de un solo comando: identify -> simc -> simulate encadenados,
+#    terminando en una recomendacion lista para llevar a campo. Reduce las
+#    4 corridas manuales separadas a 1 -- pensado para el flujo real
+#    (capturar log en campo -> correr esto -> probar la ganancia sugerida
+#    -> confirmar visualmente en el motor, o volver a correr esto con
+#    --fila para la siguiente opcion si oscilo). NO aplica nada al motor
+#    ni decide por si solo -- sigue siendo el operador quien confirma en
+#    campo antes de cargar cualquier ganancia (ver README seccion 9).
+# ============================================================================
+
+def _resumen_respuesta_simulada(t, rpm, setpoint, step_time_s):
+    """Metricas simples sobre la simulacion (sobre-impulso, asentamiento)
+    para que la recomendacion final sea cuantitativa, no solo 'probablemente
+    esta bien' -- asentamiento definido como +-2% del cambio total, mismo
+    criterio informal que se usa a ojo en los logs de campo de este
+    proyecto (ver README seccion 9)."""
+    post_mask = t >= step_time_s
+    sp_before = float(setpoint[~post_mask][-1]) if np.any(~post_mask) else float(setpoint[0])
+    sp_after = float(setpoint[post_mask][0])
+    delta = sp_after - sp_before
+    if delta == 0:
+        return {"sobre_impulso_pct": 0.0, "tiempo_asentamiento_s": 0.0}
+
+    post_t = t[post_mask]
+    post_rpm = rpm[post_mask]
+
+    if delta > 0:
+        pico = float(np.max(post_rpm))
+        sobre_impulso_pct = max(0.0, (pico - sp_after) / delta * 100.0)
+    else:
+        pico = float(np.min(post_rpm))
+        sobre_impulso_pct = max(0.0, (sp_after - pico) / delta * -100.0)
+
+    banda = 0.02 * abs(delta)
+    dentro_banda = np.abs(post_rpm - sp_after) <= banda
+    tiempo_asentamiento_s = None
+    for i in range(len(dentro_banda)):
+        if np.all(dentro_banda[i:]):
+            tiempo_asentamiento_s = float(post_t[i] - step_time_s)
+            break
+    if tiempo_asentamiento_s is None:
+        tiempo_asentamiento_s = float(post_t[-1] - step_time_s)  # nunca asento dentro del log simulado
+
+    return {"sobre_impulso_pct": sobre_impulso_pct, "tiempo_asentamiento_s": tiempo_asentamiento_s}
+
+
+def cmd_auto(args):
+    if args.loop in ("interno", "presion") and args.kp is None:
+        raise ValueError(f"--kp es obligatorio para --loop {args.loop} (identificacion en lazo cerrado -- "
+                          "es la Kp que estaba activa durante la prueba real).")
+    if args.ganancia_log and args.loop == "remoto":
+        raise ValueError("--ganancia-log no aplica a --loop remoto (ese lazo ya se identifica "
+                          "en lazo abierto directo con identify-remoto, CONTROL_HABILITADO=9 -- "
+                          "no tiene el problema de K poco confiable que --ganancia-log corrige "
+                          "para interno/presion, ver README seccion 9).")
+
+    if args.loop == "interno":
+        data = parse_pid_test_log(args.log)
+        resultado = identify_step(data, kp_used=args.kp, step_time_s=args.step_time_s,
+                                   suavizado_s=args.suavizado_s if args.suavizado_s is not None else 0.0,
+                                   umbral_movimiento_frac=args.umbral_movimiento_frac,
+                                   umbral_movimiento_rpm=args.umbral_movimiento_rpm)
+        _imprimir_identificacion(resultado, "RPM", "RPM", "RPM por microsegundo de correccion", len(data.t_s))
+
+        if args.ganancia_log:
+            # Reemplaza la K del escalon cerrado por el PEOR CASO del barrido
+            # en lazo abierto (CONTROL_HABILITADO=6) -- mismo criterio usado
+            # a mano en README seccion 9: un solo escalon da una K de UN
+            # punto del rango (y puede salir poco confiable si la señal fue
+            # debil con esa Kp), el barrido cubre TODO el rango y expone si
+            # la ganancia varia -- un Kp/Ki que solo se probo en la zona de
+            # menor ganancia puede oscilar en la de mayor ganancia, como
+            # paso de verdad en el motor real (ver README).
+            pulso_ganancia, rpm_ganancia = parse_ganancia_cal_log(args.ganancia_log)
+            peor_caso = peor_caso_K_ganancia_cal(pulso_ganancia, rpm_ganancia)
+            print()
+            print(f"--- Barrido CONTROL_HABILITADO=6 ({peor_caso['n_pasos']} pasos): "
+                  f"K entre {peor_caso['k_min']:.4f} y {peor_caso['k_max']:.4f} RPM/us "
+                  f"({peor_caso['k_max']/max(peor_caso['k_min'], 1e-9):.1f}x de variacion) ---")
+            print(f"  Usando el PEOR CASO K={peor_caso['k_worst']:.6f} (en pulso={peor_caso['pulso_en_peor']:.0f}us) "
+                  f"en vez de la K={resultado.plant.K:.6f} del escalon cerrado -- mas conservador,")
+            print("  cubre toda la zona del rango, no solo donde se hizo el escalon.")
+            resultado.plant.K = peor_caso["k_worst"]
+    elif args.loop == "presion":
+        data = parse_presion_pid_test_log(args.log)
+        resultado = identify_step_presion(data, kp_used=args.kp, step_time_s=args.step_time_s,
+                                           suavizado_s=args.suavizado_s if args.suavizado_s is not None else 3.0,
+                                           umbral_movimiento_frac=args.umbral_movimiento_frac,
+                                           umbral_movimiento_psi=args.umbral_movimiento_rpm
+                                           if args.umbral_movimiento_rpm != 5.0 else 0.3)
+        _imprimir_identificacion(resultado, "PSI (PRESION_OBJETIVO)", "PSI", "PSI por RPM de correccion", len(data.t_s))
+
+        if args.ganancia_log:
+            # Mismo criterio que --loop interno de arriba (ver ese bloque):
+            # reemplaza la K del escalon CERRADO (CONTROL_HABILITADO=8/
+            # PRESION_CAL, presion_pid.c corriendo) por el PEOR CASO del
+            # barrido en lazo ABIERTO (CONTROL_HABILITADO=11/
+            # PRESION_GANANCIA_CAL, presion_pid.c NO corre en ese modo --
+            # ver README seccion 9 y main.c).
+            rpm_ganancia, psi_ganancia = parse_presion_ganancia_cal_log(args.ganancia_log)
+            peor_caso = peor_caso_K_presion_ganancia_cal(rpm_ganancia, psi_ganancia)
+            print()
+            print(f"--- Barrido CONTROL_HABILITADO=11 ({peor_caso['n_pasos']} pasos): "
+                  f"K entre {peor_caso['k_min']:.4f} y {peor_caso['k_max']:.4f} PSI/RPM "
+                  f"({peor_caso['k_max']/max(peor_caso['k_min'], 1e-9):.1f}x de variacion) ---")
+            print(f"  Usando el PEOR CASO K={peor_caso['k_worst']:.6f} (en rpm={peor_caso['rpm_en_peor']:.0f}) "
+                  f"en vez de la K={resultado.plant.K:.6f} del escalon cerrado -- mas conservador,")
+            print("  cubre toda la zona del rango, no solo donde se hizo el escalon.")
+            resultado.plant.K = peor_caso["k_worst"]
+    else:  # remoto
+        data = parse_remoto_pid_test_log(args.log)
+        resultado = identify_step_remoto(data, step_time_s=args.step_time_s,
+                                          suavizado_s=args.suavizado_s if args.suavizado_s is not None else 0.0,
+                                          umbral_movimiento_frac=args.umbral_movimiento_frac,
+                                          umbral_movimiento_psi=args.umbral_movimiento_rpm
+                                          if args.umbral_movimiento_rpm != 5.0 else 0.3)
+        _imprimir_identificacion_abierto(resultado, "RPM (SET_RPM)", "PSI (remota)", "PSI por RPM", len(data.t_s))
+
+    plant = resultado.plant
+    print()
+    print(f"--- SIMC sobre el modelo identificado (K={plant.K:.6f}  tau={plant.tau:.3f}s  L={plant.L:.3f}s) ---")
+    opciones = [
+        ("Agresivo", plant.L),
+        ("Medio", 2.0 * plant.L),
+        ("Conservador", plant.tau),
+    ]
+    filas = {}
+    for etiqueta, tau_c in opciones:
+        kc, ki = simc_pi_gains(plant.K, plant.tau, plant.L, tau_c)
+        filas[etiqueta] = (kc, ki, tau_c)
+        marca = " <--" if etiqueta.lower() == args.fila else ""
+        print(f"  {etiqueta:12s} (tau_c={tau_c:6.3f}s): Kp={kc:.4f}  Ki={ki:.4f}{marca}")
+
+    etiqueta_elegida = {"agresivo": "Agresivo", "medio": "Medio", "conservador": "Conservador"}[args.fila]
+    kp_elegida, ki_elegida, _ = filas[etiqueta_elegida]
+
+    servo_min = args.servo_min
+    servo_max = args.servo_max
+    sp_before = args.sp_before
+    step_size = args.step_size
+
+    t, rpm, _, setpoint = simulate_closed_loop(
+        plant, kp_elegida, ki_elegida, 0.0, servo_min, servo_max,
+        sp_before, sp_before + step_size)
+    step_time_sim = max(10.0, 5.0 * plant.tau)
+    resumen = _resumen_respuesta_simulada(t, rpm, setpoint, step_time_sim)
+
+    print()
+    print(f"--- Recomendacion (fila '{etiqueta_elegida}') ---")
+    print(f"  Kp = {kp_elegida:.4f}   Ki = {ki_elegida:.4f}")
+    print(f"  Simulado (sobre el modelo, NO el motor real): sobre-impulso ~{resumen['sobre_impulso_pct']:.1f}%, "
+          f"asienta en ~{resumen['tiempo_asentamiento_s']:.1f}s tras el escalon.")
+    if resumen["sobre_impulso_pct"] > 15.0:
+        print("  ADVERTENCIA: la simulacion muestra sobre-impulso notable -- considerar la fila")
+        print("  'Conservador' antes de probar esta en el motor real (--fila conservador).")
+    print()
+    print("  Probar esta ganancia EN CAMPO y confirmar visualmente:")
+    print("    - Si converge sin oscilar como lo de arriba: dejarla fija (downlink de las ganancias).")
+    print(f"    - Si oscila/se pasa de largo: volver a correr con --fila conservador"
+          if args.fila != "conservador" else
+          "    - Si TODAVIA oscila en 'Conservador': el modelo identificado puede no ser confiable,"
+          " revisar el log fuente antes de seguir.")
+    print("  Esto NO se aplica solo -- es una sugerencia para que confirmes en campo, no una decision automatica.")
+
+
+# ============================================================================
 # CLI
 # ============================================================================
 
@@ -523,9 +1150,46 @@ def build_parser():
     p_id = sub.add_parser("identify", help="Identificar el modelo de planta (K, tau, L) a partir de un escalon real.")
     p_id.add_argument("--log", required=True, help="Archivo de log capturado (o su recorte)")
     p_id.add_argument("--kp", type=float, required=True, help="PID_KP que estaba activo durante la prueba")
+    p_id.add_argument("--suavizado-s", type=float, default=0.0,
+                       help="Promedio movil (segundos) sobre la respuesta antes de detectar L/tau -- 0 = sin suavizar (default, el tacometro es poco ruidoso). Subir si L/tau salen poco creibles.")
+    p_id.add_argument("--umbral-movimiento-frac", type=float, default=0.2,
+                       help="Umbral de 'se movio' como fraccion del cambio real medido (default 0.2 = 20%%) -- el umbral EFECTIVO es el mayor entre este y --umbral-movimiento-rpm (ese ultimo solo actua como piso para no disparar con puro ruido).")
+    p_id.add_argument("--umbral-movimiento-rpm", type=float, default=5.0,
+                       help="Piso absoluto (RPM) del umbral de 'se movio', ver --umbral-movimiento-frac.")
     p_id.add_argument("--step-time-s", type=float, default=None,
                        help="Instante del escalon en segundos relativos al log (autodetectado si se omite)")
     p_id.set_defaults(func=cmd_identify)
+
+    p_id_p = sub.add_parser("identify-presion",
+                             help="Identificar el modelo de planta (K, tau, L) del lazo de PRESION a partir de un escalon real de PRESION_OBJETIVO.")
+    p_id_p.add_argument("--log", required=True, help="Archivo de log capturado (o su recorte)")
+    p_id_p.add_argument("--kp", type=float, required=True, help="PRESION_PID_KP que estaba activo durante la prueba (PRESION_PID_KI debe haber sido 0)")
+    p_id_p.add_argument("--suavizado-s", type=float, default=3.0,
+                         help="Promedio movil (segundos) sobre la presion antes de detectar L/tau -- default 3.0 (el sensor de presion es bastante mas ruidoso que el tacometro). Subir mas si L/tau siguen saliendo poco creibles, bajar si diluye un cambio real chico.")
+    p_id_p.add_argument("--umbral-movimiento-frac", type=float, default=0.2,
+                         help="Umbral de 'se movio' como fraccion del cambio real medido (default 0.2 = 20%%) -- el umbral EFECTIVO es el mayor entre este y --umbral-movimiento-psi (ese ultimo solo actua como piso para no disparar con puro ruido).")
+    p_id_p.add_argument("--umbral-movimiento-psi", type=float, default=0.3,
+                         help="Piso absoluto (PSI) del umbral de 'se movio', ver --umbral-movimiento-frac.")
+    p_id_p.add_argument("--step-time-s", type=float, default=None,
+                         help="Instante del escalon en segundos relativos al log (autodetectado si se omite)")
+    p_id_p.set_defaults(func=cmd_identify_presion)
+
+    p_id_r = sub.add_parser("identify-remoto",
+                             help="Identificar el modelo de planta (K, tau, L) del lazo REMOTO (MODO=2) EN LAZO ABIERTO, a partir de un escalon real de SET_RPM en MODO=3.")
+    p_id_r.add_argument("--log", required=True, help="Archivo de log capturado (o su recorte)")
+    p_id_r.add_argument("--pre-window-s", type=float, default=1800.0,
+                         help="Ventana ANTES del escalon para promediar el baseline, en segundos (default 1800s=30min -- el aspersor puede tardar 20-25min en reportar de nuevo en 0 PSI).")
+    p_id_r.add_argument("--settle-window-s", type=float, default=600.0,
+                         help="Ventana AL FINAL del log para promediar el valor estabilizado, en segundos (default 600s=10min).")
+    p_id_r.add_argument("--suavizado-s", type=float, default=0.0,
+                         help="Promedio movil (segundos) antes de detectar L/tau -- default 0 (sin suavizar, cada reporte remoto ya es una lectura discreta/deliberada, no ruido de ADC).")
+    p_id_r.add_argument("--umbral-movimiento-frac", type=float, default=0.2,
+                         help="Umbral de 'se movio' como fraccion del cambio real medido (default 0.2 = 20%%).")
+    p_id_r.add_argument("--umbral-movimiento-psi", type=float, default=0.3,
+                         help="Piso absoluto (PSI) del umbral de 'se movio'.")
+    p_id_r.add_argument("--step-time-s", type=float, default=None,
+                         help="Instante del escalon en segundos relativos al log (autodetectado si se omite)")
+    p_id_r.set_defaults(func=cmd_identify_remoto)
 
     p_tune = sub.add_parser("tune", help="Buscar Ku/Tu (Ziegler-Nichols) sobre el modelo simulado y sugerir ganancias.")
     p_tune.add_argument("--K", type=float, required=True)
@@ -557,6 +1221,33 @@ def build_parser():
     p_sim.add_argument("--step-size", type=float, default=200.0)
     p_sim.add_argument("--plot-out", default=None, help="Si se da, guarda un PNG con la respuesta (requiere matplotlib)")
     p_sim.set_defaults(func=cmd_simulate)
+
+    p_auto = sub.add_parser("auto",
+                             help="Pipeline de un solo comando: identify -> simc -> simulate, terminando en una ganancia sugerida lista para probar en campo (ver README seccion 9). NO aplica nada -- la confirmacion final sigue siendo del operador en el motor real.")
+    p_auto.add_argument("--loop", required=True, choices=["interno", "presion", "remoto"],
+                         help="Cual de los 3 lazos: 'interno' (RPM->servo, PID_TEST), 'presion' (MODO=1, PRESION_PID_TEST), 'remoto' (MODO=2, REMOTO_PID_TEST, lazo abierto).")
+    p_auto.add_argument("--log", required=True, help="Archivo de log capturado")
+    p_auto.add_argument("--kp", type=float, default=None,
+                         help="Kp usada durante la prueba (REQUERIDO para --loop interno/presion, lazo cerrado -- se ignora para --loop remoto, lazo abierto).")
+    p_auto.add_argument("--ganancia-log", default=None,
+                         help="Para --loop interno o --loop presion (no aplica a remoto): archivo con el barrido en lazo abierto correspondiente -- CONTROL_HABILITADO=5 ('GANANCIA_CAL,PASO,...') para interno, CONTROL_HABILITADO=11 ('PRESION_GANANCIA_CAL,PASO,...') para presion. Si se da, se usa el PEOR CASO de K de ese barrido en vez de la K del escalon cerrado -- mas robusto si la ganancia varia con el punto de operacion (ver README seccion 9).")
+    p_auto.add_argument("--fila", default="medio", choices=["agresivo", "medio", "conservador"],
+                         help="Cual de las 3 filas SIMC recomendar por default (default 'medio').")
+    p_auto.add_argument("--step-time-s", type=float, default=None,
+                         help="Instante del escalon en segundos relativos al log (autodetectado si se omite -- para --loop remoto, mejor pasarlo a mano con el tick del downlink real, ver identify-remoto).")
+    p_auto.add_argument("--suavizado-s", type=float, default=None,
+                         help="Promedio movil (segundos) antes de detectar L/tau -- default por lazo (0 para interno/remoto, 3.0 para presion).")
+    p_auto.add_argument("--umbral-movimiento-frac", type=float, default=0.2,
+                         help="Umbral de 'se movio' como fraccion del cambio real medido (default 0.2 = 20%%).")
+    p_auto.add_argument("--umbral-movimiento-rpm", type=float, default=5.0,
+                         help="Piso absoluto del umbral de 'se movio' -- en RPM para --loop interno, en PSI para presion/remoto (default 0.3 PSI en esos dos si no se pasa explicito).")
+    p_auto.add_argument("--servo-min", type=float, default=1000.0,
+                         help="Piso de la salida simulada: SERVO_PULSO_MIN (us) para --loop interno, o RPM_MIN para presion/remoto (esos dos lazos usan RPM_MIN como piso feedforward, ver presion_pid.c/presion_pid_remoto.c).")
+    p_auto.add_argument("--servo-max", type=float, default=2000.0,
+                         help="Techo de la salida simulada: SERVO_PULSO_MAX (us) para --loop interno, o RPM_MAX para presion/remoto.")
+    p_auto.add_argument("--sp-before", type=float, default=1000.0, help="Setpoint base simulado antes del escalon")
+    p_auto.add_argument("--step-size", type=float, default=200.0, help="Tamano del escalon simulado")
+    p_auto.set_defaults(func=cmd_auto)
 
     return p
 

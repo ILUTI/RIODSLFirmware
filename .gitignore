@@ -33,11 +33,15 @@ desktop.ini
 
 # --- Logs de depuracion / diagnostico temporales ---
 *.log
+logs/
 
 # --- tools/pid_tuning (script de Python) ---
 tools/pid_tuning/venv/
 tools/pid_tuning/__pycache__/
 tools/pid_tuning/*.png
+
+# --- Indice local de codebase-memory-mcp (se regenera indexando de nuevo) ---
+.codebase-memory/
 
 # ============================================================================
 # NOTA: SI se deben subir (no ignorar):
