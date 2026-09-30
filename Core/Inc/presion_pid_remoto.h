@@ -5,10 +5,10 @@
  *
  * Mismo patron que presion_pid.h (lazo externo de presion LOCAL,
  * MODO=1), pero es un modulo APARTE con su propio estado interno y sus
- * propias ganancias (PRESION_REMOTO_PID_KP/KI, ver calibracion_flash.h)
+ * propias ganancias (PID_ASP_KP/KI, ver calibracion_flash.h)
  * -- no comparte nada con presion_pid.c, porque agregado 2026-09-23,
  * reemplaza la formula lineal abierta que tenia MODO=2 hasta entonces
- * (setpoint = PRESION_OFFSET_RPM + PRESION_GANANCIA_RPM * PRESION).
+ * (setpoint = PRESION_OFFSET_RPM + PRESION_GANANCIA_RPM * PRESION_REMOTO).
  *
  * Motivo del reemplazo (decision explicita del usuario, ver
  * conversacion 2026-09-23): la formula lineal exigia calibrar
@@ -24,7 +24,7 @@
  * muy irregular (20s a 20-25min segun su propio estado, confirmado en
  * campo 2026-09-23), asi que main.c solo debe llamar a
  * PresionPidRemoto_CalcularSetpointRpm() cuando llega un reporte NUEVO
- * de PRESION (deteccion de flanco via CalibFlash_GetPresionUltimoTickMs(),
+ * de PRESION_REMOTO (deteccion de flanco via CalibFlash_GetPresionRemotoUltimoTickMs(),
  * mismo truco que ya usa el supervisor de MODO=2). Entre reportes,
  * main.c debe sostener el ultimo valor devuelto, no volver a llamar a
  * esta funcion con el mismo dato viejo. Justamente por eso el calculo
@@ -51,7 +51,7 @@ void PresionPidRemoto_Init(void);
 
 /**
  * Calcula el setpoint de RPM, ya recortado a [0, RPM_MAX]. Llamar SOLO
- * cuando llega un reporte nuevo de PRESION (ver nota de arriba) -- el
+ * cuando llega un reporte nuevo de PRESION_REMOTO (ver nota de arriba) -- el
  * paso de integracion se calcula por tiempo real transcurrido desde la
  * ULTIMA VEZ que se llamo esta funcion (HAL_GetTick()), no por conteo
  * de ciclos del main loop.
@@ -64,8 +64,8 @@ void PresionPidRemoto_Init(void);
  * comandar" y dejar que controlSolicitado caiga a ralenti natural.
  *
  * @param setpointPresionPsi  Objetivo, CalibFlash_GetPresionObjetivoRemoto().
- * @param presionMedidaPsi    Ultima PRESION reportada por el aspersor,
- *                             CalibFlash_GetPresion().
+ * @param presionMedidaPsi    Ultima PRESION_REMOTO reportada por el aspersor,
+ *                             CalibFlash_GetPresionRemoto().
  * @return Setpoint de RPM a pasarle al lazo interno (PID_CalcularSalidaUs).
  */
 float PresionPidRemoto_CalcularSetpointRpm(float setpointPresionPsi, float presionMedidaPsi);

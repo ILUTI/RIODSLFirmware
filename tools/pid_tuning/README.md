@@ -13,8 +13,8 @@ pip install -r requirements.txt
 
 ## Flujo típico
 
-1. **Capturar un escalón real** en el motor (motor estable, `PID_KP=1`,
-   `PID_KI=0`, `PID_KD=0`, mandar un `SET_RPM` moderado y esperar a que
+1. **Capturar un escalón real** en el motor (motor estable, `PID_RPM_KP=1`,
+   `PID_RPM_KI=0`, `PID_KD=0`, mandar un `SET_RPM` moderado y esperar a que
    se estabilice — ver README sección 9):
    ```
    python pid_tuning.py capture --port COM5 --out captura_2026-08-31.log

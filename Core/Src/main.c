@@ -66,8 +66,7 @@
 #define RALENTI_CAL_VENTANA_PROMEDIO_MS    30000U
 #define RALENTI_CAL_MARGEN_RPM                30.0f
 
-/* Auto-calibracion de SERVO_PULSO_MIN (CONTROL_HABILITADO=4, renumerado
- * 2026-09-23, antes era 5) -- barre el
+/* Auto-calibracion de SERVO_PULSO_MIN (CALIB=4) -- barre el
  * pulso hacia arriba en pasos chicos desde el SERVO_PULSO_MIN actual,
  * buscando donde el motor empieza a acelerar de verdad (la "zona muerta"
  * mecanica del acelerador, observada en campo: unos grados de recorrido
@@ -83,14 +82,14 @@
 #define SERVOMIN_CAL_CONFIRMACIONES_NECESARIAS    2U    /* lecturas seguidas por encima del umbral, en el mismo pulso, antes de dar por confirmada la deteccion */
 #define SERVOMIN_CAL_MARGEN_PASOS                 6U    /* pasos de colchon hacia atras al aplicar el resultado, para no dejar SERVO_PULSO_MIN pegado justo al borde. SUBIDO de 3 a 6 (2026-09-03) tras confirmar en campo que la transicion NO siempre es un escalon limpio -- una corrida real mostro subida sostenida (14.8/7.3/26.8/26.1/27.0 RPM) durante ~6 pasos antes de confirmar deteccion, y 3 pasos de margen dejo el SERVO_PULSO_MIN resultante a mitad de esa rampa (RPM de reposo termino ~20-30 RPM por encima del relenti real). 6 pasos cubre esa rampa observada sin perjudicar el caso de transicion abrupta (el barrido original de esta misma zona muerta vino en puro ruido hasta justo antes del punto de deteccion). */
 
-/* Auto-calibracion de ALPHA -- CONTROL_HABILITADO=3 (ver
+/* Auto-calibracion de ALPHA -- CALIB=3 (ver
  * calibracion_flash.c) -- mide la dispersion real de RPM_instantanea
  * (sin filtrar) durante una ventana corta con el motor ya estable, y
  * calcula el ALPHA necesario para que la RPM ya filtrada quede dentro
  * de un objetivo de ruido fijo (ALPHA_CAL_OBJETIVO_DESVIACION_RPM),
  * usando la relacion de atenuacion de un filtro EMA:
  * alpha = 2r^2/(1+r^2), con r = objetivo/desviacion_cruda. No mueve el
- * servo (mismo motivo que el modo 7 (ralenti) -- pidActivoAhora nunca es true en
+ * servo (mismo motivo que el modo 8 (ralenti) -- pidActivoAhora nunca es true en
  * este modo, cae solo en la rama segura de abajo). Ver README seccion 12.
  *
  * CASO BORDE encontrado en campo 2026-09-03: si el ruido crudo medido
@@ -107,11 +106,11 @@
 #define ALPHA_CAL_OBJETIVO_DESVIACION_RPM        10.0f  /* objetivo de ruido en la RPM YA FILTRADA -- ver discusion README seccion 12 */
 #define ALPHA_CAL_TECHO_ALPHA                     0.5f  /* nunca aplicar mas filtrado "agresivo" que esto (ver caso borde arriba) -- algo mas permisivo que el 0.35 ya validado, pero lejos de "sin filtro" */
 
-/* Mapeo de curva de ganancia -- CONTROL_HABILITADO=5 (renumerado
- * 2026-09-23, antes era 6, ver calibracion_flash.c). Barre el pulso
+/* Mapeo de curva de ganancia -- CALIB=5 (ver calibracion_flash.c).
+ * Barre el pulso
  * hacia arriba en pasos chicos desde SERVO_PULSO_MIN, en lazo ABIERTO
  * (sin PID), registrando el par (pulso, RPM real) en cada paso -- a
- * diferencia de CONTROL_HABILITADO=4 (zona muerta, antes 5)
+ * diferencia de CALIB=4 (zona muerta)
  * (que solo busca el borde de la zona muerta), esto mapea la forma
  * completa de la curva de ganancia en el rango de operacion real, para
  * diagnostico/diseno de una futura correccion de gain-scheduling en el
@@ -125,48 +124,94 @@
  * tarda mas (~3 min peor caso) pero acota mejor el salto por paso. */
 #define GANANCIA_CAL_PASO_US                       4U    /* mismo tamano que SERVOMIN_CAL, a proposito -- ver nota arriba. BAJADO de 8 a 4 junto con SERVOMIN_CAL_PASO_US (2026-09-07) por el mismo motivo: montaje directo, recorrido util a la mitad de grados que la biela-manivela -> ganancia por microsegundo al menos el doble. */
 #define GANANCIA_CAL_DWELL_MS                    2500U   /* espera de asentamiento antes de leer la RPM en cada paso */
-#define GANANCIA_CAL_RPM_TECHO                  1500.0f  /* nunca pasar de esta RPM durante el barrido -- elegido por el usuario como el limite seguro de esta prueba, no el maximo del motor */
 #define GANANCIA_CAL_SALTO_ANORMAL_RPM            150.0f  /* si un solo paso sube la RPM esto o mas, frenar ya -- protege contra pasarse del techo de un salto Y detecta lecturas anormales */
+/* ⚠️ GANANCIA_CAL_RPM_TECHO (fijo, 1500.0f) ELIMINADO 2026-09-28 -- este
+ * barrido (=5, sin carga) ahora usa CalibFlash_GetRpmMax() directo como
+ * techo de RPM. Decision explicita del usuario: aunque el valor original
+ * de 1500 se eligio pensando especificamente en el escenario SIN CARGA
+ * de =5 (un motor sin carga puede acelerar mas rapido/alto de lo
+ * esperado para el mismo pulso), el usuario prefirio una sola variable
+ * en vez de pedirle al operador configurar dos techos de RPM distintos.
+ * (CALIB=9 ya no tiene un techo de RPM propio -- fue
+ * rediseñado por completo el mismo dia, ver mas abajo -- pero el clamp
+ * final universal de main.c SI sigue usando RPM_MAX_CARGA para el, via
+ * la variable cargaConectada.) */
 
-/* Mapeo de curva de ganancia de PRESION -- CONTROL_HABILITADO=11 (agregado
- * 2026-09-24), equivalente de GANANCIA_CAL de arriba pero para el PID#2
- * (presion local, presion_pid.c) en vez del PID#1. Barre SET_RPM hacia
- * arriba en pasos chicos en MODO=3 (sin presion_pid corriendo -- lazo
- * ABIERTO para la relacion RPM->presion), registrando el par (RPM, PSI)
- * en cada paso. Por ahora SOLO mide y loguea, igual que GANANCIA_CAL.
+/* Mapeo de curva de ganancia de PRESION -- CALIB=9.
+ * REDISENADO POR COMPLETO 2026-09-28 -- version anterior (barrido propio
+ * en lazo ABIERTO, con su propia rampa/dwell/pasos/umbral de salto
+ * anormal) eliminada entera y reemplazada por algo mucho mas simple:
+ * en vez de un mecanismo nuevo, este modo REUSA LA CASCADA REAL de
+ * MODO=1 (presion_pid.c, la misma rampa de llenado ya usada y validada
+ * en produccion) bajo MODO=4 -- exactamente el mismo patron que ya usa
+ * CALIB=10 (ensancha presionLocalActivoAhora), solo que en vez de un
+ * escalon chico de identificacion, deja que la rampa suba TODO el
+ * camino desde la presion actual hasta PRESION_OBJETIVO_LOCAL. Mientras sube
+ * (a la velocidad ya calculada por TASA_LLENADO_PSI_S/TIEMPO_LLENADO_S,
+ * la misma que ya se valida como segura para produccion), se loguea
+ * PRESION_PID_TEST -- ese log (RPM, PSI) a lo largo de toda la rampa
+ * ES el mapeo de ganancia, sin necesitar ningun mecanismo de pasos
+ * discretos aparte.
  *
- * A diferencia de GANANCIA_CAL, ESTE barrido SI tiene un riesgo fisico
- * real que el otro no tiene: hay una tuberia con presion de verdad de
- * por medio, y un cambio de RPM demasiado brusco puede producir un golpe
- * de ariete. Dos decisiones de diseno en respuesta a esto, discutidas
- * con el usuario:
+ * Por que se abandono la version anterior: en la misma sesion se
+ * encontraron TRES problemas reales de seguridad en el diseño de pasos
+ * discretos (el techo de RPM compartido con CALIB=5 sin considerar el
+ * embrague, el umbral de salto anormal fijo que abortaria cada paso
+ * normal con la ganancia real medida en campo, y el choque entre
+ * "misma velocidad seguro que MODO=1" y "mismo techo de tiempo que
+ * MODO=1" -- ver memoria del proyecto para el detalle) -- ninguno de
+ * esos problemas existe en este diseño, porque reusa un mecanismo ya
+ * probado en vez de inventar uno nuevo. */
+
+/* Validacion de ganancias reales -- CALIB=7, agregado
+ * 2026-09-25. A diferencia de INTERNO_CAL (=6, que SIEMPRE fuerza
+ * PID_RPM_KP=1/PID_RPM_KI=0 fijo para la identificacion), este modo NO toca
+ * PID_RPM_KP/PID_RPM_KI -- usa lo que ya este cargado en flash (la ganancia
+ * recomendada por `pid_tuning.py auto`, ya bajada por downlink) y solo
+ * automatiza mandar el mismo escalon de SET_RPM y loguear PID_TEST
+ * (igual que =6) para que el log resultante se le pueda pasar
+ * directo a `pid_tuning.py compare` -- reemplaza el "dejalo asentar 4
+ * minutos y mirá cómo se ve" manual. Duracion mas larga que INTERNO_CAL
+ * (4min en vez de 1min) porque con Ki activo el asentamiento real puede
+ * tardar mas que con la Kp=1/Ki=0 de la identificacion pura.
  *
- * 1. El SET_RPM de cada paso se RAMPEA (PRESION_GANANCIA_CAL_RAMPA_RPM_S),
- *    no se salta de golpe -- el DWELL de abajo es para que la PRESION
- *    asiente, no hace lento el cambio de RPM en si, y el PID#1 interno
- *    ya es rapido (Kp=0.047/Ki=0.11, llega a un SET_RPM nuevo en pocos
- *    segundos) -- sin esta rampa, el cambio de caudal real seria casi
- *    instantaneo pese al dwell largo. TASA_MAX_CAMBIO_RPM_S/_LLENADO_S
- *    (calibracion_flash.c) NO sirven para esto -- existen como
- *    parametros pero no estan cableados a ningun lazo de control
- *    todavia, asi que esta rutina rampea su propio SET_RPM interno.
- * 2. Esta rutina ASUME que la tuberia ya esta llena y en presion
- *    estable en RPM_MIN -- no es una rutina de primer llenado. El
- *    operador debe hacer el primer llenado a mano, de a poco, la
- *    primera vez que se presuriza una tuberia nueva, ANTES de correr
- *    este modo (ver README seccion 12, Fase D). El firmware no puede
- *    detectar "hay aire en la linea" por si solo.
- *
- * Techo bajado de un +15 PSI inicial a +10 PSI (2026-09-24, pedido del
- * usuario): mismo poder de identificacion con menos presion total y
- * menos tiempo de rutina. */
-#define PRESION_GANANCIA_CAL_PASO_RPM             200.0f  /* incremento de SET_RPM objetivo en cada paso */
-#define PRESION_GANANCIA_CAL_RAMPA_RPM_S            1.7f  /* velocidad MAXIMA a la que este modo sube su propio SET_RPM interno -- ~50 RPM/30s, un paso de 200 RPM tarda ~2min en llegar, gradual en vez de un salto instantaneo */
-#define PRESION_GANANCIA_CAL_DWELL_MS            90000U    /* asentamiento por paso TRAS terminar la rampa -- tau real del lazo de presion 60-120s medido */
-#define PRESION_GANANCIA_CAL_BASE_PROMEDIO_MS     5000U    /* ventana para promediar la PSI base en ralenti antes de arrancar a barrer */
-#define PRESION_GANANCIA_CAL_DELTA_TECHO_PSI       10.0f  /* techo = presion base + esto, NO un PSI absoluto -- la base varia por instalacion */
-#define PRESION_GANANCIA_CAL_SALTO_ANORMAL_PSI      4.0f  /* si un solo paso sube la presion esto o mas, frenar ya -- mismo criterio que GANANCIA_CAL_SALTO_ANORMAL_RPM */
-#define PRESION_GANANCIA_CAL_TIMEOUT_MS          900000U  /* 15 min, red de seguridad de ultimo recurso -- con rampa+dwell la rutina completa estima 13-18min, este timeout no deberia dispararse en un barrido normal */
+ * Watchdog de oscilacion sostenida: a diferencia de todos los demas
+ * auto-escalones (que solo tienen limites de tiempo/PSI/RPM), este
+ * vigila la FORMA de la respuesta en vivo -- cuenta cuantas veces
+ * (RPM_filtrada - SET_RPM) cruza de signo, con un piso minimo de
+ * desviacion antes de cada cruce (para no contar ruido), en una ventana
+ * movil reciente. Si se acumulan demasiados cruces, es que el lazo esta
+ * oscilando sostenidamente alrededor del setpoint en vez de asentar --
+ * mismo criterio que el usuario aplicaba a ojo ("si veo que loquea, mando
+ * SET_RPM=0"), ahora automatico. Arranca a contar recien despues de
+ * VALIDACION_CAL_ESPERA_ASENTAMIENTO_MS, para no confundir el
+ * acercamiento normal al setpoint (que tambien puede cruzarlo una vez
+ * por sobre-impulso) con oscilacion real. */
+#define VALIDACION_CAL_ESCALON_RPM                200.0f  /* mismo tamano que INTERNO_CAL_ESCALON_RPM, para que el log sea comparable */
+#define VALIDACION_CAL_DURACION_MS             240000U    /* 4 minutos -- mismo tiempo que el usuario ya usaba a ojo para validar */
+#define VALIDACION_CAL_ESPERA_ASENTAMIENTO_MS   30000U    /* 30s antes de empezar a contar cruces -- deja pasar el acercamiento inicial al setpoint */
+#define VALIDACION_CAL_OSC_UMBRAL_RPM              15.0f  /* desviacion minima (RPM) que debe alcanzar antes de que un cruce de signo cuente -- piso anti-ruido */
+#define VALIDACION_CAL_OSC_VENTANA_MS             20000U  /* ventana movil (ms) donde se cuentan los cruces */
+#define VALIDACION_CAL_OSC_MAX_CRUCES                 4U  /* cruces dentro de la ventana movil que disparan el abort por oscilacion sostenida */
+
+/* Validacion de ganancias reales (PID#2, presion) -- CALIB=11
+ * (agregado 2026-09-28). Equivalente de VALIDACION_CAL (=7, PID#1) pero
+ * para el lazo de presion: mismo espiritu (escalon con las ganancias YA
+ * cargadas, sin forzar Ki=0, ventana mas larga que la identificacion, mas
+ * watchdog de oscilacion sostenida), clonado de la mecanica de PRESION_CAL
+ * (=10) para la parte de medir una base real y mandar el escalon, ya que a
+ * diferencia del lazo de RPM (que arranca siempre del mismo RPM_MIN
+ * conocido) el punto de partida de presion depende de la instalacion. El
+ * piso anti-ruido (2.5 PSI) sale de un dato real medido, no de una
+ * suposicion -- desviacion estandar real observada en un tramo YA asentado
+ * del log de campo COM3_2026_09_21.14.21.54.361.txt (~0.73 PSI, con picos
+ * de hasta 4 PSI pico-a-pico) -- 2.5 PSI da margen sobre ese ruido medido
+ * sin quedar tan alto como para no detectar una oscilacion real. */
+#define PRESION_VALIDACION_CAL_DURACION_MS            240000U   /* 4 minutos -- mismo tiempo que VALIDACION_CAL, confirmado por el usuario */
+#define PRESION_VALIDACION_CAL_ESPERA_ASENTAMIENTO_MS  30000U   /* 30s antes de empezar a contar cruces -- mismo criterio que VALIDACION_CAL */
+#define PRESION_VALIDACION_CAL_OSC_UMBRAL_PSI              2.5f /* desviacion minima (PSI) que debe alcanzar antes de que un cruce de signo cuente -- piso anti-ruido, ver nota arriba */
+#define PRESION_VALIDACION_CAL_OSC_VENTANA_MS          20000U   /* ventana movil (ms) donde se cuentan los cruces -- mismo criterio que VALIDACION_CAL */
+#define PRESION_VALIDACION_CAL_OSC_MAX_CRUCES              4U   /* cruces dentro de la ventana movil que disparan el abort por oscilacion sostenida -- mismo criterio que VALIDACION_CAL */
 
 
 /* El RTC de este nodo corre del LSI interno (~32kHz nominal, sin cristal
@@ -216,7 +261,7 @@
  * (ver README seccion 8). */
 #define PRESION_UMBRAL_ACTIVO_PSI  5.0f
 
-/* Supervisor de "no se puede llegar a PRESION_OBJETIVO" en MODO=1 (ver
+/* Supervisor de "no se puede llegar a PRESION_OBJETIVO_LOCAL" en MODO=1 (ver
  * el bloque MODO mas abajo, y README secciones 4.3/8/12). Cada "intento
  * fallido" es una ventana sostenida de esta duracion con el lazo
  * saturado en RPM_MAX y la presion fuera de tolerancia -- tras
@@ -250,8 +295,7 @@
  * intentosFallidos alcanzando este valor recien en el 4to fallo. */
 #define PRESION_SUPERVISOR_REMOTO_INTENTOS_MAX       4U
 
-/* Auto-escalon INTERNO (PID#1) -- CONTROL_HABILITADO=6 (NUEVO,
- * agregado 2026-09-23 segunda pasada, ver mas abajo junto al log
+/* Auto-escalon INTERNO (PID#1) -- CALIB=6 (ver mas abajo junto al log
  * PID_TEST). Mismo espiritu que PRESION_CAL/REMOTO_CAL: automatiza
  * SOLO mandar el escalon de SET_RPM en MODO=3 y esperar un tiempo
  * fijo -- el calculo de Kp/Ki sigue siendo con
@@ -264,10 +308,9 @@
 #define INTERNO_CAL_ESCALON_RPM                  200.0f
 #define INTERNO_CAL_DURACION_MS                 60000U   /* 1 minuto */
 
-/* Auto-escalon de presion local -- CONTROL_HABILITADO=8 (renumerado
- * 2026-09-23, segunda pasada -- antes 7; ver mas abajo, junto al log
- * PRESION_PID_TEST), agregado 2026-09-23. Automatiza SOLO
- * el envio del escalon y la espera (mandar PRESION_OBJETIVO+delta y
+/* Auto-escalon de presion local -- CALIB=10 (ver mas abajo, junto al
+ * log PRESION_PID_TEST). Automatiza SOLO
+ * el envio del escalon y la espera (mandar PRESION_OBJETIVO_LOCAL+delta y
  * dejarlo un rato fijo) -- el calculo de Kp/Ki sigue siendo con
  * tools/pid_tuning/pid_tuning.py (auto --loop presion) sobre el log
  * PRESION_PID_TEST resultante, y la decision de aplicar esas ganancias
@@ -275,14 +318,40 @@
  * 2026-09-23: mismo tamano de escalon que ya se uso en la sesion real
  * de sintonizacion (README seccion 9, "1.36 PSI de un escalon de 5
  * PSI"), duracion FIJA (no detecta "asentado" solo, mismo criterio
- * simple que ya usa ALPHA_CAL con su ventana fija de 8s) de 10min --
- * de sobra (~6-7x el tau real conocido, 60-120s, ver README). */
+ * simple que ya usa ALPHA_CAL con su ventana fija de 8s). BAJADA de
+ * 10min a 3min (2026-09-28) tras identificar el modelo real con
+ * `pid_tuning.py identify-presion` sobre el log real
+ * `COM3_2026_09_21.14.21.54.361.txt`: el escalón real se asienta en
+ * `L=11.4s` de tiempo muerto + ~4-5 veces `tau_cl=3.2s` (lazo cerrado,
+ * con Kp=5 durante esa prueba) -- unos 25-30s en total, NO los 60-120s
+ * que se habían asumido antes de tener este dato real. 3min sigue
+ * dando ~6x de margen sobre ese asentamiento real, sin la sobra
+ * innecesaria de 10min -- decisión del usuario, confirmando que la
+ * salida de la motobomba (donde vive el sensor) es prácticamente la
+ * misma en las instalaciones que maneja. Si una instalación futura
+ * resultara tener un `tau`/`L` bastante mayor, este margen habría que
+ * revisarlo con su propio log real, no asumirlo de este. */
 #define PRESION_CAL_ESCALON_PSI                    5.0f
-#define PRESION_CAL_DURACION_MS                600000U   /* 10 minutos */
+#define PRESION_CAL_DURACION_MS                180000U   /* 3 minutos */
+#define PRESION_CAL_BASE_PROMEDIO_MS              5000U   /* agregado 2026-09-25: ventana para promediar la PSI base real (PresionV_GetPresionPsi(), la misma que usa la cascada real) antes de mandar el escalon. Reemplaza confiar en el PRESION_OBJETIVO_LOCAL persistido (un setpoint operativo de campo, puede estar desactualizado) por una medicion real. */
 
-/* Auto-escalon remoto -- CONTROL_HABILITADO=9 (renumerado 2026-09-23,
- * segunda pasada -- antes 8; ver mas abajo, junto al log
- * REMOTO_PID_TEST), agregado 2026-09-23. Mismo espiritu que
+/* Mapeo de ganancia de PRESION (PID#2) -- CALIB=9. Tercer
+ * y definitivo diseño (2026-09-28): rampa de SET_RPM en lazo ABIERTO
+ * (sin presion_pid.c, sin Kp/Ki de por medio), de RPM_MIN a
+ * RPM_MAX_CARGA, PAUSADA por PSI real cada vez que alcanza el ritmo
+ * maximo seguro que el propio operador ya definio via TIEMPO_LLENADO_S
+ * (misma tasa PSI/s que ya usa la rampa de llenado real de MODO=1) --
+ * ver bloque de estado mas abajo para el detalle del freno. No hace
+ * falta ningun paso/dwell/salto-anormal propio (los 3 causaron bugs
+ * reales en el primer diseño, ver memoria del proyecto): el freno por
+ * PSI ya garantiza que el ascenso nunca sea mas rapido de lo que el
+ * operador ya valido como seguro, sin importar la ganancia real de la
+ * instalacion. */
+#define PRESION_GANANCIA_CAL_PASO_LOG_PSI          1.0f    /* loguea (rpm,psi) cada vez que el PSI real avanza esto -- acota el TAMAÑO del log al rango de presion recorrido (base..objetivo), no al tiempo que tarde la prueba en la practica */
+#define PRESION_GANANCIA_CAL_TIMEOUT_MARGEN         1.5f    /* timeout absoluto de ULTIMO recurso = TIEMPO_LLENADO_S * este margen -- solo protege contra un sensor de presion trabado/invalido que el chequeo de PresionV_SensorValido() no alcance a detectar; en operacion normal la prueba siempre termina antes, por objetivo_alcanzado o por rpm_max_carga_alcanzado */
+
+/* Auto-escalon remoto -- CALIB=12 (ver mas abajo, junto al log
+ * REMOTO_PID_TEST). Mismo espiritu que
  * PRESION_CAL_* de arriba, pero el criterio de fin NO puede ser tiempo
  * fijo -- un reporte del aspersor puede tardar hasta 20-25min, asi que
  * termina por la que ocurra primero entre "ya llegaron suficientes
@@ -313,7 +382,8 @@ typedef enum {
     ALERTA_PRESION_OBJETIVO_NO_ALCANZADA       = 1, /* supervisor MODO=1 */
     ALERTA_MODO_REMOTO_OBJETIVO_NO_ALCANZADO   = 2, /* supervisor MODO=2 (fuga) */
     ALERTA_SENSOR_PRESION_LOCAL_FALLA          = 3, /* MODO=1, sensor invalido */
-    ALERTA_MODO_REMOTO_SIN_PRESION_VALIDA      = 4  /* watchdog TIMEOUT_SIN_COMANDO_S en MODO=2 */
+    ALERTA_MODO_REMOTO_SIN_PRESION_VALIDA      = 4, /* watchdog TIMEOUT_SIN_COMANDO_S en MODO=2 */
+    ALERTA_PRESION_MAX_EXCEDIDA                = 5  /* guarda PRESION_MAX, cualquier modo != RALENTI */
 } CodigoAlerta_t;
 
 /* Coordenadas fijas del sitio -- ultimo respaldo si el GPS nunca ha
@@ -469,8 +539,9 @@ int main(void)
 
   HAL_Delay(500);  // dar tiempo al RAK3172 a terminar su propio arranque
 
-  /* AT+MASK=0002 (sub-banda 2): fix real y necesario para el bug
-   * documentado de RUI3 en US915 (con AT+MASK=00FF el join falla con
+  /* AT+MASK=0002 (sub-banda 2; misma sintaxis en AU915, canales 8-15 +
+   * 65): fix real y necesario para el bug
+   * documentado de RUI3 en US915/AU915 (con AT+MASK=00FF el join falla con
    * AT_ERROR) -- NO es diagnostico, se queda. Las 8 consultas de
    * solo lectura que corrian aca (AT+NWM=?, AT+NJM=?, etc.) SI eran
    * diagnostico puro para confirmar el provisioning durante el
@@ -559,24 +630,13 @@ int main(void)
 	  Presion_Update();
 	  PresionV_Update();
 
-  	  /* MEDIDA TEMPORAL DE DIAGNOSTICO (2026-09-03): en CONTROL_HABILITADO=10
-  	   * (sintonizacion de PID, renumerado 2026-09-23 -- ver nota de
-  	   * cabecera del enum en calibracion_flash.h) se saltea RAK3172_Update()/GPS_Update() por
-  	   * completo -- se sospecha que los reintentos de join del RAK3172
-  	   * (o el modulo GPS) estan generando ruido electrico/caidas de
-  	   * voltaje que contaminan la medicion de RPM durante las pruebas de
-  	   * escalon, justo cuando se vio al RAK3172 reiniciandose solo
-  	   * (banner de arranque completo repetido) en mitad de una prueba
-  	   * con oscilacion severa. Aisla la variable para las pruebas de PID:
-  	   * si la oscilacion desaparece con esto, confirma que el problema
-  	   * era electrico, no del PID. QUITAR esta condicion (dejar
-  	   * RAK3172_Update()/GPS_Update() corriendo siempre) en cuanto se
-  	   * resuelva la causa real de los reinicios del RAK3172 -- no es una
-  	   * solucion definitiva, el nodo no puede operar en campo sin LoRa. */
-  	  if (CalibFlash_GetControlHabilitado() != 10U) {
-  		  RAK3172_Update();
-  		  GPS_Update();
-  	  }
+  	  /* RAK3172/GPS SIEMPRE activos (2026-09-29): se quito el aislamiento
+  	   * temporal de diagnostico (2026-09-03) que los saltaba durante los
+  	   * auto-escalones/validaciones de CALIB -- la causa real (ruido en el
+  	   * riel de 3.3V, resuelta con capacitores de desacople) ya no aplica,
+  	   * y asi el nodo sigue reportando por LoRa durante las pruebas. */
+  	  RAK3172_Update();
+  	  GPS_Update();
   	  ComandoSerial_Update();
 
   	  /* Persiste la primera posicion valida del arranque en flash --
@@ -617,9 +677,19 @@ int main(void)
   	   * ya documentado (ver hallazgos de hardware), sin que este
   	   * reintento lo pudiera arreglar. Maquina de 2 pasos no bloqueante
   	   * (MASK, despues JOIN) para no frenar el resto del loop. */
+  	  /* Ademas de lo anterior: si el propio modulo pidio un backoff
+  	   * ("Restricted_Wait_<ms>_ms", ver RAK3172_EstaRestringido()), no
+  	   * tiene sentido reintentar el join durante ese tiempo -- no va a
+  	   * lograr nada y puede resetear/extender la restriccion. Se
+  	   * pausa el reintento entero (incluida la reafirmacion de
+  	   * AT+MASK) hasta que pase. */
   	  static uint32_t ultimoIntentoJoinTick = 0;
   	  static bool reenviandoMaskAntesDeJoin = false;
-  	  if (reenviandoMaskAntesDeJoin && RAK3172_ComandoListo()) {
+  	  if (RAK3172_EstaRestringido()) {
+  		  /* no tocar reenviandoMaskAntesDeJoin -- si ya se habia mandado
+  		   * el MASK, se completa el paso 2 (JOIN) en cuanto la
+  		   * restriccion se levante, en vez de perder ese progreso. */
+  	  } else if (reenviandoMaskAntesDeJoin && RAK3172_ComandoListo()) {
   		  reenviandoMaskAntesDeJoin = false;
   		  printf("RAK3172: aun no unido a la red -- reintentando join (AT+JOIN)\r\n");
   		  RAK3172_Join();
@@ -743,7 +813,7 @@ int main(void)
 	   * confirmarlo (y de ahi alimentar el uplink/telemetria y el ancla de
 	   * inicio_operacion) filtra estos glitches sin afectar ninguna
 	   * logica de seguridad -- el interruptor rapido que fuerza
-	   * CONTROL_HABILITADO a 0 al arrancar el motor (mas abajo) sigue
+	   * CALIB a 0 al arrancar el motor (mas abajo) sigue
 	   * usando Tacometro_EstaDetenido() crudo, sin este debounce, a
 	   * proposito (necesita reaccionar de inmediato). */
 	  static uint8_t estadoCandidato = ESTADO_APAGADO;
@@ -802,7 +872,8 @@ int main(void)
 	  bool tocaEnviarPorIntervalo = (HAL_GetTick() - ultimoEnvioRPM >= INTERVALO_ENVIO_RPM_MS);
 	  bool tocaEnviarPorForzado = CalibFlash_HayReporteForzado();
 
-	  if (RAK3172_EstaUnido() && (tocaEnviarPorIntervalo || tocaEnviarPorForzado) && RAK3172_ComandoListo()) {
+	  if (RAK3172_EstaUnido() && (tocaEnviarPorIntervalo || tocaEnviarPorForzado) && RAK3172_ComandoListo()
+			  && !RAK3172_EstaRestringido()) {
   		  ultimoEnvioRPM = HAL_GetTick();
 
   		  uint32_t fechaHoraLocal = fechaHoraLocalIterActual;
@@ -897,7 +968,15 @@ int main(void)
   		  uint32_t tiempoOpM = (tiempoOpS % 3600UL) / 60UL;
   		  uint32_t tiempoOpSeg = tiempoOpS % 60UL;
 
-  		  printf("Uptime: %02lu:%02lu:%02lu | TiempoOperacion: %02lu:%02lu:%02lu (estado=%d) | Frecuencia: %.1f Hz | RPM instant: %.1f | RPM filtrada: %.1f | Detenido: %d | RuidoFiltrado: %lu | RelojSync: %d | PresionV: %.2f PSI (%.3fV%s)\r\n",
+  		  /* Detenido: %d -- SUSTITUIDO por MODO: %d (agregado 2026-09-24,
+  		   * decision explicita del usuario): a esta altura del proyecto,
+  		   * con MODO ya gobernando de verdad el control (ver seccion 4.3),
+  		   * saber en que MODO esta parado el equipo en cada linea del log
+  		   * general es mas util para operar/depurar en campo que un simple
+  		   * 0/1 de si el tacometro ve pulsos -- esa informacion se sigue
+  		   * infiriendo igual de la propia RPM instantanea/filtrada (0 =
+  		   * detenido) sin perder nada. */
+  		  printf("Uptime: %02lu:%02lu:%02lu | TiempoOperacion: %02lu:%02lu:%02lu (estado=%d) | Frecuencia: %.1f Hz | RPM instant: %.1f | RPM filtrada: %.1f | MODO: %d | RuidoFiltrado: %lu | RelojSync: %d | PresionV: %.2f PSI (%.3fV%s) | VDDA: %.3fV\r\n",
   			  (unsigned long)uptimeH,
   			  (unsigned long)uptimeM,
   			  (unsigned long)uptimeSeg,
@@ -908,12 +987,13 @@ int main(void)
   			  Tacometro_GetFrecuenciaHz(),
   			  Tacometro_GetRPMInstantanea(),
   			  Tacometro_GetRPMFiltrada(),
-  			  Tacometro_EstaDetenido(),
+  			  (int)CalibFlash_GetModo(),
   			  Tacometro_GetContadorRuidoFiltrado(),
   			  Reloj_EstaSincronizado(),
   			  PresionV_GetPresionPsi(),
   			  PresionV_GetVoltaje(),
-  			  PresionV_SensorValido() ? "" : ",FALLA_SENSOR");
+  			  PresionV_SensorValido() ? "" : ",FALLA_SENSOR",
+  			  Presion_GetVdda());
   	  }
 
   	  /* Log de alta frecuencia para identificar el modelo de la planta
@@ -927,17 +1007,20 @@ int main(void)
   	   * tiempo relativo de un escalón en curso -- HAL_GetTick() es
   	   * monótono y no depende de si el reloj ya sincronizó.
   	   *
-  	   * Gateado por (CONTROL_HABILITADO==10, modo sintonización PID -- O
-  	   * ==6, el auto-escalón interno de este mismo lazo, ver
-  	   * INTERNO_CAL_* mas abajo -- renumerado 2026-09-23, segunda
-  	   * pasada: 10 antes era 9, ver README sección 4.4/9): fuera de esos
-  	   * dos modos esto no imprime nada (el monitor se ve igual que antes
-  	   * de que existiera este log). Se apaga solo en cuanto se sale de
-  	   * ambos (a diferencia de una bandera de una sola vía, sigue el
-  	   * mismo estado que ya gatea si PID_KP/KI se pueden tocar -- una
-  	   * sola fuente de verdad). */
+  	   * Gateado por CALIB==6 (auto-escalón interno de este
+  	   * mismo lazo, ver INTERNO_CAL_* mas abajo) o ==7 (validación con
+  	   * ganancias reales, ver VALIDACION_CAL_* mas abajo) -- ⚠️ ya NO
+  	   * incluye el viejo CALIB=10 (ELIMINADO 2026-09-29, ver
+  	   * CalibFlash_SetCalib): ese modo era la única forma de
+  	   * observar el lazo en una sesión totalmente manual, sin ningún CALIB
+  	   * automático -- ahora que las ganancias se tocan directo en CALIB=0,
+  	   * esa sesión manual libre ya no tiene un modo dedicado; para ver
+  	   * este log hay que usar =6 o =7. Fuera de esos dos modos esto no
+  	   * imprime nada (el monitor se ve igual que antes de que existiera
+  	   * este log). */
   	  static uint32_t ultimoLogPrueba = 0;
-  	  if ((CalibFlash_GetControlHabilitado() == 10U || CalibFlash_GetControlHabilitado() == 6U)
+  	  if ((CalibFlash_GetCalib() == 6U
+  	       || CalibFlash_GetCalib() == 7U)
   	      && HAL_GetTick() - ultimoLogPrueba >= 200U) {
   		  ultimoLogPrueba = HAL_GetTick();
   		  printf("PID_TEST,%lu,%.1f,%.1f,%u\r\n",
@@ -947,8 +1030,10 @@ int main(void)
   			  Servo_GetPulsoActualUs());
   	  }
 
-  	  /* Imprime las ganancias vigentes del PID (Kp/Ki) apenas se
-  	   * entra a CONTROL_HABILITADO=10, y cada vez que alguna cambia
+  	  /* Imprime las ganancias vigentes del PID (Kp/Ki) apenas quedan
+  	   * habilitadas para tocarse (MODO=CALIBRACION + CALIB=0, ver
+  	   * CALIB_ID_PID_RPM_KP/KI -- ⚠️ actualizado 2026-09-29, antes era
+  	   * el viejo CALIB=10, ELIMINADO), y cada vez que alguna cambia
   	   * mientras se sigue ahi -- cubre tanto el mando manual de serial
   	   * como un downlink LoRa (los dos pasan por
   	   * CalibFlash_ProcesarParametroConEstado, esto solo lee el
@@ -958,25 +1043,35 @@ int main(void)
   	   * valores de fabrica sin que fuera obvio en el monitor serial --
   	   * ver README seccion 9. Kd removido 2026-09-23 (eliminado del
   	   * protocolo, ver PID_KD en calibracion_flash.h). */
-  	  static uint8_t  modoAnteriorParaGanancias = 0U;
-  	  static float    pidKpAnteriorImpreso = 0.0f;
-  	  static float    pidKiAnteriorImpreso = 0.0f;
-  	  uint8_t modoActualParaGanancias = CalibFlash_GetControlHabilitado();
-  	  if (modoActualParaGanancias == 10U) {
-  		  float pidKpActual = CalibFlash_GetPidKp();
-  		  float pidKiActual = CalibFlash_GetPidKi();
-  		  if (modoAnteriorParaGanancias != 10U ||
-  		      pidKpActual != pidKpAnteriorImpreso ||
-  		      pidKiActual != pidKiAnteriorImpreso) {
-  			  printf("PID_GANANCIAS,Kp=%.4f,Ki=%.4f\r\n",
-  				  pidKpActual, pidKiActual);
-  			  pidKpAnteriorImpreso = pidKpActual;
-  			  pidKiAnteriorImpreso = pidKiActual;
+  	  static bool     gananciasHabilitadasAntes = false;
+  	  static float    pidRpmKpAnteriorImpreso = 0.0f;
+  	  static float    pidRpmKiAnteriorImpreso = 0.0f;
+  	  bool gananciasHabilitadasAhora = (CalibFlash_GetModo() == CALIB_MODO_CALIBRACION)
+  			  && (CalibFlash_GetCalib() == 0U);
+  	  if (gananciasHabilitadasAhora) {
+  		  float pidRpmKpActual = CalibFlash_GetPidRpmKp();
+  		  float pidRpmKiActual = CalibFlash_GetPidRpmKi();
+  		  float pidPsiKpActual = CalibFlash_GetPidPsiKp();
+  		  float pidPsiKiActual = CalibFlash_GetPidPsiKi();
+  		  float pidAspKpActual = CalibFlash_GetPidAspKp();
+  		  float pidAspKiActual = CalibFlash_GetPidAspKi();
+  		  if (!gananciasHabilitadasAntes ||
+  		      pidRpmKpActual != pidRpmKpAnteriorImpreso ||
+  		      pidRpmKiActual != pidRpmKiAnteriorImpreso) {
+  			  printf("PID_1_GANANCIAS,Kp=%.4f,Ki=%.4f\r\n"
+  				 "PID_2_GANANCIAS,Kp=%.4f,Ki=%.4f\r\n"
+  				 "PID_3_GANANCIAS,Kp=%.4f,Ki=%.4f\r\n",
+  				pidRpmKpActual, pidRpmKiActual,
+				pidPsiKpActual, pidPsiKiActual,
+				pidAspKpActual, pidAspKiActual
+				);
+  			  pidRpmKpAnteriorImpreso = pidRpmKpActual;
+  			  pidRpmKiAnteriorImpreso = pidRpmKiActual;
   		  }
   	  }
-  	  modoAnteriorParaGanancias = modoActualParaGanancias;
+  	  gananciasHabilitadasAntes = gananciasHabilitadasAhora;
 
-  	  /* Log de calibración del servo -- gateado a CONTROL_HABILITADO=1
+  	  /* Log de calibración del servo -- gateado a CALIB=1
   	   * (manual) o =2 (barrido), ver README sección 2.4/4.4. Antes de
   	   * esto, la única forma de saber los límites vigentes en banco era
   	   * el ACK de cada downlink de SERVO_PULSO_MIN/MAX ("valor
@@ -986,7 +1081,7 @@ int main(void)
   	   * diferencia de PID_TEST, esto es solo para lectura humana, no se
   	   * analiza después con un script). */
   	  static uint32_t ultimoLogServoCal = 0;
-  	  uint8_t modoParaLogServo = CalibFlash_GetControlHabilitado();
+  	  uint8_t modoParaLogServo = CalibFlash_GetCalib();
   	  if ((modoParaLogServo == 1U || modoParaLogServo == 2U) &&
   	      HAL_GetTick() - ultimoLogServoCal >= 1000U) {
   		  ultimoLogServoCal = HAL_GetTick();
@@ -999,22 +1094,22 @@ int main(void)
 
 
   	  /* Apagado local de seguridad: si el motor arranca mientras se
-  	   * está en modo de calibración del SERVO (CONTROL_HABILITADO=1 o
+  	   * está en modo de calibración del SERVO (CALIB=1 o
   	   * =2), se sale de inmediato -- sin esperar ningún downlink -- para
   	   * no seguir moviendo el servo (en barrido o manual) con el motor
   	   * operando. Mismo criterio que el resto del firmware
   	   * (Tacometro_EstaDetenido()), nunca un switch remoto para algo de
   	   * seguridad física.
-  	   * NO incluye los modos 6/8/9/10 (auto-escalón interno/presión/
-  	   * remoto, sintonización de PID -- renumerados 2026-09-23) a
+  	   * NO incluye los modos 6/10/12 (auto-escalón interno/presión
+  	   * local/remoto -- renumerados 2026-09-29, antes 6/8/9) a
   	   * propósito: esos modos necesitan que el motor siga operando
   	   * durante toda la sesión (README sección 9) -- el servo en esos
   	   * modos lo maneja el
   	   * PID normal exactamente igual que en modo 0, así que no hay
   	   * barrido/posición manual que "se quede corriendo" sin control. */
-  	  uint8_t modoCalibracionServo = CalibFlash_GetControlHabilitado();
+  	  uint8_t modoCalibracionServo = CalibFlash_GetCalib();
   	  if (!Tacometro_EstaDetenido() && (modoCalibracionServo == 1U || modoCalibracionServo == 2U)) {
-  		  CalibFlash_SetControlHabilitado(0U);
+  		  CalibFlash_SetCalib(0U);
   		  CalibFlash_LimpiarObjetivoManualServo(); /* invalida cualquier
   		                                             * objetivo manual pendiente,
   		                                             * no arrastrarlo a una
@@ -1028,18 +1123,82 @@ int main(void)
   		                                 * seguridad. */
   	  }
 
+  	  /* BUG real reportado por el usuario 2026-09-25: con MODO=4 puesto,
+  	   * CALIB=2 (barrido) arrancado, y despues MODO vuelto a
+  	   * 0 -- el barrido seguia corriendo. Causa: el candado de
+  	   * calibracion_flash.c (MODO=CALIBRACION exigido) solo se evalua
+  	   * UNA VEZ, al momento de ACEPTAR el downlink de CALIB
+  	   * -- nada volvia a chequear MODO despues de eso mientras la sesion
+  	   * seguia activa. CALIB=1/2/3/4/5/8 (a diferencia de
+  	   * 6/9/10/12, que YA tienen su propio chequeo continuo de MODO en su
+  	   * maquina de estados) nunca volvian a mirar MODO despues de
+  	   * arrancar, asi que quedaban corriendo indefinidamente aunque MODO
+  	   * ya no fuera CALIBRACION. Fix: chequeo continuo, cada vuelta del
+  	   * loop, para este grupo especifico -- fuerza CALIB=0
+  	   * apenas MODO deja de ser CALIBRACION, sin esperar ningun downlink
+  	   * nuevo (mismo criterio de "apagado local de seguridad" que el
+  	   * bloque de arriba). */
+  	  uint8_t modoCalibracionSinPropioChequeoDeModo = CalibFlash_GetCalib();
+  	  if ((modoCalibracionSinPropioChequeoDeModo == 1U || modoCalibracionSinPropioChequeoDeModo == 2U
+  	       || modoCalibracionSinPropioChequeoDeModo == 3U || modoCalibracionSinPropioChequeoDeModo == 4U
+  	       || modoCalibracionSinPropioChequeoDeModo == 5U || modoCalibracionSinPropioChequeoDeModo == 8U)
+  	      && CalibFlash_GetModo() != CALIB_MODO_CALIBRACION) {
+  		  CalibFlash_SetCalib(0U);
+  		  CalibFlash_LimpiarObjetivoManualServo();
+  		  CalibFlash_SetSetRpm(0.0f);
+  	  }
+
   	  /* PRUEBA DE BANCO -- servo en modo calibración mientras
-  	   * CONTROL_HABILITADO != 0 (ver protocolo de downlinks, renumerado
-  	   * 2026-09-23): =1 barrido automático MIN<->MAX, =2 manual (se
+  	   * CALIB != 0 (ver protocolo de downlinks): =1 manual (se
   	   * queda quieto salvo un downlink nuevo de SERVO_PULSO_MIN/MAX),
-  	   * =10 sintonización de PID (el servo NO cambia de comportamiento
-  	   * respecto a =0 -- sigue siendo pid.c quien lo maneja -- lo único
-  	   * que cambia con =10 es que se desbloquean PID_KP/KI y se activa
-  	   * el log PID_TEST, ver calibracion_flash.c). QUITAR/comentar este
-  	   * bloque si algún día se retira también la calibración remota. */
+  	   * =2 barrido automático MIN<->MAX. Los demas valores (3 a 12, ej.
+  	   * validación de ganancias reales) el servo NO cambia de
+  	   * comportamiento respecto a =0 -- sigue siendo pid.c quien lo
+  	   * maneja -- lo único que cambia es que se desbloquean
+  	   * PID_RPM_KP/KI y/o se activa el log correspondiente, ver
+  	   * calibracion_flash.c. QUITAR/comentar este bloque si algún día
+  	   * se retira también la calibración remota. */
   	  bool motorOperandoAhora = !Tacometro_EstaDetenido();
   	  float rpmMin = CalibFlash_GetRpmMin();
   	  float rpmMax = CalibFlash_GetRpmMax();
+  	  /* RPM_MAX_CARGA (agregado 2026-09-28) -- techo CON CARGA
+  	   * (hidraulico, especifico de esta instalacion, SIEMPRE <= rpmMax),
+  	   * usado por los supervisores de presion local/remota mas abajo
+  	   * (MODO=1/2 real, SIEMPRE con la bomba cargada/presurizada) en vez
+  	   * de rpmMax (el techo MECANICO general del motor). */
+  	  float rpmMaxCarga = CalibFlash_GetRpmMaxCarga();
+
+  	  /* Forzar MODO=RALENTI cada vez que el motor se detiene -- agregado
+  	   * 2026-09-24, decision explicita del usuario tras un caso real de
+  	   * campo: el motor se queda sin diesel (o se detiene por cualquier
+  	   * otro motivo) con MODO=1/2 puesto, tarda horas en reanudarse, y
+  	   * mientras tanto la tuberia se vacia/entra aire. Sin este forzado,
+  	   * MODO se queda tal cual estaba (ver CalibFlash_Init() -- MODO
+  	   * solo se resetea en un reinicio del TID, no en un apagado del
+  	   * motor) -- al reencender con MODO=1/2 todavia puesto, el PID de
+  	   * presion arranca "en caliente" (PresionPid_Init() y la rampa de
+  	   * TASA_LLENADO_PSI_S NO se rearman, porque esas dos solo disparan
+  	   * con un FLANCO DE MODO -- ver presionLocalActivoAhora/Antes mas
+  	   * abajo -- y aca MODO nunca dejo de ser 1) contra una lectura de
+  	   * presion ya vieja/irreal, y puede pedir RPM alta de golpe --
+  	   * mismo riesgo de golpe de ariete que CALIB=9 evita durante
+  	   * calibracion, pero aca en operacion normal, sin ninguna
+  	   * proteccion corriendo.
+  	   *
+  	   * Forzar MODO=0 en CADA apagado del motor (por el motivo que sea,
+  	   * no solo por quedarse sin combustible) convierte cualquier
+  	   * reencendido en un flanco de MODO real, asi que un operador
+  	   * SIEMPRE tiene que confirmar MODO=1/2 a mano despues de un
+  	   * apagado antes de que el control automatico retome -- decision
+  	   * consciente de priorizar seguridad sobre la comodidad de que el
+  	   * control se reanude solo (que es como funcionaba antes de este
+  	   * cambio: MODO persistia en RAM mientras el TID no se reiniciara,
+  	   * sin importar cuantas veces se apagara/prendiera el motor). */
+  	  static bool motorOperandoAntesParaModoSeguro = false;
+  	  if (motorOperandoAntesParaModoSeguro && !motorOperandoAhora) {
+  		  CalibFlash_SetModo(CALIB_MODO_RALENTI);
+  	  }
+  	  motorOperandoAntesParaModoSeguro = motorOperandoAhora;
 
   	  /* ================== MODO: de donde sale el setpoint de RPM ==================
   	   * Agregado 2026-09-07 -- antes MODO se recibia/persistia/ACKeaba
@@ -1047,23 +1206,23 @@ int main(void)
   	   * CalibFlash_Modo_t en calibracion_flash.h) para que coincida con
   	   * la terminologia que ya usa el cliente en campo:
   	   *
-  	   *   RALENTI (0): sin control activo, sin importar SET_RPM/PRESION/
+  	   *   RALENTI (0): sin control activo, sin importar SET_RPM/PRESION_REMOTO/
   	   *     presion local -- setpoint forzado a "sin comandar" (0.0f,
   	   *     mismo valor que el default de SET_RPM). Cae en la rama de
   	   *     "sin control" de mas abajo (servo en SERVO_PULSO_MIN).
   	   *   PRESION_LOCAL (1): setpoint = salida del lazo EXTERNO de
   	   *     presion (presion_pid.c/PresionPid_CalcularSetpointRpm()),
   	   *     comparando PresionV_GetPresionPsi() (sensor propio del TID,
-  	   *     temporal -- ver presion_voltaje.h) contra PRESION_OBJETIVO.
+  	   *     temporal -- ver presion_voltaje.h) contra PRESION_OBJETIVO_LOCAL.
   	   *     Este es el lazo de "llenado de tuberia" / control de presion
   	   *     de salida de la motobomba con el sensor local. Ganancias
-  	   *     propias PRESION_PID_KP/KI, se calibran EN CAMPO igual que
-  	   *     PID_KP/KI (solo con CONTROL_HABILITADO=10).
+  	   *     propias PID_PSI_KP/KI, se calibran EN CAMPO igual que
+  	   *     PID_RPM_KP/KI (solo con MODO=CALIBRACION + CALIB=0).
   	   *   REMOTO (2): setpoint = salida de
   	   *     PresionPidRemoto_CalcularSetpointRpm() contra
-  	   *     PRESION_OBJETIVO_REMOTO, con PRESION recibida por downlink de
+  	   *     PRESION_OBJETIVO_REMOTO, con PRESION_REMOTO recibida por downlink de
   	   *     un nodo aspersor remoto (NO del sensor local -- ver
-  	   *     CalibFlash_SetPresion()). PID en cascada EVENTO-DRIVEN,
+  	   *     CalibFlash_SetPresionRemoto()). PID en cascada EVENTO-DRIVEN,
   	   *     agregado 2026-09-23 en reemplazo de la formula lineal abierta
   	   *     que tenia antes este modo -- un PID no necesita conocer de
   	   *     antemano la relacion presion->RPM de cada instalacion (se
@@ -1090,7 +1249,7 @@ int main(void)
   	  float setpointRpmCrudo = 0.0f;
 
   	  /* Watchdog de TIMEOUT_SIN_COMANDO_S, solo aplica en REMOTO: si no
-  	   * llega una PRESION valida en mas de ese tiempo (cuenta desde el
+  	   * llega una PRESION_REMOTO valida en mas de ese tiempo (cuenta desde el
   	   * boot si nunca llego ninguna), se fuerza el setpoint a "sin
   	   * comandar" -- el motor cae a ralenti natural en vez de sostener
   	   * indefinidamente el ultimo valor de presion, ya viejo. */
@@ -1101,14 +1260,60 @@ int main(void)
   	   * pidActivoAntes/pidActivoAhora mas abajo (pid.c) -- resetea el
   	   * estado interno del lazo externo (integral, ancla de tiempo) al
   	   * entrar a este modo, para no arrastrar un dt inflado por tiempo
-  	   * inactivo ni una integral vieja de una sesion anterior. */
+  	   * inactivo ni una integral vieja de una sesion anterior.
+  	   *
+  	   * ⚠️ Incluye TAMBIEN (MODO=CALIBRACION Y CALIB=10) --
+  	   * agregado 2026-09-24, decision explicita del usuario: TODOS los
+  	   * valores de CALIB deben funcionar EXCLUSIVAMENTE en MODO=4, sin
+  	   * excepcion, ni siquiera CALIB=10 (que hasta este cambio necesitaba
+  	   * MODO=1 real para poder meterle un escalon a PRESION_OBJETIVO_LOCAL).
+  	   * En vez de duplicar toda esta logica del lazo en cascada bajo una
+  	   * condicion nueva, se ensancha esta MISMA variable para que
+  	   * CALIB=10 bajo MODO=4 dispare el mismo camino de codigo (init,
+  	   * rampa de llenado, falla de sensor, supervisor mas abajo) que ya
+  	   * usaba MODO=1 real -- CALIB=10 sigue siendo el unico caso donde
+  	   * "calibracion" implica que el lazo de presion real SI corre, por
+  	   * su propia naturaleza (perturbar un lazo que ya esta cerrado). */
+  	  /* Ensanchada de nuevo 2026-09-25 para incluir MODO=MANUAL_BANCO
+  	   * con SET_PRESION activo (!=0) -- nuevo parametro (ver
+  	   * calibracion_flash.h) que le da al operador, estando en MODO=3,
+  	   * la opcion de sostener una presion en vez de mandar SET_RPM
+  	   * directo. Reusa init/falla-de-sensor/supervisor igual que las
+  	   * otras dos entradas, pero NO la rampa de llenado (ver
+  	   * presionObjetivoVigente/objetivoDelInstante mas abajo) -- a
+  	   * diferencia de PRESION_OBJETIVO_LOCAL (objetivo de campo ya comisionado),
+  	   * SET_PRESION es un valor crudo del operador, mismo criterio que
+  	   * SET_RPM (sin rampa tampoco). */
+  	  /* ⚠️ CALIB=9 (mapeo de ganancia de presion) NO participa de esta
+  	   * cascada -- tercer y ultimo rediseño (2026-09-28): CALIB=9 vuelve
+  	   * a ser un barrido en lazo ABIERTO de SET_RPM (ver bloque propio
+  	   * "Mapeo de ganancia de PRESION" mas abajo), sin presion_pid.c ni
+  	   * Kp/Ki de por medio -- asi la curva RPM->PSI no queda contaminada
+  	   * por un controlador, y no depende de que ya haya un Kp/Ki cargado
+  	   * (con Kp=0 de fabrica, la cascada no hubiera hecho nada). El
+  	   * intento intermedio (reusar esta cascada para CALIB=9) se descarto
+  	   * el mismo dia por ambos motivos. */
+  	  /* Ensanchada de nuevo 2026-09-28 para incluir CALIB=11 (validacion
+  	   * de ganancias reales de presion, ver PRESION_VALIDACION_CAL_* mas
+  	   * arriba) -- igual que CALIB=10, necesita que la cascada real corra
+  	   * (init, escalon sobre PRESION_OBJETIVO_LOCAL, falla de sensor,
+  	   * supervisor) para poder validar el Kp/Ki YA cargado. */
   	  static bool presionLocalActivoAntes = false;
-  	  bool presionLocalActivoAhora = (modoMotor == CALIB_MODO_PRESION_LOCAL);
+  	  bool presionLocalActivoAhora = (modoMotor == CALIB_MODO_PRESION_LOCAL)
+  			  || (modoMotor == CALIB_MODO_CALIBRACION && CalibFlash_GetCalib() == 10U)
+  			  || (modoMotor == CALIB_MODO_CALIBRACION && CalibFlash_GetCalib() == 11U)
+  			  || (modoMotor == CALIB_MODO_MANUAL_BANCO && CalibFlash_GetSetPresion() != 0.0f);
+  	  /* Objetivo vigente para la cascada/supervisor de mas abajo -- SET_PRESION
+  	   * en MODO=3, PRESION_OBJETIVO_LOCAL en los otros dos casos (MODO=1 real o
+  	   * MODO=4+CALIB=10). Centralizado aca para no repetir el if/else en cada
+  	   * lugar que antes llamaba CalibFlash_GetPresionObjetivoLocal() directo. */
+  	  float presionObjetivoVigente = (modoMotor == CALIB_MODO_MANUAL_BANCO)
+  			  ? CalibFlash_GetSetPresion() : CalibFlash_GetPresionObjetivoLocal();
   	  /* Ancla de la rampa de llenado (TASA_LLENADO_PSI_S) -- se toma la
   	   * presion medida en el instante EXACTO de entrar a este modo, no
   	   * un valor fijo asumido. Si la tuberia ya estaba parcialmente
   	   * llena de una sesion anterior, la rampa arranca mas arriba y
-  	   * tarda menos sola en llegar a PRESION_OBJETIVO, sin logica
+  	   * tarda menos sola en llegar a PRESION_OBJETIVO_LOCAL, sin logica
   	   * especial para ese caso -- ver uso mas abajo. */
   	  static float presionLlenadoInicioPsi = 0.0f;
   	  static uint32_t presionLlenadoInicioMs = 0U;
@@ -1124,7 +1329,7 @@ int main(void)
   	   * presionLocalActivoAntes arriba -- resetea el estado interno del
   	   * PID de presion remota (integral, ancla de tiempo) al entrar a
   	   * este modo. Ademas calcula un primer setpoint inmediato con el
-  	   * ultimo dato de PRESION conocido (sin esperar a un reporte
+  	   * ultimo dato de PRESION_REMOTO conocido (sin esperar a un reporte
   	   * "nuevo" -- si no, el motor se quedaria en 0 hasta que llegue el
   	   * proximo reporte, que puede tardar hasta 20-25min si el aspersor
   	   * esta en 0 PSI). remotoPidUltimoTickVisto se marca como "ya visto"
@@ -1136,9 +1341,9 @@ int main(void)
   	  static float remotoPidUltimoSetpointRpm = 0.0f;
   	  if (remotoActivoAhora && !remotoActivoAntes) {
   		  PresionPidRemoto_Init();
-  		  remotoPidUltimoTickVisto = CalibFlash_GetPresionUltimoTickMs();
+  		  remotoPidUltimoTickVisto = CalibFlash_GetPresionRemotoUltimoTickMs();
   		  remotoPidUltimoSetpointRpm = PresionPidRemoto_CalcularSetpointRpm(
-  				  CalibFlash_GetPresionObjetivoRemoto(), CalibFlash_GetPresion());
+  				  CalibFlash_GetPresionObjetivoRemoto(), CalibFlash_GetPresionRemoto());
   		  s_codigoAlertaActual = ALERTA_SIN_ALERTA; /* arranque fresco -- ademas es la
   		                                              * unica forma de limpiar la alerta
   		                                              * final de fuga (MODO ya cayo a
@@ -1149,20 +1354,24 @@ int main(void)
   	  }
   	  remotoActivoAntes = remotoActivoAhora;
 
-  	  /* Igual que el watchdog de PRESION en REMOTO: si el sensor local
+  	  /* Igual que el watchdog de PRESION_REMOTO en REMOTO: si el sensor local
   	   * esta en falla, no tiene sentido cerrar el lazo contra una
   	   * lectura invalida -- se cae a "sin comandar" (ralenti natural)
   	   * en vez de sostener ciegamente el ultimo setpoint calculado. */
   	  static bool presionLocalSensorFallaAntes = false;
   	  bool presionLocalSensorFallaAhora = false;
 
-  	  if (modoMotor == CALIB_MODO_PRESION_LOCAL) {
+  	  /* Reusa presionLocalActivoAhora (ya ensanchado arriba para incluir
+  	   * MODO=CALIBRACION+CH=8) en vez de repetir el chequeo de MODO --
+  	   * asi todo el lazo en cascada (rampa de llenado, falla de sensor,
+  	   * supervisor mas abajo) corre identico para los dos casos. */
+  	  if (presionLocalActivoAhora) {
   		  presionLocalSensorFallaAhora = !PresionV_SensorValido();
   		  if (presionLocalSensorFallaAhora) {
   			  setpointRpmCrudo = 0.0f; /* sin comandar -- cae a ralenti natural mas abajo */
   		  } else {
   			  /* Rampa de llenado (agregada 2026-09-23): en vez de mandarle
-  			   * PRESION_OBJETIVO directo al PID, se le manda un objetivo
+  			   * PRESION_OBJETIVO_LOCAL directo al PID, se le manda un objetivo
   			   * que sube gradualmente desde presionLlenadoInicioPsi --
   			   * "if (rampaObjetivo < objetivoFinal)" recorta sola apenas
   			   * la rampa alcanza el objetivo final, asi que "en rampa" vs
@@ -1170,15 +1379,39 @@ int main(void)
   			   * fase aparte. Con TASA_LLENADO_PSI_S=0 (default), se salta
   			   * la rampa del todo (el "if" de arriba nunca entra) y
   			   * objetivoDelInstante se queda en objetivoFinal directo --
-  			   * mismo comportamiento que existia antes de esto. */
-  			  float objetivoFinal = CalibFlash_GetPresionObjetivo();
-  			  float tasaLlenado = CalibFlash_GetTasaLlenadoPsiS();
+  			   * mismo comportamiento que existia antes de esto.
+  			   *
+  			   * MODO=MANUAL_BANCO (SET_PRESION, agregado 2026-09-25) NO
+  			   * pasa por la rampa -- a diferencia de PRESION_OBJETIVO_LOCAL, es
+  			   * un valor crudo del operador (mismo criterio que SET_RPM,
+  			   * sin suavizado), asi que objetivoDelInstante va directo a
+  			   * presionObjetivoVigente sin mirar TASA_LLENADO_PSI_S.
+  			   *
+  			   * CALIB=10 (MODO=CALIBRACION+CALIB=10) TAMPOCO pasa
+  			   * por la rampa -- agregado 2026-09-28: CALIB=10 necesita un
+  			   * escalon LIMPIO (un salto real, no una rampa) para que la
+  			   * identificacion matematica (K/tau/L en pid_tuning.py) sea
+  			   * valida -- si TASA_LLENADO_PSI_S ya esta configurado con
+  			   * el valor real de campo (ver CALIB_ID_TIEMPO_LLENADO_S),
+  			   * el escalon de CALIB=10 saldria rampeado y la identificacion
+  			   * quedaria corrompida. CALIB=11 (validacion de ganancias
+  			   * reales de presion, agregado el mismo dia) tampoco pasa
+  			   * por la rampa por el mismo motivo -- su ventana de
+  			   * asentamiento (30s) y su watchdog de oscilacion asumen un
+  			   * escalon limpio, no uno rampeado. */
+  			  float objetivoFinal = presionObjetivoVigente;
   			  float objetivoDelInstante = objetivoFinal;
-  			  if (tasaLlenado > 0.0f) {
-  				  float segundosTranscurridos = (HAL_GetTick() - presionLlenadoInicioMs) / 1000.0f;
-  				  float rampaObjetivo = presionLlenadoInicioPsi + tasaLlenado * segundosTranscurridos;
-  				  if (rampaObjetivo < objetivoFinal) {
-  					  objetivoDelInstante = rampaObjetivo;
+  			  bool esCalib10EnCalibracion = (modoMotor == CALIB_MODO_CALIBRACION
+  					  && (CalibFlash_GetCalib() == 10U
+  					      || CalibFlash_GetCalib() == 11U));
+  			  if (modoMotor != CALIB_MODO_MANUAL_BANCO && !esCalib10EnCalibracion) {
+  				  float tasaLlenado = CalibFlash_GetTasaLlenadoPsiS();
+  				  if (tasaLlenado > 0.0f) {
+  					  float segundosTranscurridos = (HAL_GetTick() - presionLlenadoInicioMs) / 1000.0f;
+  					  float rampaObjetivo = presionLlenadoInicioPsi + tasaLlenado * segundosTranscurridos;
+  					  if (rampaObjetivo < objetivoFinal) {
+  						  objetivoDelInstante = rampaObjetivo;
+  					  }
   				  }
   			  }
   			  setpointRpmCrudo = PresionPid_CalcularSetpointRpm(
@@ -1201,7 +1434,7 @@ int main(void)
   	  }
   	  presionLocalSensorFallaAntes = presionLocalSensorFallaAhora;
 
-  	  /* Supervisor de "no se puede llegar a PRESION_OBJETIVO" (ver
+  	  /* Supervisor de "no se puede llegar a PRESION_OBJETIVO_LOCAL" (ver
   	   * PRESION_SUPERVISOR_* mas arriba y README seccion 8/12). NO es
   	   * una proteccion contra sobre-acelerar el motor -- eso ya lo
   	   * garantiza presion_pid.c recortando su propia salida a
@@ -1218,10 +1451,10 @@ int main(void)
   	  static bool     presionSupervisorEnVentana = false;
   	  static uint32_t presionSupervisorIntentosFallidos = 0U;
 
-  	  if (modoMotor == CALIB_MODO_PRESION_LOCAL && !presionLocalSensorFallaAhora) {
-  		  float presionObjetivoActual = CalibFlash_GetPresionObjetivo();
+  	  if (presionLocalActivoAhora && !presionLocalSensorFallaAhora) {
+  		  float presionObjetivoActual = presionObjetivoVigente;
   		  float presionMedidaActual = PresionV_GetPresionPsi();
-  		  bool saturadoSinAlcanzar = (setpointRpmCrudo >= rpmMax)
+  		  bool saturadoSinAlcanzar = (setpointRpmCrudo >= rpmMaxCarga)
   				  && (presionMedidaActual < presionObjetivoActual * (1.0f - PRESION_SUPERVISOR_TOLERANCIA_FRACCION));
 
   		  if (!saturadoSinAlcanzar) {
@@ -1239,9 +1472,9 @@ int main(void)
   			  presionSupervisorIntentosFallidos++;
   			  presionSupervisorInicioVentanaMs = HAL_GetTick();
   			  if (presionSupervisorIntentosFallidos >= PRESION_SUPERVISOR_INTENTOS_MAX) {
-  				  printf("ALERTA,PRESION_OBJETIVO_NO_ALCANZADA,intentos=%lu,presion_objetivo=%.2f,presion_actual=%.2f,rpm_max=%.1f\r\n",
+  				  printf("ALERTA,PRESION_OBJETIVO_NO_ALCANZADA,intentos=%lu,presion_objetivo=%.2f,presion_actual=%.2f,rpm_max_carga=%.1f\r\n",
   					  (unsigned long)presionSupervisorIntentosFallidos, presionObjetivoActual,
-  					  presionMedidaActual, rpmMax);
+  					  presionMedidaActual, rpmMaxCarga);
   				  s_codigoAlertaActual = ALERTA_PRESION_OBJETIVO_NO_ALCANZADA;
   				  CalibFlash_ForzarReporte();
   			  }
@@ -1251,16 +1484,41 @@ int main(void)
   		  presionSupervisorIntentosFallidos = 0U;
   	  }
 
-  	  if (modoMotor == CALIB_MODO_MANUAL_BANCO) {
+  	  if ((modoMotor == CALIB_MODO_MANUAL_BANCO || modoMotor == CALIB_MODO_CALIBRACION)
+  			  && !presionLocalActivoAhora) {
+  		  /* ⚠️ BUG REAL encontrado y corregido 2026-09-25: este bloque
+  		   * corre DESPUES del bloque de la cascada de presion (mas
+  		   * arriba) -- sin el "&& !presionLocalActivoAhora" de arriba,
+  		   * pisaba SIEMPRE el setpointRpmCrudo ya calculado por
+  		   * PresionPid_CalcularSetpointRpm() con el SET_RPM crudo
+  		   * (tipicamente 0, sin comandar) cada vez que modoMotor fuera
+  		   * CALIBRACION -- es decir, CH=8 NUNCA llegaba a mover RPM de
+  		   * verdad desde que se ensancho presionLocalActivoAhora el
+  		   * 2026-09-24 para incluir MODO=CALIBRACION+CH=8 (el calculo se
+  		   * hacia, pero se pisaba antes de llegar al servo). Mismo
+  		   * problema hubiera afectado a MODO=MANUAL_BANCO+SET_PRESION
+  		   * (agregado hoy, ver mas arriba) si no se corregia aca.
+  		   *
+  		   * CALIBRACION (agregado 2026-09-24) se comporta IGUAL que
+  		   * MANUAL_BANCO para el setpoint -- ambos son "SET_RPM directo,
+  		   * sin ningun PID de presion" (salvo la excepcion de arriba). La
+  		   * diferencia entre los dos no es de comportamiento del lazo, es
+  		   * de GATING (ver calibracion_flash.c): MANUAL_BANCO es uso
+  		   * operativo real de campo (trasladar manguera/aspersor),
+  		   * CALIBRACION es el modo exclusivo que exige CALIB != 0
+  		   * para desbloquear calibraciones -- separarlos evita que un
+  		   * operador que simplemente esta reubicando el aspersor
+  		   * (MODO=3 real) quede habilitado sin querer para arrancar una
+  		   * sesion de calibracion. */
   		  setpointRpmCrudo = CalibFlash_GetSetRpm();
   	  } else if (modoMotor == CALIB_MODO_REMOTO) {
   		  uint32_t timeoutMs = CalibFlash_GetTimeoutSinComandoS() * 1000UL;
-  		  presionExpiradaAhora = (HAL_GetTick() - CalibFlash_GetPresionUltimoTickMs()) >= timeoutMs;
+  		  presionExpiradaAhora = (HAL_GetTick() - CalibFlash_GetPresionRemotoUltimoTickMs()) >= timeoutMs;
   		  if (presionExpiradaAhora) {
   			  setpointRpmCrudo = 0.0f; /* sin comandar -- cae a ralenti natural mas abajo */
   		  } else {
   			  /* PID evento-driven (agregado 2026-09-23, reemplaza la formula
-  			   * lineal PRESION_OFFSET_RPM + PRESION_GANANCIA_RPM*PRESION):
+  			   * lineal PRESION_OFFSET_RPM + PRESION_GANANCIA_RPM*PRESION_REMOTO):
   			   * solo se recalcula cuando llega un reporte NUEVO del aspersor
   			   * -- mismo detector de flanco que usa el supervisor mas abajo,
   			   * pero con su propia variable estatica (necesita correr ANTES
@@ -1270,22 +1528,22 @@ int main(void)
   			   * viejo, y es justo el dt REAL entre llamadas (no un ciclo
   			   * fijo) lo que hace correcto el termino integral pese a la
   			   * cadencia irregular del aspersor. */
-  			  uint32_t tickPresionActual = CalibFlash_GetPresionUltimoTickMs();
+  			  uint32_t tickPresionActual = CalibFlash_GetPresionRemotoUltimoTickMs();
   			  if (tickPresionActual != remotoPidUltimoTickVisto) {
   				  remotoPidUltimoTickVisto = tickPresionActual;
   				  remotoPidUltimoSetpointRpm = PresionPidRemoto_CalcularSetpointRpm(
-  						  CalibFlash_GetPresionObjetivoRemoto(), CalibFlash_GetPresion());
+  						  CalibFlash_GetPresionObjetivoRemoto(), CalibFlash_GetPresionRemoto());
   			  }
   			  setpointRpmCrudo = remotoPidUltimoSetpointRpm;
   		  }
 
   		  if (presionExpiradaAhora != presionExpiradaAntes) {
   			  if (presionExpiradaAhora) {
-  				  printf("MODO_REMOTO: sin PRESION valida hace mas de %lus -- forzando ralenti (TIMEOUT_SIN_COMANDO_S)\r\n",
+  				  printf("MODO_REMOTO: sin PRESION_REMOTO valida hace mas de %lus -- forzando ralenti (TIMEOUT_SIN_COMANDO_S)\r\n",
   						 (unsigned long)CalibFlash_GetTimeoutSinComandoS());
   				  s_codigoAlertaActual = ALERTA_MODO_REMOTO_SIN_PRESION_VALIDA;
   			  } else {
-  				  printf("MODO_REMOTO: PRESION valida de nuevo -- reanudando control por presion\r\n");
+  				  printf("MODO_REMOTO: PRESION_REMOTO valida de nuevo -- reanudando control por presion\r\n");
   				  s_codigoAlertaActual = ALERTA_SIN_ALERTA;
   			  }
   			  CalibFlash_ForzarReporte();
@@ -1300,8 +1558,8 @@ int main(void)
   	   * version final:
   	   *
   	   * 1) Cuenta REPORTES NUEVOS consecutivos (via
-  	   *    CalibFlash_GetPresionUltimoTickMs()), no segundos de reloj --
-  	   *    la PRESION del aspersor solo cambia cuando llega un reporte
+  	   *    CalibFlash_GetPresionRemotoUltimoTickMs()), no segundos de reloj --
+  	   *    la PRESION_REMOTO del aspersor solo cambia cuando llega un reporte
   	   *    real, y su cadencia (confirmada en campo 2026-09-23) varia
   	   *    segun su propio estado: ~20-25min con presion en 0, ~20s
   	   *    mientras esta en rampa (justo el estado de una fuga real,
@@ -1311,7 +1569,7 @@ int main(void)
   	   * 2) Compara contra PRESION_OBJETIVO_REMOTO (ID 30, la presion que
   	   *    se ESPERA que reporte el aspersor, configurada en este TID)
   	   *    cuando esta calibrada -- mismo criterio que MODO=1: saturado
-  	   *    en RPM_MAX Y la PRESION remota real sigue lejos del objetivo
+  	   *    en RPM_MAX Y la PRESION_REMOTO real sigue lejos del objetivo
   	   *    (±5%). Si no esta calibrada (0, default), cae al criterio
   	   *    simple de "solo saturado".
   	   *
@@ -1330,7 +1588,7 @@ int main(void)
   	   *    MODO a RALENTI de verdad (unica escritura real a flash de todo
   	   *    este ciclo).
   	   *
-  	   * Todo el bloque se ignora mientras la PRESION esta vencida --
+  	   * Todo el bloque se ignora mientras la PRESION_REMOTO esta vencida --
   	   * ese es un problema de SEÑAL (se resuelve solo con el watchdog de
   	   * arriba, que ya fuerza ralenti por su cuenta), no de fuga; si se
   	   * cae la señal a mitad de un ciclo de reintentos, se cancela el
@@ -1348,16 +1606,16 @@ int main(void)
   				  remotoEnRetroceso = false;
   			  }
   		  } else {
-  			  uint32_t tickPresionActual = CalibFlash_GetPresionUltimoTickMs();
+  			  uint32_t tickPresionActual = CalibFlash_GetPresionRemotoUltimoTickMs();
   			  bool llegoReporteNuevo = (tickPresionActual != remotoSupervisorUltimoTickVisto);
 
   			  if (llegoReporteNuevo) {
   				  remotoSupervisorUltimoTickVisto = tickPresionActual;
 
   				  float objetivoRemoto = CalibFlash_GetPresionObjetivoRemoto();
-  				  float presionRemotaActual = CalibFlash_GetPresion();
+  				  float presionRemotaActual = CalibFlash_GetPresionRemoto();
   				  bool  objetivoConfigurado = objetivoRemoto > 0.0f;
-  				  bool  saturadoEnMax = setpointRpmCrudo >= rpmMax;
+  				  bool  saturadoEnMax = setpointRpmCrudo >= rpmMaxCarga;
   				  bool  lejosDelObjetivo = objetivoConfigurado
   						  && (presionRemotaActual < objetivoRemoto * (1.0f - PRESION_SUPERVISOR_TOLERANCIA_FRACCION));
   				  bool  alertarEsteReporte = objetivoConfigurado
@@ -1373,9 +1631,9 @@ int main(void)
   				  } else {
   					  remotoSupervisorIntentosFallidos++;
   					  if (remotoSupervisorIntentosFallidos >= PRESION_SUPERVISOR_REMOTO_INTENTOS_MAX) {
-  						  printf("ALERTA,MODO_REMOTO_OBJETIVO_NO_ALCANZADO,intentos=%lu,presion_remota=%.1f,objetivo_remoto=%.1f,presion_local=%.2f,rpm_max=%.1f\r\n",
+  						  printf("ALERTA,MODO_REMOTO_OBJETIVO_NO_ALCANZADO,intentos=%lu,presion_remota=%.1f,objetivo_remoto=%.1f,presion_local=%.2f,rpm_max_carga=%.1f\r\n",
   							  (unsigned long)remotoSupervisorIntentosFallidos, presionRemotaActual,
-  							  objetivoRemoto, PresionV_GetPresionPsi(), rpmMax);
+  							  objetivoRemoto, PresionV_GetPresionPsi(), rpmMaxCarga);
   						  s_codigoAlertaActual = ALERTA_MODO_REMOTO_OBJETIVO_NO_ALCANZADO;
   						  CalibFlash_ForzarReporte();
   						  CalibFlash_SetModo(CALIB_MODO_RALENTI);
@@ -1414,29 +1672,37 @@ int main(void)
   	   * arriba) para poder reusar tools/pid_tuning/pid_tuning.py sin
   	   * cambios -- ese script es agnóstico de qué variable física
   	   * representa "setpoint"/"medida", solo ajusta un modelo FOPDT a la
-  	   * serie de tiempo. Gateado a (CONTROL_HABILITADO==10, sesion manual
-  	   * de sintonizacion que desbloquea PRESION_PID_KP/KI -- O ==8, el
-  	   * auto-escalon de este mismo lazo, ver mas abajo -- renumerado
-  	   * 2026-09-23, segunda pasada: 10 antes era 9, 8 antes era 7) Y
-  	   * MODO==1 (sin esto el lazo externo no corre, no tendría sentido
-  	   * loguearlo) -- fuera de ahí no imprime nada. Incluye tanto la
-  	   * presión (lo que este lazo controla) como el RPM resultante (su
-  	   * salida, que a su vez es el setpoint del lazo interno) para poder
-  	   * ver los dos lazos de la cascada en la misma línea. */
+  	   * serie de tiempo. Gateado a CALIB==10 (auto-escalon de
+  	   * este mismo lazo, ver mas abajo) o ==11 (validación con ganancias
+  	   * reales, agregado 2026-09-28) -- ⚠️ el viejo CALIB=10
+  	   * [numeración pre-2026-09-29, sintonización manual] ya NO existe
+  	   * (ELIMINADO 2026-09-29, ver CalibFlash_SetCalib) y nunca gateó
+  	   * este log, asi que no hay nada que quitar de esta condicion. Y el
+  	   * lazo externo corriendo de verdad (`presionLocalActivoAhora`, ver nota
+  	   * junto a esa variable) -- sin esto el lazo externo no corre, no
+  	   * tendría sentido loguearlo. Incluye tanto la presión (lo que este
+  	   * lazo controla) como el RPM resultante (su salida, que a su vez
+  	   * es el setpoint del lazo interno) para poder ver los dos lazos de
+  	   * la cascada en la misma línea.
+  	   *
+  	   * CALIB=9 NO entra aca (ver nota junto a presionLocalActivoAhora mas
+  	   * arriba) -- tiene su propio log PRESION_GANANCIA_CAL,PASO, formato
+  	   * distinto, ver bloque propio mas abajo. */
   	  static uint32_t ultimoLogPruebaPresion = 0;
-  	  if ((CalibFlash_GetControlHabilitado() == 10U || CalibFlash_GetControlHabilitado() == 8U)
-  	      && modoMotor == CALIB_MODO_PRESION_LOCAL
+  	  if ((CalibFlash_GetCalib() == 10U
+  	       || CalibFlash_GetCalib() == 11U)
+  	      && presionLocalActivoAhora
   	      && HAL_GetTick() - ultimoLogPruebaPresion >= 200U) {
   		  ultimoLogPruebaPresion = HAL_GetTick();
   		  printf("PRESION_PID_TEST,%lu,%.2f,%.2f,%.1f,%.1f\r\n",
   			  (unsigned long)HAL_GetTick(),
-  			  CalibFlash_GetPresionObjetivo(),
+  			  CalibFlash_GetPresionObjetivoLocal(),
   			  PresionV_GetPresionPsi(),
   			  setpointRpmCrudo,
   			  Tacometro_GetRPMFiltrada());
   	  }
 
-  	  /* Auto-escalon INTERNO (PID#1) -- CONTROL_HABILITADO=6 (ver
+  	  /* Auto-escalon INTERNO (PID#1) -- CALIB=6 (ver
   	   * INTERNO_CAL_* mas arriba). Solo automatiza mandar el escalon de
   	   * SET_RPM y esperar -- el servo lo sigue manejando pid.c
   	   * normalmente via MODO=3 (pidActivoAhora ya incluye
@@ -1451,15 +1717,30 @@ int main(void)
   	  static uint32_t internoCalInicioMs = 0;
   	  static float    internoCalSetRpmBase = 0.0f;
   	  static uint8_t  modoControlAnteriorParaInterno = 0U;
+  	  /* Auto-set/restore de PID_RPM_KP=1/PID_RPM_KI=0 -- agregado 2026-09-25, a
+  	   * pedido del usuario: antes esto era una convencion PROCEDIMENTAL
+  	   * (el operador tenia que bajarlos a mano por downlink antes de
+  	   * mandar CALIB=6, documentado en seccion 9), ahora lo hace el propio
+  	   * firmware al entrar, y restaura lo que hubiera antes al salir (por
+  	   * cualquiera de los 3 motivos) -- asi no hace falta acordarse de
+  	   * hacerlo a mano, y la Kp/Ki ya sintonizada que estaba guardada no
+  	   * se pierde (queda en flash, restaurada, no borrada). */
+  	  static float    internoCalPidRpmKpGuardado = 0.0f;
+  	  static float    internoCalPidRpmKiGuardado = 0.0f;
 
-  	  if (modoControlAnteriorParaInterno != 6U && CalibFlash_GetControlHabilitado() == 6U) {
+  	  if (modoControlAnteriorParaInterno != 6U && CalibFlash_GetCalib() == 6U) {
   		  internoCalEstado = 1U;
-  		  printf("INTERNO_CAL,INICIO,esperando_motor=%d,esperando_modo3=%d\r\n",
-  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_MANUAL_BANCO));
+  		  internoCalPidRpmKpGuardado = CalibFlash_GetPidRpmKp();
+  		  internoCalPidRpmKiGuardado = CalibFlash_GetPidRpmKi();
+  		  CalibFlash_SetPidRpmKp(1.0f);
+  		  CalibFlash_SetPidRpmKi(0.0f);
+  		  printf("INTERNO_CAL,INICIO,esperando_motor=%d,esperando_modo_calibracion=%d,pid_kp_guardado=%.4f,pid_ki_guardado=%.4f\r\n",
+  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_CALIBRACION),
+  			  internoCalPidRpmKpGuardado, internoCalPidRpmKiGuardado);
   	  }
 
-  	  if (CalibFlash_GetControlHabilitado() == 6U) {
-  		  if (internoCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_MANUAL_BANCO) {
+  	  if (CalibFlash_GetCalib() == 6U) {
+  		  if (internoCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_CALIBRACION) {
   			  internoCalSetRpmBase = CalibFlash_GetRpmMin();
   			  CalibFlash_SetSetRpm(internoCalSetRpmBase + INTERNO_CAL_ESCALON_RPM);
   			  internoCalEstado = 2U;
@@ -1471,114 +1752,425 @@ int main(void)
   			  printf("INTERNO_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
   			  CalibFlash_SetSetRpm(0.0f);
   			  internoCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
-  		  } else if (internoCalEstado == 2U && modoMotor != CALIB_MODO_MANUAL_BANCO) {
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (internoCalEstado == 2U && modoMotor != CALIB_MODO_CALIBRACION) {
   			  printf("INTERNO_CAL,ABORTADO,motivo=modo_cambio\r\n");
   			  CalibFlash_SetSetRpm(0.0f);
   			  internoCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
+  			  CalibFlash_SetCalib(0U);
   		  } else if (internoCalEstado == 2U && HAL_GetTick() - internoCalInicioMs >= INTERNO_CAL_DURACION_MS) {
   			  printf("INTERNO_CAL,COMPLETO,duracion_s=%lu\r\n",
   				  (unsigned long)(INTERNO_CAL_DURACION_MS / 1000U));
   			  CalibFlash_SetSetRpm(0.0f);
   			  internoCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
+  			  CalibFlash_SetCalib(0U);
   		  }
   	  }
-  	  modoControlAnteriorParaInterno = CalibFlash_GetControlHabilitado();
+  	  /* Restauracion CENTRALIZADA (no una por cada rama de arriba) --
+  	   * cubre CUALQUIER forma de salir de CALIB=6, incluyendo una que
+  	   * ninguna rama de arriba contempla: cancelar (downlink CALIB!=6, o
+  	   * cualquier otro motivo) mientras todavia esta en 'esperando'
+  	   * (internoCalEstado==1U, antes de que arranque el escalon) -- ahi
+  	   * ninguna de las ramas de aborto de arriba corre (todas exigen
+  	   * estado==2U), así que sin este bloque el Kp=1/Ki=0 quedaría
+  	   * pegado para siempre. Detecta la transicion 6 -> cualquier otra
+  	   * cosa comparando contra el valor de la vuelta anterior, antes de
+  	   * pisarlo mas abajo. */
+  	  if (modoControlAnteriorParaInterno == 6U && CalibFlash_GetCalib() != 6U) {
+  		  CalibFlash_SetPidRpmKp(internoCalPidRpmKpGuardado);
+  		  CalibFlash_SetPidRpmKi(internoCalPidRpmKiGuardado);
+  	  }
+  	  modoControlAnteriorParaInterno = CalibFlash_GetCalib();
 
-  	  /* Auto-escalon de presion local -- CONTROL_HABILITADO=8 (ver
+  	  /* Validacion de ganancias reales (PID#1) -- CALIB=7
+  	   * (ver VALIDACION_CAL_* mas arriba). Clon mecanico de INTERNO_CAL
+  	   * (=6) -- mismo escalon +200 RPM sobre RPM_MIN, mismo log PID_TEST,
+  	   * requiere MODO=4 + motor operando -- pero NO fuerza PID_RPM_KP/KI
+  	   * (deja lo que ya este cargado en flash) y dura 4 minutos en vez
+  	   * de 1, mas el watchdog de oscilacion sostenida (ver comentario de
+  	   * las constantes). Variable de flanco PROPIA, mismo motivo que
+  	   * internoCalEstado. */
+  	  static uint8_t  validacionCalEstado = 1U;
+  	  static uint32_t validacionCalInicioMs = 0;
+  	  static uint32_t validacionCalInicioAsentamientoMs = 0;
+  	  static float    validacionCalSetRpmBase = 0.0f;
+  	  static uint8_t  modoControlAnteriorParaValidacion = 0U;
+  	  static int8_t   validacionCalEstadoCruce = 0; /* -1/0/+1, Schmitt trigger sobre el signo de (RPM-SET_RPM) con piso VALIDACION_CAL_OSC_UMBRAL_RPM */
+  	  static uint32_t validacionCalCruceTicks[VALIDACION_CAL_OSC_MAX_CRUCES] = {0};
+  	  static uint32_t validacionCalCrucesTotales = 0U;
+
+  	  if (modoControlAnteriorParaValidacion != 7U && CalibFlash_GetCalib() == 7U) {
+  		  validacionCalEstado = 1U;
+  		  printf("VALIDACION_CAL,INICIO,esperando_motor=%d,esperando_modo_calibracion=%d,pid_kp=%.4f,pid_ki=%.4f\r\n",
+  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_CALIBRACION),
+  			  CalibFlash_GetPidRpmKp(), CalibFlash_GetPidRpmKi());
+  	  }
+
+  	  if (CalibFlash_GetCalib() == 7U) {
+  		  if (validacionCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_CALIBRACION) {
+  			  validacionCalSetRpmBase = CalibFlash_GetRpmMin();
+  			  CalibFlash_SetSetRpm(validacionCalSetRpmBase + VALIDACION_CAL_ESCALON_RPM);
+  			  validacionCalEstado = 2U;
+  			  validacionCalInicioMs = HAL_GetTick();
+  			  validacionCalInicioAsentamientoMs = validacionCalInicioMs + VALIDACION_CAL_ESPERA_ASENTAMIENTO_MS;
+  			  validacionCalEstadoCruce = 0;
+  			  validacionCalCrucesTotales = 0U;
+  			  printf("VALIDACION_CAL,ESCALON,set_rpm_base=%.1f,set_rpm_nuevo=%.1f,duracion_s=%lu\r\n",
+  				  validacionCalSetRpmBase, validacionCalSetRpmBase + VALIDACION_CAL_ESCALON_RPM,
+  				  (unsigned long)(VALIDACION_CAL_DURACION_MS / 1000U));
+  		  } else if (validacionCalEstado == 2U && !motorOperandoAhora) {
+  			  printf("VALIDACION_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
+  			  CalibFlash_SetSetRpm(0.0f);
+  			  validacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (validacionCalEstado == 2U && modoMotor != CALIB_MODO_CALIBRACION) {
+  			  printf("VALIDACION_CAL,ABORTADO,motivo=modo_cambio\r\n");
+  			  CalibFlash_SetSetRpm(0.0f);
+  			  validacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (validacionCalEstado == 2U && HAL_GetTick() >= validacionCalInicioAsentamientoMs) {
+  			  /* Watchdog de oscilacion sostenida -- solo activo despues de
+  			   * la espera de asentamiento (ver constantes). Schmitt
+  			   * trigger: cada vez que el error cruza de un lado al otro
+  			   * del piso VALIDACION_CAL_OSC_UMBRAL_RPM, cuenta como un
+  			   * cruce -- ignora todo lo que se quede dentro de la banda
+  			   * muerta +-piso (ahi no cambia validacionCalEstadoCruce). */
+  			  float error = Tacometro_GetRPMFiltrada() - CalibFlash_GetSetRpm();
+  			  int8_t nuevoEstadoCruce = validacionCalEstadoCruce;
+  			  if (error > VALIDACION_CAL_OSC_UMBRAL_RPM) {
+  				  nuevoEstadoCruce = 1;
+  			  } else if (error < -VALIDACION_CAL_OSC_UMBRAL_RPM) {
+  				  nuevoEstadoCruce = -1;
+  			  }
+  			  if (nuevoEstadoCruce != validacionCalEstadoCruce
+  			      && validacionCalEstadoCruce != 0 && nuevoEstadoCruce != 0) {
+  				  for (uint32_t i = 0U; i < VALIDACION_CAL_OSC_MAX_CRUCES - 1U; i++) {
+  					  validacionCalCruceTicks[i] = validacionCalCruceTicks[i + 1U];
+  				  }
+  				  validacionCalCruceTicks[VALIDACION_CAL_OSC_MAX_CRUCES - 1U] = HAL_GetTick();
+  				  validacionCalCrucesTotales++;
+  			  }
+  			  validacionCalEstadoCruce = nuevoEstadoCruce;
+
+  			  if (validacionCalCrucesTotales >= VALIDACION_CAL_OSC_MAX_CRUCES
+  			      && (HAL_GetTick() - validacionCalCruceTicks[0]) <= VALIDACION_CAL_OSC_VENTANA_MS) {
+  				  printf("VALIDACION_CAL,ABORTADO,motivo=oscilacion_sostenida,cruces=%lu,ventana_ms=%lu\r\n",
+  					  (unsigned long)validacionCalCrucesTotales, (unsigned long)VALIDACION_CAL_OSC_VENTANA_MS);
+  				  CalibFlash_SetSetRpm(0.0f);
+  				  validacionCalEstado = 1U;
+  				  CalibFlash_SetCalib(0U);
+  			  } else if (HAL_GetTick() - validacionCalInicioMs >= VALIDACION_CAL_DURACION_MS) {
+  				  printf("VALIDACION_CAL,COMPLETO,duracion_s=%lu\r\n",
+  					  (unsigned long)(VALIDACION_CAL_DURACION_MS / 1000U));
+  				  CalibFlash_SetSetRpm(0.0f);
+  				  validacionCalEstado = 1U;
+  				  CalibFlash_SetCalib(0U);
+  			  }
+  		  } else if (validacionCalEstado == 2U && HAL_GetTick() - validacionCalInicioMs >= VALIDACION_CAL_DURACION_MS) {
+  			  /* Completa por duracion incluso si todavia esta dentro de la
+  			   * espera de asentamiento (ventana de asentamiento configurada
+  			   * mas larga que la duracion total por error de parametros,
+  			   * por ejemplo) -- no deberia pasar con los defaults, pero
+  			   * cubre el caso sin depender de que el watchdog este activo. */
+  			  printf("VALIDACION_CAL,COMPLETO,duracion_s=%lu\r\n",
+  				  (unsigned long)(VALIDACION_CAL_DURACION_MS / 1000U));
+  			  CalibFlash_SetSetRpm(0.0f);
+  			  validacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  }
+  	  }
+  	  modoControlAnteriorParaValidacion = CalibFlash_GetCalib();
+
+  	  /* Validacion de ganancias reales (PID#2, presion) --
+  	   * CALIB=11 (ver PRESION_VALIDACION_CAL_* mas arriba).
+  	   * Equivalente de VALIDACION_CAL (=7) para el lazo de presion: NO
+  	   * fuerza PID_PSI_KI (deja lo que ya este cargado en flash),
+  	   * dura 4 minutos, y tiene el mismo watchdog de oscilacion
+  	   * sostenida -- pero clona de PRESION_CAL (=10) la parte de medir
+  	   * una base real y mandar el escalon sobre PRESION_OBJETIVO_LOCAL (a
+  	   * diferencia del lazo de RPM, que siempre arranca del mismo
+  	   * RPM_MIN conocido, el punto de partida de presion depende de la
+  	   * instalacion). Guarda/restaura PRESION_OBJETIVO_LOCAL igual que CALIB=10.
+  	   * Estados: 1=esperando motor+MODO=4, 2=midiendo base,
+  	   * 3=corriendo (escalon activo, watchdog de oscilacion). */
+  	  static uint8_t  presionValidacionCalEstado = 1U;
+  	  static uint32_t presionValidacionCalInicioBaseMs = 0U;
+  	  static float    presionValidacionCalPsiAcumulada = 0.0f;
+  	  static uint32_t presionValidacionCalMuestrasBase = 0U;
+  	  static float    presionValidacionCalObjetivoLocalOriginal = 0.0f;
+  	  static uint32_t presionValidacionCalInicioMs = 0U;
+  	  static uint32_t presionValidacionCalInicioAsentamientoMs = 0U;
+  	  static int8_t   presionValidacionCalEstadoCruce = 0; /* -1/0/+1, Schmitt trigger sobre el signo de (PSI-PRESION_OBJETIVO_LOCAL) con piso PRESION_VALIDACION_CAL_OSC_UMBRAL_PSI */
+  	  static uint32_t presionValidacionCalCruceTicks[PRESION_VALIDACION_CAL_OSC_MAX_CRUCES] = {0};
+  	  static uint32_t presionValidacionCalCrucesTotales = 0U;
+  	  static uint8_t  modoControlAnteriorParaValidacionPresion = 0U;
+
+  	  if (modoControlAnteriorParaValidacionPresion != 11U && CalibFlash_GetCalib() == 11U) {
+  		  presionValidacionCalEstado = 1U;
+  		  presionValidacionCalObjetivoLocalOriginal = CalibFlash_GetPresionObjetivoLocal();
+  		  printf("PRESION_VALIDACION_CAL,INICIO,esperando_motor=%d,esperando_modo_calibracion=%d,presion_pid_kp=%.4f,presion_pid_ki=%.4f\r\n",
+  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_CALIBRACION),
+  			  CalibFlash_GetPidPsiKp(), CalibFlash_GetPidPsiKi());
+  	  }
+
+  	  if (CalibFlash_GetCalib() == 11U) {
+  		  if (presionValidacionCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_CALIBRACION) {
+  			  presionValidacionCalEstado = 2U;
+  			  presionValidacionCalInicioBaseMs = HAL_GetTick();
+  			  presionValidacionCalPsiAcumulada = 0.0f;
+  			  presionValidacionCalMuestrasBase = 0U;
+  		  } else if (presionValidacionCalEstado == 2U && !motorOperandoAhora) {
+  			  printf("PRESION_VALIDACION_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
+  			  presionValidacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionValidacionCalEstado == 2U && modoMotor != CALIB_MODO_CALIBRACION) {
+  			  printf("PRESION_VALIDACION_CAL,ABORTADO,motivo=modo_cambio\r\n");
+  			  presionValidacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionValidacionCalEstado == 2U) {
+  			  presionValidacionCalPsiAcumulada += PresionV_GetPresionPsi();
+  			  presionValidacionCalMuestrasBase++;
+  			  if (HAL_GetTick() - presionValidacionCalInicioBaseMs >= PRESION_CAL_BASE_PROMEDIO_MS) {
+  				  float psiBase = presionValidacionCalPsiAcumulada / (float)presionValidacionCalMuestrasBase;
+  				  if (!CalibFlash_SetPresionObjetivoLocal(psiBase + PRESION_CAL_ESCALON_PSI)) {
+  					  /* El escalon no cabe bajo PRESION_MAX (el setter exige objetivo < PRESION_MAX) */
+  					  printf("PRESION_VALIDACION_CAL,ABORTADO,motivo=escalon_supera_presion_max,psi_base=%.2f,objetivo_pedido=%.2f,presion_max=%.2f\r\n",
+  						  psiBase, psiBase + PRESION_CAL_ESCALON_PSI, CalibFlash_GetPresionMax());
+  					  presionValidacionCalEstado = 1U;
+  					  CalibFlash_SetCalib(0U);
+  				  } else {
+  					  presionValidacionCalEstado = 3U;
+  					  presionValidacionCalInicioMs = HAL_GetTick();
+  					  presionValidacionCalInicioAsentamientoMs = presionValidacionCalInicioMs + PRESION_VALIDACION_CAL_ESPERA_ASENTAMIENTO_MS;
+  					  presionValidacionCalEstadoCruce = 0;
+  					  presionValidacionCalCrucesTotales = 0U;
+  					  printf("PRESION_VALIDACION_CAL,BASE,psi_base=%.2f\r\n", psiBase);
+  					  printf("PRESION_VALIDACION_CAL,ESCALON,objetivo_base=%.2f,objetivo_nuevo=%.2f,duracion_s=%lu\r\n",
+  						  psiBase, psiBase + PRESION_CAL_ESCALON_PSI,
+  						  (unsigned long)(PRESION_VALIDACION_CAL_DURACION_MS / 1000U));
+  				  }
+  			  }
+  		  } else if (presionValidacionCalEstado == 3U && !motorOperandoAhora) {
+  			  printf("PRESION_VALIDACION_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
+  			  presionValidacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionValidacionCalEstado == 3U && modoMotor != CALIB_MODO_CALIBRACION) {
+  			  printf("PRESION_VALIDACION_CAL,ABORTADO,motivo=modo_cambio\r\n");
+  			  presionValidacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionValidacionCalEstado == 3U && HAL_GetTick() >= presionValidacionCalInicioAsentamientoMs) {
+  			  /* Watchdog de oscilacion sostenida -- mismo mecanismo que
+  			   * VALIDACION_CAL (Schmitt trigger sobre el signo del error,
+  			   * piso anti-ruido PRESION_VALIDACION_CAL_OSC_UMBRAL_PSI). */
+  			  float error = PresionV_GetPresionPsi() - CalibFlash_GetPresionObjetivoLocal();
+  			  int8_t nuevoEstadoCruce = presionValidacionCalEstadoCruce;
+  			  if (error > PRESION_VALIDACION_CAL_OSC_UMBRAL_PSI) {
+  				  nuevoEstadoCruce = 1;
+  			  } else if (error < -PRESION_VALIDACION_CAL_OSC_UMBRAL_PSI) {
+  				  nuevoEstadoCruce = -1;
+  			  }
+  			  if (nuevoEstadoCruce != presionValidacionCalEstadoCruce
+  			      && presionValidacionCalEstadoCruce != 0 && nuevoEstadoCruce != 0) {
+  				  for (uint32_t i = 0U; i < PRESION_VALIDACION_CAL_OSC_MAX_CRUCES - 1U; i++) {
+  					  presionValidacionCalCruceTicks[i] = presionValidacionCalCruceTicks[i + 1U];
+  				  }
+  				  presionValidacionCalCruceTicks[PRESION_VALIDACION_CAL_OSC_MAX_CRUCES - 1U] = HAL_GetTick();
+  				  presionValidacionCalCrucesTotales++;
+  			  }
+  			  presionValidacionCalEstadoCruce = nuevoEstadoCruce;
+
+  			  if (presionValidacionCalCrucesTotales >= PRESION_VALIDACION_CAL_OSC_MAX_CRUCES
+  			      && (HAL_GetTick() - presionValidacionCalCruceTicks[0]) <= PRESION_VALIDACION_CAL_OSC_VENTANA_MS) {
+  				  printf("PRESION_VALIDACION_CAL,ABORTADO,motivo=oscilacion_sostenida,cruces=%lu,ventana_ms=%lu\r\n",
+  					  (unsigned long)presionValidacionCalCrucesTotales, (unsigned long)PRESION_VALIDACION_CAL_OSC_VENTANA_MS);
+  				  presionValidacionCalEstado = 1U;
+  				  CalibFlash_SetCalib(0U);
+  			  } else if (HAL_GetTick() - presionValidacionCalInicioMs >= PRESION_VALIDACION_CAL_DURACION_MS) {
+  				  printf("PRESION_VALIDACION_CAL,COMPLETO,duracion_s=%lu\r\n",
+  					  (unsigned long)(PRESION_VALIDACION_CAL_DURACION_MS / 1000U));
+  				  presionValidacionCalEstado = 1U;
+  				  CalibFlash_SetCalib(0U);
+  			  }
+  		  } else if (presionValidacionCalEstado == 3U && HAL_GetTick() - presionValidacionCalInicioMs >= PRESION_VALIDACION_CAL_DURACION_MS) {
+  			  /* Completa por duracion incluso si todavia esta dentro de la
+  			   * espera de asentamiento -- mismo respaldo que VALIDACION_CAL. */
+  			  printf("PRESION_VALIDACION_CAL,COMPLETO,duracion_s=%lu\r\n",
+  				  (unsigned long)(PRESION_VALIDACION_CAL_DURACION_MS / 1000U));
+  			  presionValidacionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  }
+  	  }
+  	  /* Restauracion CENTRALIZADA de PRESION_OBJETIVO_LOCAL -- mismo patron que
+  	   * CALIB=10: cubre CUALQUIER forma de salir de CALIB=11 (completo,
+  	   * abortado por cualquier motivo, o cancelado antes de que el
+  	   * escalon arranque). NO restaura PID_PSI_KI (a diferencia de
+  	   * CALIB=10) -- este modo nunca lo toca. */
+  	  if (modoControlAnteriorParaValidacionPresion == 11U && CalibFlash_GetCalib() != 11U) {
+  		  CalibFlash_SetPresionObjetivoLocal(presionValidacionCalObjetivoLocalOriginal);
+  	  }
+  	  modoControlAnteriorParaValidacionPresion = CalibFlash_GetCalib();
+
+  	  /* Auto-escalon de presion local -- CALIB=10 (ver
   	   * PRESION_CAL_* mas arriba). Solo automatiza mandar el escalon y
   	   * esperar -- el servo lo sigue manejando presion_pid.c/pid.c
-  	   * normalmente (pidActivoAhora ya incluye modoControl==8, ver mas
+  	   * normalmente (pidActivoAhora ya incluye modoControl==10, ver mas
   	   * abajo), esto NO toca el servo directo como GANANCIA_CAL. Requiere
   	   * MODO=1 ya puesto por el operador (si no, se queda esperando, no
-  	   * es un error). Estados: 1=esperando motor+MODO=1, 2=corriendo.
-  	   * ⚠️ Renumerado 2026-09-23, antes era CONTROL_HABILITADO=7. */
+  	   * es un error). Estados: 1=esperando motor+MODO=1, 2=midiendo
+  	   * presion base real, 3=corriendo.
+  	   *
+  	   * Estado 2 (midiendo base) agregado 2026-09-25: antes el escalon
+  	   * salia de PRESION_OBJETIVO_LOCAL+5, y ese "PRESION_OBJETIVO_LOCAL" era el
+  	   * setpoint operativo PERSISTIDO (podia venir de una sesion de campo
+  	   * anterior, sin relacion con la presion real del momento) -- a
+  	   * diferencia de INTERNO_CAL, que usa RPM_MIN (una constante
+  	   * calibrada del mecanismo, no un setpoint de campo). Ahora mide un
+  	   * promedio real de PresionV_GetPresionPsi() (la misma que ve la
+  	   * cascada real, ver presionLocalActivoAhora) antes de mandar nada,
+  	   * mismo patron que PRESION_GANANCIA_CAL. El PRESION_OBJETIVO_LOCAL
+  	   * ORIGINAL (el que hubiera antes de entrar) se guarda aparte y se
+  	   * restaura al salir -- ya no es la base del escalon, solo el valor
+  	   * a restaurar. */
   	  static uint8_t  presionCalEstado = 1U;
   	  static uint32_t presionCalInicioMs = 0;
-  	  static float    presionCalObjetivoBase = 0.0f;
+  	  static uint32_t presionCalInicioBaseMs = 0;
+  	  static float    presionCalPsiAcumulada = 0.0f;
+  	  static uint32_t presionCalMuestrasBase = 0U;
+  	  static float    presionCalPsiBase = 0.0f;
+  	  static float    presionCalObjetivoLocalOriginal = 0.0f;
+  	  /* Auto-set/restore de PID_PSI_KI=0 -- agregado 2026-09-25, a
+  	   * pedido del usuario: mismo motivo que el Kp/Ki de CH=6 (identificar
+  	   * con Ki activo indefine la formula de K, ver README seccion 9), pero
+  	   * aca SOLO se fuerza Ki -- el Kp de prueba SI varia por instalacion
+  	   * (a diferencia del lazo interno), asi que sigue siendo el operador
+  	   * quien lo elige (ver pid_tuning.py sugerir-kp-presion) y lo carga
+  	   * el mismo por downlink antes de correr CALIB=10. */
+  	  static float    presionCalPidPsiKiGuardado = 0.0f;
   	  /* Deteccion de flanco de entrada PROPIA para los bloques de auto-
-  	   * escalon (6/8/9) -- independiente de 'modoControlAnterior' (usada
+  	   * escalon (6/10/12) -- independiente de 'modoControlAnterior' (usada
   	   * mas abajo por el if/else de auto-cals que mueven el servo
   	   * directo), porque ese se declara/actualiza mas adelante en el
   	   * archivo y estos bloques corren antes en el loop. */
   	  static uint8_t modoControlAnteriorParaCal = 0U;
 
-  	  if (modoControlAnteriorParaCal != 8U && CalibFlash_GetControlHabilitado() == 8U) {
+  	  if (modoControlAnteriorParaCal != 10U && CalibFlash_GetCalib() == 10U) {
   		  presionCalEstado = 1U;
-  		  printf("PRESION_CAL,INICIO,esperando_motor=%d,esperando_modo1=%d\r\n",
-  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_PRESION_LOCAL));
+  		  presionCalObjetivoLocalOriginal = CalibFlash_GetPresionObjetivoLocal();
+  		  presionCalPidPsiKiGuardado = CalibFlash_GetPidPsiKi();
+  		  CalibFlash_SetPidPsiKi(0.0f);
+  		  /* ⚠️ Espera MODO=CALIBRACION, NO MODO=1 -- agregado 2026-09-24:
+  		   * CALIB=10 ahora arranca (y corre) exclusivamente bajo MODO=4,
+  		   * igual que el resto de las calibraciones. El lazo de presion
+  		   * real SI sigue corriendo mientras tanto -- ver el ensanche de
+  		   * presionLocalActivoAhora mas arriba, que trata (MODO=CALIBRACION
+  		   * + CALIB=10) igual que MODO=1 real para todo lo que importa
+  		   * (init, rampa de llenado, falla de sensor, supervisor). */
+  		  printf("PRESION_CAL,INICIO,esperando_motor=%d,esperando_modo_calibracion=%d,presion_pid_ki_guardado=%.4f\r\n",
+  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_CALIBRACION),
+  			  presionCalPidPsiKiGuardado);
   	  }
 
-  	  if (CalibFlash_GetControlHabilitado() == 8U) {
-  		  if (presionCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_PRESION_LOCAL) {
-  			  presionCalObjetivoBase = CalibFlash_GetPresionObjetivo();
-  			  CalibFlash_SetPresionObjetivo(presionCalObjetivoBase + PRESION_CAL_ESCALON_PSI);
+  	  if (CalibFlash_GetCalib() == 10U) {
+  		  if (presionCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_CALIBRACION) {
   			  presionCalEstado = 2U;
-  			  presionCalInicioMs = HAL_GetTick();
-  			  printf("PRESION_CAL,ESCALON,objetivo_base=%.2f,objetivo_nuevo=%.2f,duracion_s=%lu\r\n",
-  				  presionCalObjetivoBase, presionCalObjetivoBase + PRESION_CAL_ESCALON_PSI,
-  				  (unsigned long)(PRESION_CAL_DURACION_MS / 1000U));
+  			  presionCalInicioBaseMs = HAL_GetTick();
+  			  presionCalPsiAcumulada = 0.0f;
+  			  presionCalMuestrasBase = 0U;
   		  } else if (presionCalEstado == 2U && !motorOperandoAhora) {
   			  printf("PRESION_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
-  			  CalibFlash_SetPresionObjetivo(presionCalObjetivoBase);
   			  presionCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
-  		  } else if (presionCalEstado == 2U && modoMotor != CALIB_MODO_PRESION_LOCAL) {
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionCalEstado == 2U && modoMotor != CALIB_MODO_CALIBRACION) {
   			  printf("PRESION_CAL,ABORTADO,motivo=modo_cambio\r\n");
-  			  CalibFlash_SetPresionObjetivo(presionCalObjetivoBase);
   			  presionCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
-  		  } else if (presionCalEstado == 2U && HAL_GetTick() - presionCalInicioMs >= PRESION_CAL_DURACION_MS) {
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionCalEstado == 2U) {
+  			  presionCalPsiAcumulada += PresionV_GetPresionPsi();
+  			  presionCalMuestrasBase++;
+  			  if (HAL_GetTick() - presionCalInicioBaseMs >= PRESION_CAL_BASE_PROMEDIO_MS) {
+  				  presionCalPsiBase = presionCalPsiAcumulada / (float)presionCalMuestrasBase;
+  				  if (!CalibFlash_SetPresionObjetivoLocal(presionCalPsiBase + PRESION_CAL_ESCALON_PSI)) {
+  					  /* El escalon no cabe bajo PRESION_MAX (el setter exige objetivo < PRESION_MAX) */
+  					  printf("PRESION_CAL,ABORTADO,motivo=escalon_supera_presion_max,psi_base=%.2f,objetivo_pedido=%.2f,presion_max=%.2f\r\n",
+  						  presionCalPsiBase, presionCalPsiBase + PRESION_CAL_ESCALON_PSI, CalibFlash_GetPresionMax());
+  					  presionCalEstado = 1U;
+  					  CalibFlash_SetCalib(0U);
+  				  } else {
+  					  presionCalEstado = 3U;
+  					  presionCalInicioMs = HAL_GetTick();
+  					  printf("PRESION_CAL,BASE,psi_base=%.2f\r\n", presionCalPsiBase);
+  					  printf("PRESION_CAL,ESCALON,objetivo_base=%.2f,objetivo_nuevo=%.2f,duracion_s=%lu\r\n",
+  						  presionCalPsiBase, presionCalPsiBase + PRESION_CAL_ESCALON_PSI,
+  						  (unsigned long)(PRESION_CAL_DURACION_MS / 1000U));
+  				  }
+  			  }
+  		  } else if (presionCalEstado == 3U && !motorOperandoAhora) {
+  			  printf("PRESION_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
+  			  presionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionCalEstado == 3U && modoMotor != CALIB_MODO_CALIBRACION) {
+  			  printf("PRESION_CAL,ABORTADO,motivo=modo_cambio\r\n");
+  			  presionCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionCalEstado == 3U && HAL_GetTick() - presionCalInicioMs >= PRESION_CAL_DURACION_MS) {
   			  printf("PRESION_CAL,COMPLETO,duracion_s=%lu\r\n",
   				  (unsigned long)(PRESION_CAL_DURACION_MS / 1000U));
-  			  CalibFlash_SetPresionObjetivo(presionCalObjetivoBase);
   			  presionCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
+  			  CalibFlash_SetCalib(0U);
   		  }
+  	  }
+  	  /* Restauracion CENTRALIZADA de PRESION_OBJETIVO_LOCAL/PID_PSI_KI --
+  	   * mismo motivo y mismo patron que el de CALIB=6 mas arriba: cubre
+  	   * CUALQUIER forma de salir de CALIB=10 (incluida cancelar mientras
+  	   * todavia esta en estado 1 o 2, antes de que el escalon arranque),
+  	   * en vez de una restauracion por cada rama de arriba. */
+  	  if (modoControlAnteriorParaCal == 10U && CalibFlash_GetCalib() != 10U) {
+  		  CalibFlash_SetPresionObjetivoLocal(presionCalObjetivoLocalOriginal);
+  		  CalibFlash_SetPidPsiKi(presionCalPidPsiKiGuardado);
   	  }
 
   	  /* Log de IDENTIFICACION EN LAZO ABIERTO para el lazo de presion
   	   * REMOTA (MODO=2), agregado 2026-09-23. A diferencia de PID_TEST/
   	   * PRESION_PID_TEST (200ms fijos), este es EVENTO-DRIVEN -- solo
-  	   * imprime cuando llega un reporte NUEVO de PRESION del aspersor
+  	   * imprime cuando llega un reporte NUEVO de PRESION_REMOTO del aspersor
   	   * (mismo detector de flanco que ya usan el PID remoto y su
   	   * supervisor, pero con su propia variable estatica, independiente).
-  	   * No tiene sentido mandarlo a intervalos fijos: la PRESION remota
+  	   * No tiene sentido mandarlo a intervalos fijos: la PRESION_REMOTO
   	   * ni cambia entre un reporte y el siguiente, y la cadencia real
   	   * (20s a 20-25min segun el estado del aspersor) no calza con un
   	   * muestreo de 200ms.
   	   *
-  	   * Gateado a (CONTROL_HABILITADO==10, sesion manual -- O ==9, el
-  	   * auto-escalon de este mismo lazo, ver mas abajo -- renumerado
-  	   * 2026-09-23, segunda pasada: 10 antes era 9, 9 antes era 8) Y
-  	   * MODO==3 (MANUAL_BANCO) -- a proposito NO es MODO==2: para
-  	   * identificar la planta hace falta mandar el escalon de RPM
-  	   * DIRECTO, bypaseando el PID que todavia no esta calibrado (Kp/Ki
-  	   * en 0), asi que la prueba real se hace en modo banco (SET_RPM
-  	   * manual), no en modo remoto. Ver tools/pid_tuning/pid_tuning.py
-  	   * (identify-remoto, lazo ABIERTO -- distinto de
-  	   * identify/identify-presion, que son en lazo cerrado). */
+  	   * Gateado a CALIB==12 (auto-escalon de este mismo
+  	   * lazo, ver mas abajo -- ⚠️ el viejo CALIB=10 [numeración
+  	   * pre-2026-09-29] nunca gateó este log y ya no existe, ver
+  	   * CalibFlash_SetCalib) Y MODO==4
+  	   * (CALIBRACION, antes era MANUAL_BANCO=3 hasta el 2026-09-24, ver
+  	   * nota de CALIB_MODO_CALIBRACION en calibracion_flash.h) -- a
+  	   * proposito NO es MODO==2: para identificar la planta hace falta
+  	   * mandar el escalon de RPM DIRECTO, bypaseando el PID que todavia
+  	   * no esta calibrado (Kp/Ki en 0), asi que la prueba real se hace
+  	   * en modo calibracion (SET_RPM manual), no en modo remoto. Ver
+  	   * tools/pid_tuning/pid_tuning.py (identify-remoto, lazo ABIERTO --
+  	   * distinto de identify/identify-presion, que son en lazo cerrado). */
   	  static uint32_t remotoPidTestUltimoTickVisto = 0U;
-  	  if ((CalibFlash_GetControlHabilitado() == 10U || CalibFlash_GetControlHabilitado() == 9U)
-  	      && modoMotor == CALIB_MODO_MANUAL_BANCO) {
-  		  uint32_t tickPresionActual = CalibFlash_GetPresionUltimoTickMs();
+  	  if (CalibFlash_GetCalib() == 12U
+  	      && modoMotor == CALIB_MODO_CALIBRACION) {
+  		  uint32_t tickPresionActual = CalibFlash_GetPresionRemotoUltimoTickMs();
   		  if (tickPresionActual != remotoPidTestUltimoTickVisto) {
   			  remotoPidTestUltimoTickVisto = tickPresionActual;
   			  printf("REMOTO_PID_TEST,%lu,%.1f,%.1f\r\n",
   				  (unsigned long)HAL_GetTick(),
   				  CalibFlash_GetSetRpm(),
-  				  CalibFlash_GetPresion());
+  				  CalibFlash_GetPresionRemoto());
   		  }
   	  }
 
-  	  /* Auto-escalon remoto -- CONTROL_HABILITADO=9 (ver REMOTO_CAL_* mas
-  	   * arriba, renumerado 2026-09-23, antes era 8). Mismo espiritu que
+  	  /* Auto-escalon remoto -- CALIB=12 (ver REMOTO_CAL_* mas
+  	   * arriba). Mismo espiritu que
   	   * PRESION_CAL de arriba: solo automatiza mandar el escalon de
   	   * SET_RPM y esperar reportes -- el servo lo sigue manejando pid.c
   	   * normalmente via MODO=3 (pidActivoAhora ya incluye
-  	   * modoControl==9, ver mas abajo). Requiere MODO=3 (MANUAL_BANCO)
+  	   * modoControl==12, ver mas abajo). Requiere MODO=3 (MANUAL_BANCO)
   	   * ya puesto por el operador. Termina por lo que ocurra primero:
   	   * REMOTO_CAL_REPORTES_OBJETIVO reportes nuevos, o
   	   * REMOTO_CAL_TIMEOUT_MS de seguridad. Estados: 1=esperando
@@ -1589,17 +2181,17 @@ int main(void)
   	  static uint32_t remotoCalUltimoTickVisto = 0U;
   	  static uint32_t remotoCalReportesContados = 0U;
 
-  	  if (modoControlAnteriorParaCal != 9U && CalibFlash_GetControlHabilitado() == 9U) {
+  	  if (modoControlAnteriorParaCal != 12U && CalibFlash_GetCalib() == 12U) {
   		  remotoCalEstado = 1U;
-  		  printf("REMOTO_CAL,INICIO,esperando_motor=%d,esperando_modo3=%d\r\n",
-  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_MANUAL_BANCO));
+  		  printf("REMOTO_CAL,INICIO,esperando_motor=%d,esperando_modo_calibracion=%d\r\n",
+  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_CALIBRACION));
   	  }
 
-  	  if (CalibFlash_GetControlHabilitado() == 9U) {
-  		  if (remotoCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_MANUAL_BANCO) {
+  	  if (CalibFlash_GetCalib() == 12U) {
+  		  if (remotoCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_CALIBRACION) {
   			  /* Base = RPM_MIN, NO CalibFlash_GetSetRpm() -- SET_RPM ya
   			   * quedo en 0.0f al entrar a este modo (limpieza de
-  			   * seguridad al cambiar CONTROL_HABILITADO, ver
+  			   * seguridad al cambiar CALIB, ver
   			   * calibracion_flash.c), asi que leerlo aca siempre daria
   			   * 0, no un valor util. Con SET_RPM=0 el motor ya esta
   			   * posado en su ralenti natural (controlSolicitado=false,
@@ -1610,7 +2202,7 @@ int main(void)
   			   * haya mandado algo antes. */
   			  remotoCalSetRpmBase = CalibFlash_GetRpmMin();
   			  CalibFlash_SetSetRpm(remotoCalSetRpmBase + REMOTO_CAL_ESCALON_RPM);
-  			  remotoCalUltimoTickVisto = CalibFlash_GetPresionUltimoTickMs();
+  			  remotoCalUltimoTickVisto = CalibFlash_GetPresionRemotoUltimoTickMs();
   			  remotoCalReportesContados = 0U;
   			  remotoCalEstado = 2U;
   			  remotoCalInicioMs = HAL_GetTick();
@@ -1618,206 +2210,237 @@ int main(void)
   				  remotoCalSetRpmBase, remotoCalSetRpmBase + REMOTO_CAL_ESCALON_RPM,
   				  (unsigned long)REMOTO_CAL_REPORTES_OBJETIVO, (unsigned long)(REMOTO_CAL_TIMEOUT_MS / 1000U));
   		  } else if (remotoCalEstado == 2U) {
-  			  uint32_t tickRemotoCalActual = CalibFlash_GetPresionUltimoTickMs();
+  			  uint32_t tickRemotoCalActual = CalibFlash_GetPresionRemotoUltimoTickMs();
   			  if (tickRemotoCalActual != remotoCalUltimoTickVisto) {
   				  remotoCalUltimoTickVisto = tickRemotoCalActual;
   				  remotoCalReportesContados++;
   				  printf("REMOTO_CAL,REPORTE,n=%lu,presion=%.1f\r\n",
-  					  (unsigned long)remotoCalReportesContados, CalibFlash_GetPresion());
+  					  (unsigned long)remotoCalReportesContados, CalibFlash_GetPresionRemoto());
   			  }
 
   			  if (!motorOperandoAhora) {
   				  printf("REMOTO_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
   				  CalibFlash_SetSetRpm(0.0f); /* vuelve a sin comandar, no a RPM_MIN */
   				  remotoCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
-  			  } else if (modoMotor != CALIB_MODO_MANUAL_BANCO) {
+  				  CalibFlash_SetCalib(0U);
+  			  } else if (modoMotor != CALIB_MODO_CALIBRACION) {
   				  printf("REMOTO_CAL,ABORTADO,motivo=modo_cambio\r\n");
   				  CalibFlash_SetSetRpm(0.0f); /* vuelve a sin comandar, no a RPM_MIN */
   				  remotoCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
+  				  CalibFlash_SetCalib(0U);
   			  } else if (remotoCalReportesContados >= REMOTO_CAL_REPORTES_OBJETIVO) {
   				  printf("REMOTO_CAL,COMPLETO,motivo=reportes_objetivo,reportes=%lu\r\n",
   					  (unsigned long)remotoCalReportesContados);
   				  CalibFlash_SetSetRpm(0.0f); /* vuelve a sin comandar, no a RPM_MIN */
   				  remotoCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
+  				  CalibFlash_SetCalib(0U);
   			  } else if (HAL_GetTick() - remotoCalInicioMs >= REMOTO_CAL_TIMEOUT_MS) {
   				  printf("REMOTO_CAL,COMPLETO,motivo=timeout,reportes=%lu\r\n",
   					  (unsigned long)remotoCalReportesContados);
   				  CalibFlash_SetSetRpm(0.0f); /* vuelve a sin comandar, no a RPM_MIN */
   				  remotoCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
+  				  CalibFlash_SetCalib(0U);
   			  }
   		  }
   	  }
 
-  	  /* Barrido de ganancia de PRESION (PID#2) -- CONTROL_HABILITADO=11
-  	   * (agregado 2026-09-24, ver PRESION_GANANCIA_CAL_* mas arriba).
-  	   * Equivalente de GANANCIA_CAL (CONTROL_HABILITADO=5) pero para el
-  	   * lazo de presion: en vez de mover el servo directo, manda SET_RPM
-  	   * directo en MODO=3 (sin presion_pid corriendo -- lazo ABIERTO para
-  	   * la relacion RPM->presion). Requiere MODO=3 ya puesto por el
-  	   * operador (si no, se queda esperando, no es error) y ASUME que la
-  	   * tuberia ya esta llena/presurizada -- ver nota de riesgo en el
-  	   * bloque de constantes y README seccion 12, Fase D.
+  	  /* Mapeo de ganancia de PRESION (PID#2) -- CALIB=9.
+  	   * Tercer y definitivo diseño (2026-09-28, ver constantes
+  	   * PRESION_GANANCIA_CAL_* mas arriba): rampa de SET_RPM en lazo
+  	   * ABIERTO (sin presion_pid.c/Kp/Ki, el servo lo mueve pid.c del
+  	   * PID#1 ya validado, igual que REMOTO_CAL/INTERNO_CAL), de RPM_MIN
+  	   * a RPM_MAX_CARGA, PAUSADA cada vez que el PSI real ya alcanzo el
+  	   * ritmo maximo seguro (misma tasa PSI/s que ya usa la rampa de
+  	   * llenado real de MODO=1, derivada de TIEMPO_LLENADO_S). El log
+  	   * PRESION_GANANCIA_CAL,PASO (formato viejo, compatible con
+  	   * pid_tuning.py sugerir-kp-presion/--ganancia-log) ES el mapeo de
+  	   * ganancia -- se emite cada vez que el PSI real avanza
+  	   * PRESION_GANANCIA_CAL_PASO_LOG_PSI, sin importar cuanto tiempo
+  	   * tarde en la practica.
   	   *
-  	   * Estados: 1=esperando motor+MODO=3, 2=midiendo presion base en
-  	   * RPM_MIN (promedio simple sobre PRESION_GANANCIA_CAL_BASE_PROMEDIO_MS),
-  	   * 3=rampeando SET_RPM hacia el objetivo del paso en curso (NO un
-  	   * salto -- ver nota de riesgo #1), 4=asentando (esperando a que la
-  	   * PRESION responda ya con el SET_RPM del paso ya alcanzado). */
+  	   * Estados: 1=esperando motor+MODO=4, 2=midiendo base (motor a
+  	   * RPM_MIN), 3=rampeando (freno por PSI activo). */
   	  static uint8_t  presionGanCalEstado = 1U;
-  	  static uint32_t presionGanCalInicioEtapaMs = 0;
-  	  static uint32_t presionGanCalInicioTotalMs = 0; /* ancla de PRESION_GANANCIA_CAL_TIMEOUT_MS -- SEPARADA de InicioEtapaMs, que se resetea en cada paso/rampa. Arranca al confirmar motor+MODO=3 (estado 1->2), no antes (no cuenta el tiempo esperando al operador) */
-  	  static float    presionGanCalPsiBase = 0.0f;
-  	  static float    presionGanCalPsiTecho = 0.0f;
+  	  static uint32_t presionGanCalInicioBaseMs = 0U;
   	  static float    presionGanCalPsiAcumulada = 0.0f;
   	  static uint32_t presionGanCalMuestrasBase = 0U;
-  	  static float    presionGanCalSetRpmAncla = 0.0f;
-  	  static float    presionGanCalSetRpmObjetivo = 0.0f;
-  	  static float    presionGanCalPsiAnterior = 0.0f;
+  	  static float    presionGanCalPsiBase = 0.0f;
+  	  static float    presionGanCalTasaPsiS = 0.0f;
+  	  static float    presionGanCalTasaRpmS = 0.0f;
+  	  static float    presionGanCalTiempoAvanceS = 0.0f;
+  	  static float    presionGanCalRpmActual = 0.0f;
+  	  static float    presionGanCalUltimoPsiLogueado = 0.0f;
+  	  static uint32_t presionGanCalInicioRampaMs = 0U;
+  	  static uint32_t presionGanCalUltimoTickMs = 0U;
 
-  	  if (modoControlAnteriorParaCal != 11U && CalibFlash_GetControlHabilitado() == 11U) {
+  	  if (modoControlAnteriorParaCal != 9U && CalibFlash_GetCalib() == 9U) {
   		  presionGanCalEstado = 1U;
-  		  printf("PRESION_GANANCIA_CAL,INICIO,esperando_motor=%d,esperando_modo3=%d\r\n",
-  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_MANUAL_BANCO));
+  		  printf("PRESION_GANANCIA_CAL,INICIO,esperando_motor=%d,esperando_modo_calibracion=%d,objetivo=%.2f\r\n",
+  			  (int)!motorOperandoAhora, (int)(modoMotor != CALIB_MODO_CALIBRACION),
+  			  CalibFlash_GetPresionObjetivoLocal());
   	  }
 
-  	  if (CalibFlash_GetControlHabilitado() == 11U) {
-  		  if (presionGanCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_MANUAL_BANCO) {
-  			  /* SET_RPM=0.0f, NO RPM_MIN -- mismo motivo que REMOTO_CAL/
-  			   * INTERNO_CAL: controlSolicitado exige > rpmMin (estricto),
-  			   * asi que RPM_MIN exacto igual cae en la rama "sin control"
-  			   * (servo a SERVO_PULSO_MIN, ralenti natural) -- 0.0f es la
-  			   * forma correcta de describir ese estado, ver calibracion_flash.c. */
-  			  CalibFlash_SetSetRpm(0.0f);
+  	  if (CalibFlash_GetCalib() == 9U) {
+  		  if (presionGanCalEstado == 1U && motorOperandoAhora && modoMotor == CALIB_MODO_CALIBRACION) {
+  			  presionGanCalEstado = 2U;
+  			  presionGanCalInicioBaseMs = HAL_GetTick();
   			  presionGanCalPsiAcumulada = 0.0f;
   			  presionGanCalMuestrasBase = 0U;
-  			  presionGanCalEstado = 2U;
-  			  presionGanCalInicioEtapaMs = HAL_GetTick();
-  			  presionGanCalInicioTotalMs = HAL_GetTick();
+  			  CalibFlash_SetSetRpm(rpmMin); /* motor posado en RPM_MIN mientras se mide la base, mismo criterio que REMOTO_CAL/INTERNO_CAL */
   		  } else if (presionGanCalEstado == 2U && !motorOperandoAhora) {
   			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
   			  CalibFlash_SetSetRpm(0.0f);
   			  presionGanCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
-  		  } else if (presionGanCalEstado == 2U && modoMotor != CALIB_MODO_MANUAL_BANCO) {
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionGanCalEstado == 2U && modoMotor != CALIB_MODO_CALIBRACION) {
   			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=modo_cambio\r\n");
   			  CalibFlash_SetSetRpm(0.0f);
   			  presionGanCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionGanCalEstado == 2U && !PresionV_SensorValido()) {
+  			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=sensor_invalido\r\n");
+  			  CalibFlash_SetSetRpm(0.0f);
+  			  presionGanCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
   		  } else if (presionGanCalEstado == 2U) {
-  			  presionGanCalPsiAcumulada += Presion_GetPresionPsi();
+  			  presionGanCalPsiAcumulada += PresionV_GetPresionPsi();
   			  presionGanCalMuestrasBase++;
-  			  if (HAL_GetTick() - presionGanCalInicioEtapaMs >= PRESION_GANANCIA_CAL_BASE_PROMEDIO_MS) {
+  			  if (HAL_GetTick() - presionGanCalInicioBaseMs >= PRESION_CAL_BASE_PROMEDIO_MS) {
   				  presionGanCalPsiBase = presionGanCalPsiAcumulada / (float)presionGanCalMuestrasBase;
-  				  presionGanCalPsiTecho = presionGanCalPsiBase + PRESION_GANANCIA_CAL_DELTA_TECHO_PSI;
-  				  presionGanCalPsiAnterior = presionGanCalPsiBase;
-  				  presionGanCalSetRpmAncla = CalibFlash_GetRpmMin();
-  				  presionGanCalSetRpmObjetivo = presionGanCalSetRpmAncla + PRESION_GANANCIA_CAL_PASO_RPM;
-  				  printf("PRESION_GANANCIA_CAL,BASE,psi_base=%.2f,psi_techo=%.2f\r\n",
-  					  presionGanCalPsiBase, presionGanCalPsiTecho);
-  				  presionGanCalEstado = 3U;
-  				  presionGanCalInicioEtapaMs = HAL_GetTick();
+  				  float objetivo = CalibFlash_GetPresionObjetivoLocal();
+  				  float tiempoLlenadoS = (float)CalibFlash_GetTiempoLlenadoS();
+  				  printf("PRESION_GANANCIA_CAL,BASE,psi_base=%.2f\r\n", presionGanCalPsiBase);
+  				  if (objetivo <= presionGanCalPsiBase) {
+  					  /* Ya esta en o por encima del objetivo (presion
+  					   * residual de una sesion anterior) -- no hace falta
+  					   * ninguna rampa, completar de inmediato en vez de
+  					   * confiar en una tasa cero/negativa. */
+  					  printf("PRESION_GANANCIA_CAL,COMPLETO,motivo=objetivo_ya_alcanzado,psi_final=%.2f\r\n",
+  						  presionGanCalPsiBase);
+  					  CalibFlash_SetSetRpm(0.0f);
+  					  presionGanCalEstado = 1U;
+  					  CalibFlash_SetCalib(0U);
+  				  } else if (tiempoLlenadoS <= 0.0f || rpmMaxCarga <= rpmMin) {
+  					  /* Guarda de division por cero / config invalida --
+  					   * no deberia pasar (TIEMPO_LLENADO_S y RPM_MAX_CARGA
+  					   * ya se validan al escribirse), pero si pasa, abortar
+  					   * explicito en vez de calcular una tasa sin sentido. */
+  					  printf("PRESION_GANANCIA_CAL,ERROR,motivo=config_invalida,tiempo_llenado_s=%.0f,rpm_max_carga=%.1f,rpm_min=%.1f\r\n",
+  						  tiempoLlenadoS, rpmMaxCarga, rpmMin);
+  					  CalibFlash_SetSetRpm(0.0f);
+  					  presionGanCalEstado = 1U;
+  					  CalibFlash_SetCalib(0U);
+  				  } else {
+  					  presionGanCalTasaPsiS = (objetivo - presionGanCalPsiBase) / tiempoLlenadoS;
+  					  presionGanCalTasaRpmS = (rpmMaxCarga - rpmMin) / tiempoLlenadoS;
+  					  presionGanCalTiempoAvanceS = 0.0f;
+  					  presionGanCalRpmActual = rpmMin;
+  					  presionGanCalUltimoPsiLogueado = presionGanCalPsiBase;
+  					  presionGanCalInicioRampaMs = HAL_GetTick();
+  					  presionGanCalUltimoTickMs = presionGanCalInicioRampaMs;
+  					  presionGanCalEstado = 3U;
+  					  printf("PRESION_GANANCIA_CAL,RAMPA,objetivo=%.2f,tasa_psi_s=%.4f,tasa_rpm_s=%.4f,rpm_max_carga=%.1f,timeout_s=%.0f\r\n",
+  						  objetivo, presionGanCalTasaPsiS, presionGanCalTasaRpmS, rpmMaxCarga,
+  						  tiempoLlenadoS * PRESION_GANANCIA_CAL_TIMEOUT_MARGEN);
+  				  }
   			  }
   		  } else if (presionGanCalEstado == 3U && !motorOperandoAhora) {
   			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
   			  CalibFlash_SetSetRpm(0.0f);
   			  presionGanCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
-  		  } else if (presionGanCalEstado == 3U && modoMotor != CALIB_MODO_MANUAL_BANCO) {
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionGanCalEstado == 3U && modoMotor != CALIB_MODO_CALIBRACION) {
   			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=modo_cambio\r\n");
   			  CalibFlash_SetSetRpm(0.0f);
   			  presionGanCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
+  			  CalibFlash_SetCalib(0U);
+  		  } else if (presionGanCalEstado == 3U && !PresionV_SensorValido()) {
+  			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=sensor_invalido\r\n");
+  			  CalibFlash_SetSetRpm(0.0f);
+  			  presionGanCalEstado = 1U;
+  			  CalibFlash_SetCalib(0U);
   		  } else if (presionGanCalEstado == 3U) {
-  			  /* Rampa propia -- NO un salto -- ver nota de riesgo #1 en el
-  			   * bloque de constantes: sin esto, el PID#1 interno llegaria
-  			   * al SET_RPM nuevo en pocos segundos pese al dwell largo. */
-  			  float segundosTranscurridos = (HAL_GetTick() - presionGanCalInicioEtapaMs) / 1000.0f;
-  			  float rpmRampeado = presionGanCalSetRpmAncla + PRESION_GANANCIA_CAL_RAMPA_RPM_S * segundosTranscurridos;
-  			  if (rpmRampeado >= presionGanCalSetRpmObjetivo) {
-  				  CalibFlash_SetSetRpm(presionGanCalSetRpmObjetivo);
-  				  presionGanCalEstado = 4U;
-  				  presionGanCalInicioEtapaMs = HAL_GetTick();
-  			  } else {
-  				  CalibFlash_SetSetRpm(rpmRampeado);
-  			  }
-  		  } else if (presionGanCalEstado == 4U && !motorOperandoAhora) {
-  			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=motor_se_detuvo\r\n");
-  			  CalibFlash_SetSetRpm(0.0f);
-  			  presionGanCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
-  		  } else if (presionGanCalEstado == 4U && modoMotor != CALIB_MODO_MANUAL_BANCO) {
-  			  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=modo_cambio\r\n");
-  			  CalibFlash_SetSetRpm(0.0f);
-  			  presionGanCalEstado = 1U;
-  			  CalibFlash_SetControlHabilitado(0U);
-  		  } else if (presionGanCalEstado == 4U &&
-  		             HAL_GetTick() - presionGanCalInicioEtapaMs >= PRESION_GANANCIA_CAL_DWELL_MS) {
-  			  float psiActual = Presion_GetPresionPsi();
-  			  float saltoPsi = psiActual - presionGanCalPsiAnterior;
-  			  printf("PRESION_GANANCIA_CAL,PASO,rpm=%.1f,psi=%.2f,salto=%.2f\r\n",
-  				  presionGanCalSetRpmObjetivo, psiActual, saltoPsi);
-  			  presionGanCalPsiAnterior = psiActual;
+  			  uint32_t ahoraMs = HAL_GetTick();
+  			  float dtS = (float)(ahoraMs - presionGanCalUltimoTickMs) / 1000.0f;
+  			  presionGanCalUltimoTickMs = ahoraMs;
+  			  float tiempoTranscurridoS = (float)(ahoraMs - presionGanCalInicioRampaMs) / 1000.0f;
+  			  float psiReal = PresionV_GetPresionPsi();
+  			  float psiEsperadoAhora = presionGanCalPsiBase + presionGanCalTasaPsiS * tiempoTranscurridoS;
 
-  			  if (saltoPsi >= PRESION_GANANCIA_CAL_SALTO_ANORMAL_PSI) {
-  				  printf("PRESION_GANANCIA_CAL,ABORTADO,motivo=salto_psi_anormal\r\n");
+  			  /* Freno por PSI real -- el corazon de este diseño: mientras
+  			   * el PSI real vaya POR DEBAJO del ritmo maximo seguro,
+  			   * sigue avanzando RPM a la tasa nominal; en cuanto lo
+  			   * alcanza o supera, se pausa el avance (RPM se mantiene,
+  			   * no baja) hasta que la linea ideal lo vuelva a superar.
+  			   * Garantiza que el ascenso de PSI nunca sea mas rapido que
+  			   * lo que el operador ya definio como seguro (TIEMPO_LLENADO_S),
+  			   * sin importar cual sea la ganancia real de la instalacion. */
+  			  if (psiReal < psiEsperadoAhora) {
+  				  presionGanCalTiempoAvanceS += dtS;
+  				  presionGanCalRpmActual = rpmMin + presionGanCalTasaRpmS * presionGanCalTiempoAvanceS;
+  				  if (presionGanCalRpmActual > rpmMaxCarga) {
+  					  presionGanCalRpmActual = rpmMaxCarga;
+  				  }
+  				  CalibFlash_SetSetRpm(presionGanCalRpmActual);
+  			  }
+
+  			  if (fabsf(psiReal - presionGanCalUltimoPsiLogueado) >= PRESION_GANANCIA_CAL_PASO_LOG_PSI) {
+  				  printf("PRESION_GANANCIA_CAL,PASO,rpm=%.1f,psi=%.2f,salto=%.2f\r\n",
+  					  presionGanCalRpmActual, psiReal, psiReal - presionGanCalUltimoPsiLogueado);
+  				  presionGanCalUltimoPsiLogueado = psiReal;
+  			  }
+
+  			  if (psiReal >= CalibFlash_GetPresionObjetivoLocal()) {
+  				  printf("PRESION_GANANCIA_CAL,COMPLETO,motivo=objetivo_alcanzado,rpm_final=%.1f,psi_final=%.2f\r\n",
+  					  presionGanCalRpmActual, psiReal);
   				  CalibFlash_SetSetRpm(0.0f);
   				  presionGanCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
-  			  } else if (psiActual >= presionGanCalPsiTecho) {
-  				  printf("PRESION_GANANCIA_CAL,COMPLETO,motivo=techo_psi_alcanzado,rpm_final=%.1f,psi_final=%.2f\r\n",
-  					  presionGanCalSetRpmObjetivo, psiActual);
+  				  CalibFlash_SetCalib(0U);
+  			  } else if (presionGanCalRpmActual >= rpmMaxCarga) {
+  				  /* Respaldo de seguridad -- en una instalacion normal no
+  				   * deberia alcanzarse nunca (el objetivo se alcanza con
+  				   * bastante menos RPM que el techo con carga), pero si
+  				   * pasa, es en si mismo un diagnostico valido: esta
+  				   * bomba no llega al PSI objetivo dentro de su limite
+  				   * seguro de RPM. */
+  				  printf("PRESION_GANANCIA_CAL,COMPLETO,motivo=rpm_max_carga_alcanzado,rpm_final=%.1f,psi_final=%.2f\r\n",
+  					  presionGanCalRpmActual, psiReal);
   				  CalibFlash_SetSetRpm(0.0f);
   				  presionGanCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
-  			  } else if (presionGanCalSetRpmObjetivo >= GANANCIA_CAL_RPM_TECHO) {
-  				  printf("PRESION_GANANCIA_CAL,COMPLETO,motivo=techo_rpm_alcanzado,rpm_final=%.1f,psi_final=%.2f\r\n",
-  					  presionGanCalSetRpmObjetivo, psiActual);
-  				  CalibFlash_SetSetRpm(0.0f);
-  				  presionGanCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
-  			  } else if (HAL_GetTick() - presionGanCalInicioTotalMs >= PRESION_GANANCIA_CAL_TIMEOUT_MS) {
-  				  /* No deberia dispararse en un barrido normal (~13-18min
-  				   * estimados) -- red de seguridad de ultimo recurso si algo
-  				   * quedo trabado (ej. sensor de presion sin variar). */
+  				  CalibFlash_SetCalib(0U);
+  			  } else if (tiempoTranscurridoS >= (float)CalibFlash_GetTiempoLlenadoS() * PRESION_GANANCIA_CAL_TIMEOUT_MARGEN) {
+  				  /* Timeout de ultimo recurso -- ver nota junto a
+  				   * PRESION_GANANCIA_CAL_TIMEOUT_MARGEN mas arriba. */
   				  printf("PRESION_GANANCIA_CAL,COMPLETO,motivo=timeout,rpm_final=%.1f,psi_final=%.2f\r\n",
-  					  presionGanCalSetRpmObjetivo, psiActual);
+  					  presionGanCalRpmActual, psiReal);
   				  CalibFlash_SetSetRpm(0.0f);
   				  presionGanCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
-  			  } else {
-  				  presionGanCalSetRpmAncla = presionGanCalSetRpmObjetivo;
-  				  presionGanCalSetRpmObjetivo = presionGanCalSetRpmAncla + PRESION_GANANCIA_CAL_PASO_RPM;
-  				  presionGanCalEstado = 3U;
-  				  presionGanCalInicioEtapaMs = HAL_GetTick();
+  				  CalibFlash_SetCalib(0U);
   			  }
   		  }
   	  }
 
-  	  modoControlAnteriorParaCal = CalibFlash_GetControlHabilitado();
+  	  modoControlAnteriorParaCal = CalibFlash_GetCalib();
 
-  	  uint8_t modoControl = CalibFlash_GetControlHabilitado(); /* ⚠️ RENUMERADO 2026-09-24: 0=desactivado, 1=manual, 2=barrido, 3=auto ALPHA, 4=auto zona muerta (antes 5), 5=mapeo ganancia (antes 6), 6=auto-escalon interno NUEVO (PID#1), 7=auto ralenti (antes 4), 8=auto-escalon presion local (antes 7), 9=auto-escalon remoto (antes 8), 10=sintonizacion PID (antes 9), 11=barrido de ganancia de presion NUEVO (PID#2) */
+  	  uint8_t modoControl = CalibFlash_GetCalib(); /* ⚠️ RENUMERADO 2026-09-29: 0=desactivado, 1=manual, 2=barrido, 3=auto ALPHA, 4=auto zona muerta, 5=mapeo ganancia RPM, 6=auto-escalon interno (PID#1), 7=validacion de ganancias reales del interno (PID#1, antes 12), 8=auto ralenti (antes 7), 9=barrido de ganancia de presion (PID#2, antes 11), 10=auto-escalon presion local (antes 8), 11=validacion de ganancias reales de presion (PID#2, antes 13), 12=auto-escalon remoto (antes 9). El viejo CALIB=10 (sintonizacion PID) fue ELIMINADO 2026-09-29 -- las ganancias se tocan ahora con MODO=CALIBRACION+CALIB=0, ver CalibFlash_SetCalib */
 
-  	  /* Auto-calibracion de ralenti -- CONTROL_HABILITADO=7 (renumerado
-  	   * 2026-09-23, antes era 4 -- ver calibracion_flash.c: solo se
-  	   * puede pedir viniendo de modo 0, con o sin el motor operando).
-  	   * Mientras se esta en modo 7:
+  	  /* Auto-calibracion de ralenti -- CALIB=8 (ver
+  	   * calibracion_flash.c: solo se puede pedir viniendo de modo 0, con
+  	   * o sin el motor operando).
+  	   * Mientras se esta en modo 8:
   	   *   - si el motor no esta operando, se espera -- el servo ya
   	   *     queda en SERVO_PULSO_MIN automaticamente (pidActivoAhora es
-  	   *     siempre false en modo 7, cae en la rama de abajo).
+  	   *     siempre false en modo 8, cae en la rama de abajo).
   	   *   - apenas el motor arranca (o si ya estaba andando al entrar a
   	   *     este modo), arranca la ventana de medicion.
   	   *   - si el motor se detiene a mitad de la ventana, se aborta la
   	   *     medicion en curso y se vuelve a esperar (sin salir de modo
-  	   *     7) -- no tiene sentido promediar con el motor parado, pero
+  	   *     8) -- no tiene sentido promediar con el motor parado, pero
   	   *     tampoco hace falta reenviar el downlink si se puede
   	   *     reintentar solo arrancando el motor de nuevo.
   	   *   - al completar los 2 minutos, se aplica RPM_MIN y se vuelve
   	   *     sola a modo 0 (mismo criterio que el apagado de seguridad de
-  	   *     1/2 en este mismo loop, que tambien fuerza CONTROL_HABILITADO
+  	   *     1/2 en este mismo loop, que tambien fuerza CALIB
   	   *     localmente sin esperar un downlink). */
   	  {
   		  static bool     ralentiCalEsperandoMotor = false;
@@ -1827,7 +2450,7 @@ int main(void)
   		  static float    ralentiCalSuma = 0.0f;
   		  static uint32_t ralentiCalMuestras = 0;
 
-  		  if (modoControl == 7U) {
+  		  if (modoControl == 8U) {
   			  if (!ralentiCalEsperandoMotor && !ralentiCalMidiendo) {
   				  ralentiCalEsperandoMotor = true;
   				  printf("RALENTI_CAL,INICIO,esperando_motor=%d\r\n", (int)!motorOperandoAhora);
@@ -1880,7 +2503,7 @@ int main(void)
   							  printf("RALENTI_CAL,ERROR,sin_muestras\r\n");
   						  }
   						  ralentiCalMidiendo = false;
-  						  CalibFlash_SetControlHabilitado(0U); /* vuelve sola a operacion normal */
+  						  CalibFlash_SetCalib(0U); /* vuelve sola a operacion normal */
   					  }
   				  }
   			  }
@@ -1890,9 +2513,9 @@ int main(void)
   		  }
   	  }
 
-  	  /* Auto-calibracion de ALPHA -- CONTROL_HABILITADO=3 (ver
+  	  /* Auto-calibracion de ALPHA -- CALIB=3 (ver
   	   * calibracion_flash.c: solo se puede pedir viniendo de modo 0, con
-  	   * o sin el motor operando). Mismo patron que el bloque de modo 7
+  	   * o sin el motor operando). Mismo patron que el bloque de modo 8
   	   * (ralenti) -- espera el motor, mide, aplica, vuelve sola a modo 0. */
   	  {
   		  static bool     alphaCalEsperandoMotor = false;
@@ -1957,7 +2580,7 @@ int main(void)
   							  printf("ALPHA_CAL,ERROR,sin_muestras_suficientes\r\n");
   						  }
   						  alphaCalMidiendo = false;
-  						  CalibFlash_SetControlHabilitado(0U); /* vuelve sola a operacion normal */
+  						  CalibFlash_SetCalib(0U); /* vuelve sola a operacion normal */
   					  }
   				  }
   			  }
@@ -1967,29 +2590,79 @@ int main(void)
   		  }
   	  }
 
+  	  /* Guarda PRESION_MAX (agregada 2026-09-29) -- analoga a RPM_MAX_CARGA,
+  	   * NO a RPM_MAX: es un limite de la INSTALACION (tuberia), asi que
+  	   * aplica solo en los modos con la bomba cargada (mismo criterio que
+  	   * cargaConectada mas abajo: MODO=1/2/3 y CALIB=9/10/11/12 bajo
+  	   * MODO=4). MODO=0 (RALENTI) y las rutinas de banco sin carga quedan
+  	   * exentas. Si la presion local medida supera PRESION_MAX se fuerza
+  	   * el setpoint a "sin comandar" (ralenti) -- corre DESPUES de todos
+  	   * los bloques que calculan setpointRpmCrudo, asi cubre cascada,
+  	   * SET_RPM manual y los auto-escalon. Histeresis: se libera al bajar
+  	   * a 90% de PRESION_MAX, para no oscilar en el umbral. Con sensor
+  	   * en falla no decide nada aca (ya cae a ralenti por su propia
+  	   * alerta en MODO=1). */
+  	  static bool presionMaxExcedidaAntes = false;
+  	  bool modoConCarga = (modoMotor == CALIB_MODO_PRESION_LOCAL)
+  			  || (modoMotor == CALIB_MODO_REMOTO)
+  			  || (modoMotor == CALIB_MODO_MANUAL_BANCO)
+  			  || (modoMotor == CALIB_MODO_CALIBRACION
+  				  && (CalibFlash_GetCalib() == 9U || CalibFlash_GetCalib() == 10U
+  					  || CalibFlash_GetCalib() == 11U || CalibFlash_GetCalib() == 12U));
+  	  bool presionMaxExcedidaAhora = false;
+  	  if (modoConCarga && PresionV_SensorValido()) {
+  		  float presionMax = CalibFlash_GetPresionMax();
+  		  float presionMedida = PresionV_GetPresionPsi();
+  		  presionMaxExcedidaAhora = presionMaxExcedidaAntes
+  				  ? (presionMedida > presionMax * 0.9f)
+  				  : (presionMedida > presionMax);
+  	  }
+  	  if (presionMaxExcedidaAhora) {
+  		  setpointRpmCrudo = 0.0f;
+  		  controlSolicitado = false;
+  	  }
+  	  if (presionMaxExcedidaAhora != presionMaxExcedidaAntes) {
+  		  if (presionMaxExcedidaAhora) {
+  			  printf("ALERTA,PRESION_MAX_EXCEDIDA,presion_max=%.2f,presion_actual=%.2f -- forzando ralenti\r\n",
+  					  CalibFlash_GetPresionMax(), PresionV_GetPresionPsi());
+  			  s_codigoAlertaActual = ALERTA_PRESION_MAX_EXCEDIDA;
+  		  } else {
+  			  printf("ALERTA,PRESION_MAX_RECUPERADA\r\n");
+  			  if (s_codigoAlertaActual == ALERTA_PRESION_MAX_EXCEDIDA) {
+  				  s_codigoAlertaActual = ALERTA_SIN_ALERTA;
+  			  }
+  		  }
+  		  CalibFlash_ForzarReporte();
+  	  }
+  	  presionMaxExcedidaAntes = presionMaxExcedidaAhora;
+
   	  static bool pidActivoAntes = false;
-  	  /* Modos 6/8/9/10 usan el MISMO camino de control que el modo 0 --
+  	  /* Modos 6/7/9/10/11/12 usan el MISMO camino de control que el modo 0 --
   	   * el servo lo maneja pid.c/presion_pid.c/presion_pid_remoto.c
   	   * igual en todos los casos, segun MODO (ver bloque de arriba), no
-  	   * segun CONTROL_HABILITADO. La unica diferencia con modo 0 es que
-  	   * estos cinco desbloquean cosas O manejan su propia maquina de
+  	   * segun CALIB. La unica diferencia con modo 0 es que
+  	   * estos seis desbloquean cosas O manejan su propia maquina de
   	   * estados de auto-escalon (ver bloques INTERNO_CAL/PRESION_CAL/
-  	   * REMOTO_CAL/PRESION_GANANCIA_CAL, junto a PID_TEST/
-  	   * PRESION_PID_TEST/REMOTO_PID_TEST):
-  	   * =6 auto-escalon interno (PID #1), =8 auto-escalon presion
-  	   * local, =9 auto-escalon remoto, =10 sintonizacion manual
-  	   * (desbloquea PID_KP/KI, activa los logs *_PID_TEST), =11 barrido
-  	   * de ganancia de presion NUEVO (PID#2, agregado 2026-09-24) --
+  	   * REMOTO_CAL/PRESION_GANANCIA_CAL/VALIDACION_CAL/PRESION_VALIDACION_CAL,
+  	   * junto a PID_TEST/PRESION_PID_TEST/REMOTO_PID_TEST):
+  	   * =6 auto-escalon interno (PID #1), =7 validacion de ganancias
+  	   * reales del interno (PID#1), =9 barrido de ganancia de presion
+  	   * (PID#2), =10 auto-escalon presion local, =11 validacion de
+  	   * ganancias reales de presion (PID#2), =12 auto-escalon remoto --
   	   * necesita que el PID interno (PID#1) siga corriendo para que el
-  	   * SET_RPM que manda PRESION_GANANCIA_CAL mueva el servo de verdad.
-  	   * Renumerado 2026-09-23 (segunda pasada) -- antes eran 7/8/9
-  	   * respectivamente, sin el modo 6 (que no existia). No hace falta
-  	   * un branch aparte para ninguno de los cinco en el if/else de
-  	   * abajo -- como no son 1/2/3/4/5/7, caen solos en esta rama
-  	   * (7=ralenti es la unica excepcion real, ese fuerza el servo a
-  	   * SERVO_PULSO_MIN aparte). */
-  	  bool pidActivoAhora = (modoControl == 0U || modoControl == 6U || modoControl == 8U
-  	          || modoControl == 9U || modoControl == 10U || modoControl == 11U)
+  	   * escalon de SET_RPM (o, para =10/=11, el escalon de
+  	   * PRESION_OBJETIVO_LOCAL via la cascada) realmente mueva el servo. ⚠️ El
+  	   * viejo CALIB=10 (sintonizacion manual) fue ELIMINADO 2026-09-29 --
+  	   * ver CalibFlash_SetCalib; ya no existe como valor
+  	   * valido, asi que tampoco hace falta en esta lista (modoControl=0
+  	   * ya cubre el caso "sin ningun CALIB activo", que es donde ahora se
+  	   * tocan las ganancias). No hace falta un branch aparte para
+  	   * ninguno de estos en el if/else de abajo -- como no son
+  	   * 1/2/3/4/5/8, caen solos en esta rama (8=ralenti es la unica
+  	   * excepcion real, ese fuerza el servo a SERVO_PULSO_MIN aparte). */
+  	  bool pidActivoAhora = (modoControl == 0U || modoControl == 6U || modoControl == 7U
+  	          || modoControl == 9U || modoControl == 10U || modoControl == 11U
+  	          || modoControl == 12U)
   	          && motorOperandoAhora && controlSolicitado;
   	  if (pidActivoAhora && !pidActivoAntes) {
   		  PID_Init(); /* flanco de entrada -- evita un dt inflado por tiempo inactivo */
@@ -2023,7 +2696,7 @@ int main(void)
   			  esperandoEnExtremo = false;
   		  }
   	  } else if (modoControl == 1U) {
-  		  /* Modo manual de calibración (CONTROL_HABILITADO=1): a
+  		  /* Modo manual de calibración (CALIB=1): a
   		   * diferencia del barrido (=2), el servo se queda quieto en su
   		   * posición -- solo se mueve cuando llega un downlink de
   		   * SERVO_PULSO_MIN o SERVO_PULSO_MAX, yendo directo a ese valor
@@ -2115,7 +2788,7 @@ int main(void)
   				   * ningun resultado automatico. */
   				  printf("SERVOMIN_CAL,ABORTADO,motivo=salto_rpm_anormal\r\n");
   				  servoMinCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
+  				  CalibFlash_SetCalib(0U);
   			  } else if (subidaRpm >= SERVOMIN_CAL_UMBRAL_DETECCION_RPM) {
   				  servoMinCalConfirmaciones++;
   				  if (servoMinCalConfirmaciones >= SERVOMIN_CAL_CONFIRMACIONES_NECESARIAS) {
@@ -2129,7 +2802,7 @@ int main(void)
   						  servoMinCalPulsoPaso, nuevoServoMin, (int)ok);
   					  CalibFlash_ForzarReporte();
   					  servoMinCalEstado = 1U;
-  					  CalibFlash_SetControlHabilitado(0U);
+  					  CalibFlash_SetCalib(0U);
   				  } else {
   					  /* Sostener el mismo pulso un paso mas para
   					   * confirmar antes de dar la deteccion por buena. */
@@ -2141,7 +2814,7 @@ int main(void)
   				  if (siguientePulso > (uint16_t)(servoMinCalPulsoBase + SERVOMIN_CAL_TECHO_US)) {
   					  printf("SERVOMIN_CAL,ERROR,motivo=techo_alcanzado_sin_deteccion\r\n");
   					  servoMinCalEstado = 1U;
-  					  CalibFlash_SetControlHabilitado(0U);
+  					  CalibFlash_SetCalib(0U);
   				  } else {
   					  servoMinCalPulsoPaso = siguientePulso;
   					  servoMinCalInicioEtapaMs = HAL_GetTick();
@@ -2160,7 +2833,7 @@ int main(void)
   		  /* Mapeo de curva de ganancia -- ver definicion de las
   		   * constantes GANANCIA_CAL_* mas arriba. Barre en lazo ABIERTO
   		   * (sin PID) desde SERVO_PULSO_MIN, logueando (pulso, RPM) en
-  		   * cada paso, hasta GANANCIA_CAL_RPM_TECHO o SERVO_PULSO_MAX.
+  		   * cada paso, hasta RPM_MAX o SERVO_PULSO_MAX.
   		   * Solo mide/loguea -- no aplica ninguna correccion todavia.
   		   * Estados: 1=esperando motor, 2=barriendo. */
   		  static uint8_t  ganCalEstado = 1U;
@@ -2179,7 +2852,7 @@ int main(void)
   			  ganCalEstado = 2U;
   			  ganCalInicioEtapaMs = HAL_GetTick();
   			  printf("GANANCIA_CAL,BARRIENDO,pulso_inicial=%u,rpm_techo=%.0f\r\n",
-  				  ganCalPulsoPaso, GANANCIA_CAL_RPM_TECHO);
+  				  ganCalPulsoPaso, CalibFlash_GetRpmMax());
   		  }
 
   		  if (ganCalEstado == 2U && !motorOperandoAhora) {
@@ -2199,19 +2872,19 @@ int main(void)
   				   * lecturas fuera de lo esperado -- frenar ya. */
   				  printf("GANANCIA_CAL,ABORTADO,motivo=salto_rpm_anormal\r\n");
   				  ganCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
-  			  } else if (rpmActual >= GANANCIA_CAL_RPM_TECHO) {
+  				  CalibFlash_SetCalib(0U);
+  			  } else if (rpmActual >= CalibFlash_GetRpmMax()) {
   				  printf("GANANCIA_CAL,COMPLETO,motivo=techo_rpm_alcanzado,pulso_final=%u,rpm_final=%.1f\r\n",
   					  ganCalPulsoPaso, rpmActual);
   				  ganCalEstado = 1U;
-  				  CalibFlash_SetControlHabilitado(0U);
+  				  CalibFlash_SetCalib(0U);
   			  } else {
   				  uint16_t siguientePulso = (uint16_t)(ganCalPulsoPaso + GANANCIA_CAL_PASO_US);
   				  uint16_t maximoServo = CalibFlash_GetServoPulsoMaxUs();
   				  if (siguientePulso > maximoServo) {
   					  printf("GANANCIA_CAL,ERROR,motivo=servo_pulso_max_alcanzado_sin_llegar_al_techo\r\n");
   					  ganCalEstado = 1U;
-  					  CalibFlash_SetControlHabilitado(0U);
+  					  CalibFlash_SetCalib(0U);
   				  } else {
   					  ganCalPulsoPaso = siguientePulso;
   					  ganCalInicioEtapaMs = HAL_GetTick();
@@ -2227,10 +2900,34 @@ int main(void)
   		   * ambos), y con un SET_RPM por encima del ralentí -- lazo de
   		   * control real. Setpoint = SET_RPM (downlink directo, uso de
   		   * prueba hasta que exista la maquina Modo 0/1/2, ver README
-  		   * seccion 4.3), recortado solo contra el techo RPM_MAX (el
-  		   * piso ya lo garantiza controlSolicitado). */
+  		   * seccion 4.3), recortado contra RPM_MAX o RPM_MAX_CARGA segun
+  		   * si la bomba esta embragada (con carga hidraulica real) en
+  		   * este instante -- el piso ya lo garantiza controlSolicitado.
+  		   *
+  		   * cargaConectada (agregado 2026-09-28, decision explicita del
+  		   * usuario): las motobombas de este proyecto tienen un embrague
+  		   * fisico que conecta/desconecta la bomba del motor -- MODO=1/2
+  		   * (real), MODO=3 (banco/campo, CUALQUIER uso -- se asume
+  		   * embragada, mas conservador por default) y CALIB=9/10/11/12
+  		   * bajo MODO=4 (todos con presion/aspersor real de por medio)
+  		   * corren SIEMPRE con la bomba embragada. El resto de MODO=4
+  		   * (CALIB=0 ó 4/5/6/7/8 -- zona muerta, curva de ganancia
+  		   * interna, auto-escalon interno, validacion interno, ralenti)
+  		   * son las rutinas de banco tempranas de la secuencia de
+  		   * comisionamiento, pensadas para correr con la bomba
+  		   * DESEMBRAGADA (ver seccion 12) -- ahi el techo mecanico
+  		   * general (RPM_MAX) sigue aplicando, no el de carga. */
+  		  bool cargaConectada = (modoMotor == CALIB_MODO_PRESION_LOCAL)
+  				  || (modoMotor == CALIB_MODO_REMOTO)
+  				  || (modoMotor == CALIB_MODO_MANUAL_BANCO)
+  				  || (modoMotor == CALIB_MODO_CALIBRACION
+  					  && (CalibFlash_GetCalib() == 10U
+  						  || CalibFlash_GetCalib() == 12U
+  						  || CalibFlash_GetCalib() == 9U
+  						  || CalibFlash_GetCalib() == 11U));
+  		  float rpmMaxAplicable = cargaConectada ? rpmMaxCarga : rpmMax;
   		  float setpointRpm = setpointRpmCrudo;
-  		  if (setpointRpm > rpmMax) setpointRpm = rpmMax;
+  		  if (setpointRpm > rpmMaxAplicable) setpointRpm = rpmMaxAplicable;
 
   		  uint16_t salidaPidUs = PID_CalcularSalidaUs(setpointRpm, Tacometro_GetRPMFiltrada());
   		  Servo_MoverHacia(salidaPidUs);

@@ -29,8 +29,8 @@ float PresionPidRemoto_CalcularSetpointRpm(float setpointPresionPsi, float presi
 
     float error = setpointPresionPsi - presionMedidaPsi;
 
-    float kp = CalibFlash_GetPresionRemotoPidKp();
-    float ki = CalibFlash_GetPresionRemotoPidKi();
+    float kp = CalibFlash_GetPidAspKp();
+    float ki = CalibFlash_GetPidAspKi();
 
     float maximo = CalibFlash_GetRpmMax();
 

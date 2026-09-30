@@ -18,7 +18,7 @@
  * mandar Enter):
  *   NOMBRE_PARAMETRO [VALOR]
  * ej.:
- *   CONTROL_HABILITADO 1
+ *   CALIB 1
  *   SET_RPM 900
  *   RESTAURAR_DEFAULTS        (los comandos no llevan VALOR)
  *
@@ -72,7 +72,7 @@ void ComandoSerial_Update(void);
  * el anterior sigue sin leerse se pierde en silencio (se sobrescribe en
  * RDR, sin ORE, sin aviso) -- síntoma de campo: letras faltantes al
  * escribir un comando rápido mientras el firmware está logueando
- * (ej. "CONTROL_HABILITADO" llega como "CNTROL_HABILITADO"). La
+ * (ej. "TIMEOUT_SIN_COMANDO_S" llega como "TIMEOUT_SIN_COMANDOS"). La
  * recepción por interrupción no depende de la cadencia del loop
  * principal -- el HAL lee el byte y limpia RXNE apenas llega,
  * sin importar qué tan ocupado esté imprimiendo.

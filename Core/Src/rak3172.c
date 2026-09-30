@@ -21,6 +21,7 @@
 #include "rak3172.h"
 #include "calibracion_flash.h"
 #include "tacometro.h"
+#include "presion_voltaje.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +52,11 @@ static RAK3172_Resultado_t s_ultimoResultado = RAK3172_OK;
 static char     s_ultimaRespuesta[RAK3172_RX_BUFFER_SIZE];
 static bool     s_hayRespuestaNueva = false;
 static volatile bool s_estaUnido = false;
+
+/* Tick hasta el cual el modulo pidio no intentar transmitir (join ni
+ * uplink) -- ver "Restricted_Wait_<ms>_ms" en RAK3172_ProcesarLinea().
+ * 0 = sin restriccion vigente. */
+static volatile uint32_t s_restringidoHastaTickMs = 0;
 
 /* true una vez que la red confirmó el envío de la hora (DeviceTimeReq)
  * -- ver "+EVT:TIMEREQ" en RAK3172_ProcesarLinea() y
@@ -281,6 +287,11 @@ bool RAK3172_EstaUnido(void)
     return s_estaUnido;
 }
 
+bool RAK3172_EstaRestringido(void)
+{
+    return (int32_t)(s_restringidoHastaTickMs - HAL_GetTick()) > 0;
+}
+
 bool RAK3172_Join(void)
 {
     s_estaUnido = false;
@@ -507,6 +518,36 @@ static void RAK3172_ProcesarLinea(const char *linea)
         return;
     }
 
+    if (strncmp(linea, "Restricted_Wait_", 16) == 0) {
+        /* El propio RUI3 esta rechazando transmitir (join o send) para
+         * cumplir el backoff de join que exige el estandar LoRaWAN --
+         * NO es un error nuestro puntual, es el modulo aplicando la
+         * regla "si llevas mucho tiempo sin poder unirte, reduce cuanto
+         * intentas". Visto en campo con valores de varias HORAS
+         * (ej. Restricted_Wait_116064740_ms ~= 32h) -- probablemente
+         * consecuencia de que el reintento de join cada 2 min
+         * (INTERVALO_REINTENTO_JOIN_MS, main.c) estuvo corriendo sin
+         * parar durante un fallo prolongado (ej. el modulo
+         * reiniciandose solo, ver hallazgos de hardware), acumulando
+         * mas intentos de los que el backoff de la especificacion
+         * permite. Sin este chequeo, el firmware seguia reintentando
+         * join/uplink cada 2 min de todas formas -- cada intento
+         * durante la restriccion es, en el mejor caso, inutil, y en el
+         * peor vuelve a resetear/extender el propio backoff. */
+        unsigned long esperaMs = 0;
+        if (sscanf(linea, "Restricted_Wait_%lu_ms", &esperaMs) == 1) {
+            s_restringidoHastaTickMs = HAL_GetTick() + (uint32_t)esperaMs;
+            printf("RAK3172: modulo restringido por backoff de join/duty-cycle -- %lu ms (~%.1fh). "
+                   "Pausando reintentos de join/uplink hasta que pase.\r\n",
+                   esperaMs, (double)esperaMs / 3600000.0);
+        }
+        if (s_comandoEnCurso) {
+            s_comandoEnCurso = false;
+            s_ultimoResultado = RAK3172_ERROR;
+        }
+        return;
+    }
+
     if (strcmp(linea, "AT_NO_NETWORK_JOINED") == 0) {
         /* El modulo perdio su estado de join -- visto en campo justo
          * despues de que reaparece su banner de arranque
@@ -614,7 +655,7 @@ static void RAK3172_ProcesarEventoDownlink(const char *linea)
     uint16_t valorAplicadoRaw = 0U;
     CalibFlash_ProtocoloStatus_t status = CalibFlash_ProcesarParametroConEstado(
         idParametro, datosValor, longitudValor, motorOperando,
-        Tacometro_GetFrecuenciaHz(), &valorAplicadoRaw);
+        Tacometro_GetFrecuenciaHz(), PresionV_GetPresionPsi(), &valorAplicadoRaw);
 
     printf("Downlink ID=%u (%u bytes de valor) -> STATUS=%d, valor vigente=0x%04X\r\n",
            idParametro, longitudValor, (int)status, valorAplicadoRaw);

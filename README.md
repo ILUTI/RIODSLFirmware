@@ -288,7 +288,7 @@ de detenido a régimen en menos de 3s, así que esto filtra el glitch
 sin retrasar de forma perceptible ninguna transición real. ⚠️
 Deliberadamente **no** toca `Tacometro_EstaDetenido()` crudo, que
 sigue usándose sin debounce en la lógica de seguridad que fuerza
-`CONTROL_HABILITADO` a `0` en cuanto el motor arranca (sección 4.4) —
+`CALIB` a `0` en cuanto el motor arranca (sección 4.4) —
 esa sí necesita reaccionar de inmediato, sin los 3s de margen.
 
 #### Sincronización de hora: GPS (primaria) + LoRaWAN DeviceTimeReq (respaldo)
@@ -390,8 +390,8 @@ se puede cambiar con el motor operando:
 
 | Categoría | Se permite con el motor operando | Parámetros |
 |---|---|---|
-| CALIBRACION | Sí, siempre por categoría; candado propio adentro del `case` si hace falta uno más fino | `SET_RATIO`, `ALPHA`, `PID_KP`, `PID_KI`, `CONTROL_HABILITADO` (este último rechaza `1`/`2` con el motor operando desde adentro del `case`, no por la categoría — ver ID 13 más abajo) |
-| PROCESO | Sí, siempre (es su función) | `SET_RPM`, `PRESION` |
+| CALIBRACION | Sí, siempre por categoría; candado propio adentro del `case` si hace falta uno más fino | `SET_RATIO`, `ALPHA`, `PID_RPM_KP`, `PID_RPM_KI`, `CALIB` (este último rechaza `1`/`2` con el motor operando desde adentro del `case`, no por la categoría — ver ID 13 más abajo) |
+| PROCESO | Sí, siempre (es su función) | `SET_RPM`, `PRESION_REMOTO` |
 | COMANDO | Evaluado aparte | `FORZAR_REPORTE`, `RESTAURAR_DEFAULTS`, `RESET_REMOTO` |
 | CONFIGURACION | **No** — se rechaza | Todos los demás (default conservador) |
 
@@ -414,7 +414,7 @@ paso por tiempo real transcurrido (`HAL_GetTick()`), no por conteo de
 llamadas, así que no depende de la cadencia exacta del loop principal.
 
 **Modo calibración** (`main.c`): con el motor detenido, un downlink
-`CONTROL_HABILITADO=2` activa un barrido continuo del servo entre
+`CALIB=2` activa un barrido continuo del servo entre
 `SERVO_PULSO_MIN` y `SERVO_PULSO_MAX` (vía `Servo_MoverHacia()`) — para
 observar en banco el recorrido físico real mientras se ajustan esos
 dos límites por downlink, con efecto inmediato en el barrido en curso
@@ -429,7 +429,7 @@ que el pulso llegaba al extremo, y el brazo real nunca alcanzaba a
 terminar de llegar al tope mecánico antes de que se le pidiera ir al
 otro lado (los modos `0`/`1` no tienen este problema porque el destino
 se queda fijo indefinidamente, dándole tiempo de sobra al servo).
-`CONTROL_HABILITADO=1`
+`CALIB=1`
 es el modo manual: el servo se queda quieto en su posición actual (no
 salta a ningún límite al entrar) y solo se mueve cuando llega un
 downlink de `SERVO_PULSO_MIN` o `SERVO_PULSO_MAX`, yendo directo a ese
@@ -446,12 +446,12 @@ haya llegado. Ambos (`1` y `2`) son el único
 momento en que `SERVO_PULSO_MIN/MAX` se pueden cambiar (fuera de modo
 calibración, se rechazan con `APPLY_ERROR` aunque el motor esté
 apagado). Medida de seguridad: si el motor arranca mientras
-`CONTROL_HABILITADO` es `1` o `2`, el firmware lo fuerza a `0`
+`CALIB` es `1` o `2`, el firmware lo fuerza a `0`
 localmente en el mismo ciclo (vía `Tacometro_EstaDetenido()`), sin
 esperar ningún downlink — nunca se deja el servo bajo control remoto de
 calibración con el motor operando.
 
-**Log `SERVO_CAL`**: mientras `CONTROL_HABILITADO` sea `1` o `2`, cada
+**Log `SERVO_CAL`**: mientras `CALIB` sea `1` o `2`, cada
 1s se imprime `SERVO_CAL,min=<us>,max=<us>,pulso_actual=<us>` — antes
 de esto, la única forma de ver los límites vigentes en banco era el ACK
 de cada downlink de `SERVO_PULSO_MIN/MAX` (`valor vigente=X`); esta
@@ -465,12 +465,12 @@ Este bloque de barrido queda como el mecanismo permanente para
 recalibrar `SERVO_PULSO_MIN/MAX` en banco (ej. si se cambia de servo o
 de geometría de la varilla) — no se retira al existir el PID real
 (`pid.c/h`, ver abajo), simplemente son mutuamente excluyentes: uno
-corre en `CONTROL_HABILITADO=2`, el otro con el motor operando y
-`CONTROL_HABILITADO=0` (ver 4.4).
+corre en `CALIB=2`, el otro con el motor operando y
+`CALIB=0` (ver 4.4).
 
 **Posición segura = `SERVO_PULSO_MIN`** (confirmado en el montaje
 físico real: ese extremo deja el acelerador sin aceleración/ralentí,
-no es un valor arbitrario). Con `CONTROL_HABILITADO=0` y el motor
+no es un valor arbitrario). Con `CALIB=0` y el motor
 detenido (arranque, o justo después del apagado de seguridad de
 arriba), el servo siempre va o se mantiene ahí — al arrancar se manda
 de una vez (no se conoce la posición previa, quedó como estuviera al
@@ -482,9 +482,10 @@ del recorrido se haya quedado. Si en cambio el motor está operando
 esta posición fija.
 
 **PID (`pid.c/h`)**: lazo de control real, activo en `main.c` solo
-cuando el motor opera, `CONTROL_HABILITADO=0` o `=10` (no se está
-calibrando el servo -- `=10` es la sesión de sintonización del PID en
-sí, ver 4.4, y el servo se comporta exactamente igual que en `=0`)
+cuando el motor opera, `CALIB=0` (no se está
+calibrando el servo -- desde 2026-09-29 la sesión de sintonización del
+PID ya no es un valor `CALIB` dedicado, corre dentro del propio `=0`,
+ver 4.4)
 **y** se comandó explícitamente un `SET_RPM` por encima de `RPM_MIN`
 — mutuamente excluyente con el barrido de banco por diseño (ver 4.4).
 `PID_CalcularSalidaUs(setpointRpm, rpmMedida)` devuelve el pulso en µs
@@ -493,7 +494,7 @@ directos que se le pasa a `Servo_MoverHacia()`, usando
 ella, no la reemplaza) y recortando contra `SERVO_PULSO_MIN/MAX`.
 Anti-windup por integración condicional (la integral se congela si ya
 está saturando en la misma dirección del error) y se resetea sola
-mientras `PID_KI=0`, para que no acumule en silencio y aparezca de
+mientras `PID_RPM_KI=0`, para que no acumule en silencio y aparezca de
 golpe cuando se active esa ganancia. `PID_Init()` se llama una sola vez
 en el flanco de entrada a este modo, para que el primer cálculo no use
 un `dt` inflado por el tiempo inactivo.
@@ -513,11 +514,11 @@ abajo contra `RPM_MAX` si se pide algo más alto.
 
 El setpoint sale de `CalibFlash_GetSetRpm()` (`MODO=1`) o de la fórmula
 lineal presión→RPM (`MODO=2`) según corresponda -- ver la máquina
-`MODO` completa en sección 4.3. Ganancias (`PID_KP/KI/KD`) siguen en
+`MODO` completa en sección 4.3. Ganancias (`PID_RPM_KP/KI/KD`) siguen en
 sus defaults (`Kp=1.0, Ki=0,
 Kd=0`) a la espera de sintonización con el motor real (Ziegler-Nichols
-en lazo cerrado, ver sección 9; solo se pueden tocar en
-`CONTROL_HABILITADO=10`) — suficientes para validar que el lazo mueve
+en lazo cerrado, ver sección 9; solo se pueden tocar con
+`MODO=CALIBRACIÓN` y `CALIB=0`, ver sección 4.4) — suficientes para validar que el lazo mueve
 el servo en la dirección correcta, no para un control ya afinado.
 
 **Alimentación del servo** → ver hardware, sección 2.
@@ -649,21 +650,65 @@ original sondeaba la bandera `RXNE` una vez por vuelta del loop
 principal (sin IT/DMA) — funcionaba bien en general, pero se confirmó
 en campo que perdía bytes en silencio si dos caracteres llegaban
 justo cuando el loop tardaba más de lo normal en volver a sondear (ej.
-justo después de `CONTROL_HABILITADO`, que dispara una escritura real
+justo después de `CALIB`, que dispara una escritura real
 a flash). Síntoma: comandos con un carácter faltante a mitad de la
-palabra (`COTROL_HABILITADO`, `CONTROL_HABILITADO2` sin el espacio) —
+palabra (`ALIB`, `CALIB2` sin el espacio) —
 la firma de un byte pisado en el registro de datos antes de leerse, no
 un error de tipeo. Ahora cada byte se captura de inmediato en
 `HAL_UART_RxCpltCallback()`, inmune a qué tan ocupado esté el loop.
 
 Formato de línea: `NOMBRE_PARAMETRO [VALOR]`, con el mismo nombre y el
 mismo valor "humano" (sin escalar) que se manda por MQTT vía
-`RIO-DSL-SendDownlink` (ver sección 6) — ej. `CONTROL_HABILITADO 1`,
+`RIO-DSL-SendDownlink` (ver sección 6) — ej. `CALIB 1`,
 `SET_RPM 900`, `SERVO_PULSO_MIN 1050`. Los comandos
 (`RESTAURAR_DEFAULTS`, `FORZAR_REPORTE`, `RESET_REMOTO`) no llevan
 VALOR, el módulo manda el byte de confirmación `0xA5` automáticamente.
 
-Este módulo es un mando temporal — quitar su llamada en `main.c`
+#### Pass-through AT hacia el RAK3172 (permanente)
+
+Además de los parámetros, la consola acepta consultas `AT+XXX=?` y las
+reenvía al RAK3172 por `RAK3172_EnviarComandoAT()`. Sirve para leer
+`AT+APPKEY=?`, `AT+DEVEUI=?`, `AT+APPEUI=?`, `AT+VER=?`, etc. sin cablear
+un USB-serial directo al módulo. También permite una lista corta de
+escrituras de provisionamiento: `AT+NJM=<v>`, `AT+BAND=<v>`,
+`AT+MASK=<v>`, `AT+CLASS=<v>` y `ATZ` (reset del RAK). Salida:
+
+```
+[AT] <valor devuelto por el RAK>
+[AT] resultado=0 (0=OK,1=ERROR,2=TIMEOUT,3=BUSY)
+```
+
+- **Lista blanca**: toda línea que empiece con `AT` y no sea consulta
+  `=?`, ni una de las 4 escrituras / `ATZ` de arriba, se rechaza
+  (`[AT] no permitido...`) — `AT+FACTORY`, `AT+NWM`, `AT+BOOT`, `AT+JOIN`,
+  `AT+APPKEY=<v>` etc. no pasan. Para permitir otra escritura, agregarla a
+  `AT_ESCRITURAS_PERMITIDAS` en `comando_serial.c`.
+- **Configuración LoRaWAN del RAK3172 aplicada por consola (2026-09-29)**,
+  en este orden, cada uno con `[AT] resultado=0` y verificado con su
+  consulta `=?`:
+  ```
+  AT+NJM=1      (join OTAA)
+  AT+BAND=6     (banda 6 = AU915 en la tabla de RUI3)
+  AT+MASK=0002  (sub-banda; el firmware también lo reafirma en cada arranque)
+  AT+CLASS=C
+  ATZ           (reset del RAK; puede dar resultado=2 esa vez, es normal)
+  ```
+  Estos valores viven en la memoria del RAK: un nodo nuevo o un RAK
+  reemplazado necesita repetirlos, además de `APPEUI/APPKEY/DEVEUI`
+  (provisionados aparte).
+- La línea se transmite desde `ComandoSerial_Update()` (loop principal),
+  no desde la ISR de recepción.
+- Comparte el canal AT con los uplinks/ACKs: una consulta lo ocupa hasta
+  3 s (`PASSTHROUGH_TIMEOUT_MS`). Si el RAK está ocupado, responde
+  `[AT] ocupado` y se repite.
+- `resultado=2` (TIMEOUT) sin línea `RAK3172 RX crudo` = el RAK no
+  contestó nada: apagar y encender toda la placa (el NRST solo reinicia
+  el STM32, no el RAK) y probar primero `AT+VER=?`.
+- Exposición: permite leer las claves LoRaWAN, pero requiere acceso
+  físico al puerto de debug, desde el cual ya se pueden leer conectándose
+  al RAK.
+
+Los comandos de parámetros de este módulo son un mando temporal — quitar su llamada en `main.c`
 (`ComandoSerial_Init()`/`ComandoSerial_Update()`) cuando exista un
 mando local real (pantalla/botonera) o ya no se necesite probar sin
 red LoRa.
@@ -691,7 +736,7 @@ downlink fue rechazado, es el valor anterior, no el solicitado.
 | 1 | `OUT_OF_RANGE` | Valor fuera del rango válido |
 | 2 | `UNKNOWN_PARAMETER_ID` | ID no reconocido, o longitud de datos insuficiente |
 | 3 | `STORAGE_ERROR` | Falló la escritura en flash (hardware) |
-| 4 | `APPLY_ERROR` | Precondición no cumplida (ej. `SERVO_PULSO_MIN/MAX` con `CONTROL_HABILITADO=0`) |
+| 4 | `APPLY_ERROR` | Precondición no cumplida (ej. `SERVO_PULSO_MIN/MAX` con `CALIB=0`) |
 | 5 | `REJECTED_ENGINE_RUNNING` | Parámetro de categoría CONFIGURACION, motor operando |
 | 6 | `REJECTED_ENGINE_STOPPED` | `MODO=1`/`2` (control automático) con el motor detenido (agregado 2026-09-22, sección 4.3) |
 | 7 | `REJECTED_OBJETIVO_REMOTO_NO_CONFIGURADO` | `MODO=2` con `PRESION_OBJETIVO_REMOTO` en `0` (sin configurar) — agregado 2026-09-23, sección 4.3. No es un candado de seguridad (a diferencia del `6`), es para evitar que `MODO=2` quede "andando" sin hacer nada útil, en silencio |
@@ -703,33 +748,37 @@ downlink fue rechazado, es el valor anterior, no el solicitado.
 | 1 | `SET_RATIO` | x100 | 2B uint16 | Calibración | Pulsos/revolución |
 | 2 | `ALPHA` | x1000 | 2B uint16 | Calibración | Coef. filtro EMA (0-1) |
 | 3 | `SET_RPM` | x10 | 2B uint16 | Proceso | Setpoint directo -- solo tiene efecto con `MODO=3` (`MANUAL_BANCO`, sección 4.3); en cualquier otro `MODO` se rechaza con `APPLY_ERROR` (agregado 2026-09-17, antes se aceptaba en silencio sin hacer nada si `MODO` no era el correcto) |
-| 4 | `RPM_MAX` | x10 | 2B uint16 | Configuración | Límite duro superior |
+| 4 | `RPM_MAX` | x10 | 2B uint16 | Configuración | Límite duro superior -- techo MECÁNICO del motor/motobomba, fijo por modelo (no depende de la instalación). Exige `MODO=CALIBRACIÓN` además de motor detenido, ver sección 4.4 |
 | 5 | `RPM_MIN` | x10 | 2B uint16 | Configuración | Límite duro / ralentí |
-| 6 | `PID_KP` | x100 | 2B int16 | Calibración | Con signo. Solo se acepta con `CONTROL_HABILITADO=10` (modo sintonización PID) — `APPLY_ERROR` en cualquier otro modo, incluida la operación normal (`=0`). Se permite con el motor operando (necesario para sintonizar en lazo cerrado, ver sección 9) |
-| 7 | `PID_KI` | x1000 | 2B int16 | Calibración | Con signo. Igual que `PID_KP` |
-| 8 | `TASA_LLENADO_PSI_S` | x100 | 2B uint16 | Proceso | Tasa de subida (PSI/s) de la rampa de llenado de `MODO=1` (sección 4.3). `0` = sin rampa, directo al objetivo. ID reusado 2026-09-23 -- era `PID_KD` (eliminado, ver sección 9: `Kd=0` confirmado en campo, sin uso real, se quitó el término derivativo del lazo interno en vez de dejarlo calibrado en 0) |
-| 9 | `SERVO_PULSO_MIN` | directo (µs) | 2B uint16 | Configuración | Límite mecánico. Además requiere `CONTROL_HABILITADO=1` o `=2` (modo calibración del servo, NO `=10`) — si no, `APPLY_ERROR` aunque el motor esté apagado |
+| 32 | `RPM_MAX_CARGA` | x10 | 2B uint16 | Configuración | Agregado 2026-09-28 -- techo CON CARGA (hidráulico, ej. no reventar tubería), específico de cada instalación, SIEMPRE `≤ RPM_MAX` (rechazado con `OUT_OF_RANGE` si se intenta poner más alto). Mismo candado que `RPM_MAX` (`MODO=CALIBRACIÓN` + motor detenido). Ver sección 4.4 para dónde se usa cada uno (embrague conectado/desconectado) |
+| 34 | `PRESION_MAX` | x10 | 2B uint16 | Configuración | Agregado 2026-09-29 -- guarda dura de presión LOCAL, análoga a `RPM_MAX_CARGA` (límite de la instalación, no del motor). Si la presión medida la supera, el setpoint se fuerza a ralentí y se emite la alerta `5` (`PRESION_MAX_EXCEDIDA`); se libera al bajar al 90 %. Aplica solo con la bomba cargada (`MODO=1/2/3` y `CALIB=9/10/11/12`); `MODO=0` queda exento. Rango `(0, 500]` PSI, default 100. Invariante: `PRESION_OBJETIVO_LOCAL` y `SET_PRESION` deben ser siempre `< PRESION_MAX` (`OUT_OF_RANGE` si no), y `PRESION_MAX` no puede fijarse en o por debajo de ellos. La presión comparada es la que lee el sensor local. Mismo candado que `RPM_MAX` (`MODO=CALIBRACIÓN` + motor detenido). Sube el magic de flash a `CALO` (el próximo reflash borra la calibración de campo). ⚠️ Agregar la alerta 5 a `NOMBRES_ALERTA` en `decoder.py` (AWS) |
+| 6 | `PID_RPM_KP` | x100 | 2B int16 | Calibración | Con signo. ⚠️ Gate actualizado 2026-09-29 (`CALIB=10` ELIMINADO, ver sección 4.4): solo se acepta con `MODO=CALIBRACIÓN` Y `CALIB=0` (ningún `CALIB` automático activo) — `APPLY_ERROR` en cualquier otro caso, incluida la operación normal. Se permite con el motor operando (necesario para sintonizar en lazo cerrado, ver sección 9) |
+| 7 | `PID_RPM_KI` | x1000 | 2B int16 | Calibración | Con signo. Igual que `PID_RPM_KP` |
+| 8 | `TASA_LLENADO_PSI_S` | x100 | 2B uint16 | Proceso | Tasa de subida (PSI/s) de la rampa de llenado de `MODO=1` (sección 4.3). `0` = sin rampa, directo al objetivo. ID reusado 2026-09-23 -- era `PID_KD` (eliminado, ver sección 9: `Kd=0` confirmado en campo, sin uso real, se quitó el término derivativo del lazo interno en vez de dejarlo calibrado en 0). NO aplica durante `CALIB=10` (agregado 2026-09-28) -- ese escalón necesita un salto limpio para la identificación, no una rampa, ver sección 4.4 |
+| 33 | `TIEMPO_LLENADO_S` | directo (s) | 2B uint16 | Proceso | Agregado 2026-09-28. Conveniencia sobre `TASA_LLENADO_PSI_S` -- el operador manda cuántos SEGUNDOS quiere que dure el llenado completo (en vez de calcular una velocidad a mano), el firmware lee `PresionV_GetPresionPsi()` en vivo y `PRESION_OBJETIVO_LOCAL` ya configurado, calcula `tasa = (objetivo - presión_actual) / segundos`, y la guarda en `TASA_LLENADO_PSI_S` -- mismo patrón que `SET_RATIO_AUTO` (ID 25). Rechaza `OUT_OF_RANGE` si `segundos=0` o si la presión actual ya está en o por encima del objetivo. El "valor vigente" que devuelve el ACK es la tasa resultante (x100, no los segundos enviados). A diferencia de `SET_RATIO_AUTO`, SÍ persiste el valor crudo en segundos (campo `tiempoLlenadoS` en flash, default `1800`=30min) -- `CALIB=9` (ver sección 4.4/9) lee este valor en segundos directo: calcula su propio ritmo máximo seguro `(PRESION_OBJETIVO_LOCAL − presión base medida) / TIEMPO_LLENADO_S` con la base que mide al arrancar, y usa `1.5 × TIEMPO_LLENADO_S` como timeout de último recurso |
+| 9 | `SERVO_PULSO_MIN` | directo (µs) | 2B uint16 | Configuración | Límite mecánico. Además requiere `CALIB=1` o `=2` (modo calibración del servo, NO `=10`) — si no, `APPLY_ERROR` aunque el motor esté apagado |
 | 10 | `SERVO_PULSO_MAX` | directo (µs) | 2B uint16 | Configuración | Igual que `SERVO_PULSO_MIN` |
 | 11 | `TIMEOUT_SIN_COMANDO_S` | directo (s) | 2B uint16 | Configuración | 60-3600s |
 | 12 | `TASA_MAX_CAMBIO_RPM_S` | x10 | 2B uint16 | Configuración | Rampa normal |
-| 13 | `CONTROL_HABILITADO` | 0/1/2/3/4/5/6/7/8/9/10 | 1B | Calibración* | Enable/disable lazo de control + **modos de calibración**. Renumerado 2026-09-23 DOS VECES el mismo día (primero al agregarse los auto-escalón de presión, después al reordenarse la secuencia de puesta en marcha, ver sección 12) — todos los números de esta fila son los FINALES. Tres grupos, por seguridad: **apagado** (`1`/`2`, calibración de servo — mueven el servo directo, sin ninguna realimentación de RPM, así que exigen el motor detenido para entrar, con rechazo explícito `REJECTED_ENGINE_RUNNING` si no), **encendido** (`0`/`3`/`6`/`7`/`8`/`9`/`10` — no cambian cómo se maneja el servo respecto a la operación normal, así que no exigen detener el motor para entrar; de hecho `3`/`6`/`7`/`8`/`9`/`10` solo tienen sentido con el motor ya operando) y `4`/`5` (calibración de zona muerta / `SERVO_PULSO_MIN` y mapeo de curva de ganancia — mueven el servo directo como `1`/`2`, pero SÍ miran la RPM en cada paso, así que tampoco exigen el motor operando para entrar, simplemente esperan). Por eso este parámetro ya NO cae en la categoría Configuración genérica (que bloquearía *cualquier* valor con el motor andando) — tiene su propio candado adentro del `case`, igual que `PID_KP/KI`. Valores: `0` desactivado/operación normal (que además ES el "ralentí" cuando `SET_RPM` no supera `RPM_MIN` — no hay un modo ralentí aparte, sería redundante), `1` manual -- el servo se mantiene quieto en su posición, y cada downlink de `SERVO_PULSO_MIN` o `SERVO_PULSO_MAX` lo mueve directo a ese valor, `2` barrido automático continuo entre `SERVO_PULSO_MIN/MAX`, `3` **calibración de `ALPHA`** (mide el ruido real de RPM y calcula el filtro) -- ver sección 12, `4` **calibración de zona muerta / `SERVO_PULSO_MIN`** (umbral de aceleración; renumerado 2026-09-23, antes era el valor `5` -- se corrió antes del ralentí porque es la línea base de la propia fórmula de salida del PID interno) -- ver sección 11, `5` **mapeo de curva de ganancia** (barre el pulso en lazo abierto desde `SERVO_PULSO_MIN` hasta una RPM techo fija, logueando pulso vs RPM real en cada paso -- por ahora solo mide/loguea, no aplica ninguna corrección todavía; renumerado 2026-09-23, antes era el valor `6` -- mismo motivo que `4`, alimenta la sintonización del PID interno) -- ver sección 12, `6` **auto-escalón del lazo INTERNO de RPM** (PID#1, agregado 2026-09-23 en la segunda renumeración) -- automatiza mandar un escalón fijo de `SET_RPM` (`RPM_MIN` + 200) y loguear `PID_TEST` durante una ventana fija de 60s, mismo espíritu que `8`/`9` pero para el lazo interno, ver sección 4.4/9/12, `7` **calibración de ralentí** (renumerado 2026-09-23, antes era el valor `4` -- se corrió después de `4`/`5`/`6` porque el ralentí real cambia según haya o no carga hidráulica conectada, a diferencia de esos tres) -- ver sección 10, `8` **auto-escalón del lazo de presión LOCAL** (`MODO=1`, renumerado 2026-09-23, antes era el valor `7`) -- automatiza mandar un escalón fijo de `PRESION_OBJETIVO` y loguear `PRESION_PID_TEST` durante una ventana fija, ver sección 9/12, `9` **auto-escalón del lazo REMOTO** (`MODO=2`, probado en `MODO=3`, renumerado 2026-09-23, antes era el valor `8`) -- mismo espíritu que `8` pero con un escalón de `SET_RPM` y logueando `REMOTO_PID_TEST`, ver sección 9/12, `10` **sintonización de PID** (renumerado 2026-09-23 dos veces -- primero de `7` a `9`, después de `9` a `10`) -- el servo lo maneja el PID normal exactamente igual que en `0`, pero es el único modo en que `PID_KP/KI` se aceptan (y activa el log `PID_TEST`, ver sección 9); `3`, `4`, `5`, `6`, `7`, `8` y `9` solo se pueden pedir viniendo de modo `0` (rechazado con `OUT_OF_RANGE` si se piden desde `1`/`2`/`10`, o entre sí) -- `10` es el único modo de calibración sin esa restricción, se puede pedir directo. En `1`/`2`/`3`/`6`/`7`/`8`/`9`/`10` el servo nunca se comporta distinto a "sin control activo" salvo que `pidActivoAhora` esté armado (solo en `0`/`6`/`8`/`9`/`10` con un `SET_RPM` real) — en `1`/`2`/`3`/`7` siempre cae en la posición segura `SERVO_PULSO_MIN`; `4` y `5` son las excepciones que sí mueven el servo por encima de `SERVO_PULSO_MIN` de forma automática, en pasos chicos y acotados (ver sección 11 y 12). En `1` o `2` se habilita cambiar `SERVO_PULSO_MIN/MAX`. El firmware fuerza `CONTROL_HABILITADO=0` localmente en el instante que el motor arranca **solo si estaba en `1` o `2`** (nunca en `3`/`4`/`5`/`6`/`7`/`8`/`9`/`10`, que necesitan que el motor siga operando; `6`/`8`/`9` en cambio SÍ se auto-abortan a `0` si el motor se DETIENE a mitad del escalón, o si `MODO` cambia, ver sección 9/12), y también fuerza a `0` en cada arranque del firmware (`CalibFlash_Init()`), sin importar el valor que haya quedado guardado en flash de una sesión anterior — nunca reanuda ningún modo de calibración solo; los modos `3`, `4`, `5`, `6`, `7`, `8` y `9` además se auto-completan solos (vuelven a `0` sin downlink al terminar, ver secciones 9, 10, 11 y 12). **Medida de seguridad adicional**: al entrar a `1`-`10` (downlink aceptado con valor != 0), `SET_RPM` se limpia a `0` (su estado "sin comandar") — evita que un `SET_RPM` que haya quedado de una operación anterior active el PID solo al entrar a `10`, sin que el operador lo haya vuelto a pedir explícitamente para esa sesión (`6` y `9` se pisan solos con su propio escalón de todas formas, ver sección 9/12). Mismo criterio en el camino de regreso: cuando el apagado de seguridad de `main.c` fuerza `CONTROL_HABILITADO` de `1`/`2` de vuelta a `0` (motor arrancando durante calibración del servo), también limpia `SET_RPM` a `0` — por si se había mandado un `SET_RPM` mientras se calibraba (categoría Proceso, siempre se acepta, sin importar el modo), que no quede activando el PID solo al volver a operación normal |
+| 13 | `CALIB` | 0-12 (numeración vigente desde 2026-09-29, sin huecos) | 1B | Calibración* | ⚠️ Esta celda quedó desactualizada tras `=11`/`=12`/`=13` y el gateo por `MODO=4` (CALIBRACIÓN) agregados 2026-09-24/25/28, Y tras la RENUMERACIÓN completa del 2026-09-29 (eliminó el viejo `CALIB=10` de sintonización manual y corrió todos los demás valores) — ver sección 4.4 para la lista completa y vigente de valores. Todos los números de valor mencionados en el resto de esta celda usan la numeración ANTERIOR a 2026-09-29 (histórica). Todo lo que sigue en esta celda que mencione `=10` como "sintonización de PID" está OBSOLETO: ese valor ya no existe, y `PID_RPM_KP/KI`/`PID_PSI_KP/KI`/`PID_ASP_KP/KI` ahora se aceptan con `MODO=CALIBRACIÓN` + `CALIB=0` (ningún `CALIB` activo), no con un valor `=10` dedicado. Enable/disable lazo de control + **modos de calibración**. Renumerado 2026-09-23 DOS VECES el mismo día (primero al agregarse los auto-escalón de presión, después al reordenarse la secuencia de puesta en marcha, ver sección 12) — todos los números de esta fila son los FINALES. Tres grupos, por seguridad: **apagado** (`1`/`2`, calibración de servo — mueven el servo directo, sin ninguna realimentación de RPM, así que exigen el motor detenido para entrar, con rechazo explícito `REJECTED_ENGINE_RUNNING` si no), **encendido** (`0`/`3`/`6`/`7`/`8`/`9`/`10` — no cambian cómo se maneja el servo respecto a la operación normal, así que no exigen detener el motor para entrar; de hecho `3`/`6`/`7`/`8`/`9`/`10` solo tienen sentido con el motor ya operando) y `4`/`5` (calibración de zona muerta / `SERVO_PULSO_MIN` y mapeo de curva de ganancia — mueven el servo directo como `1`/`2`, pero SÍ miran la RPM en cada paso, así que tampoco exigen el motor operando para entrar, simplemente esperan). Por eso este parámetro ya NO cae en la categoría Configuración genérica (que bloquearía *cualquier* valor con el motor andando) — tiene su propio candado adentro del `case`, igual que `PID_RPM_KP/KI`. Valores: `0` desactivado/operación normal (que además ES el "ralentí" cuando `SET_RPM` no supera `RPM_MIN` — no hay un modo ralentí aparte, sería redundante), `1` manual -- el servo se mantiene quieto en su posición, y cada downlink de `SERVO_PULSO_MIN` o `SERVO_PULSO_MAX` lo mueve directo a ese valor, `2` barrido automático continuo entre `SERVO_PULSO_MIN/MAX`, `3` **calibración de `ALPHA`** (mide el ruido real de RPM y calcula el filtro) -- ver sección 12, `4` **calibración de zona muerta / `SERVO_PULSO_MIN`** (umbral de aceleración; renumerado 2026-09-23, antes era el valor `5` -- se corrió antes del ralentí porque es la línea base de la propia fórmula de salida del PID interno) -- ver sección 11, `5` **mapeo de curva de ganancia** (barre el pulso en lazo abierto desde `SERVO_PULSO_MIN` hasta una RPM techo fija, logueando pulso vs RPM real en cada paso -- por ahora solo mide/loguea, no aplica ninguna corrección todavía; renumerado 2026-09-23, antes era el valor `6` -- mismo motivo que `4`, alimenta la sintonización del PID interno) -- ver sección 12, `6` **auto-escalón del lazo INTERNO de RPM** (PID#1, agregado 2026-09-23 en la segunda renumeración) -- automatiza mandar un escalón fijo de `SET_RPM` (`RPM_MIN` + 200) y loguear `PID_TEST` durante una ventana fija de 60s, mismo espíritu que `8`/`9` pero para el lazo interno, ver sección 4.4/9/12, `7` **calibración de ralentí** (renumerado 2026-09-23, antes era el valor `4` -- se corrió después de `4`/`5`/`6` porque el ralentí real cambia según haya o no carga hidráulica conectada, a diferencia de esos tres) -- ver sección 10, `8` **auto-escalón del lazo de presión LOCAL** (`MODO=1`, renumerado 2026-09-23, antes era el valor `7`) -- automatiza mandar un escalón fijo de `PRESION_OBJETIVO_LOCAL` y loguear `PRESION_PID_TEST` durante una ventana fija, ver sección 9/12, `9` **auto-escalón del lazo REMOTO** (`MODO=2`, probado en `MODO=3`, renumerado 2026-09-23, antes era el valor `8`) -- mismo espíritu que `8` pero con un escalón de `SET_RPM` y logueando `REMOTO_PID_TEST`, ver sección 9/12, `10` **sintonización de PID** (renumerado 2026-09-23 dos veces -- primero de `7` a `9`, después de `9` a `10`) -- el servo lo maneja el PID normal exactamente igual que en `0`, pero es el único modo en que `PID_RPM_KP/KI` se aceptan (y activa el log `PID_TEST`, ver sección 9); `3`, `4`, `5`, `6`, `7`, `8` y `9` solo se pueden pedir viniendo de modo `0` (rechazado con `OUT_OF_RANGE` si se piden desde `1`/`2`/`10`, o entre sí) -- `10` es el único modo de calibración sin esa restricción, se puede pedir directo. En `1`/`2`/`3`/`6`/`7`/`8`/`9`/`10` el servo nunca se comporta distinto a "sin control activo" salvo que `pidActivoAhora` esté armado (solo en `0`/`6`/`8`/`9`/`10` con un `SET_RPM` real) — en `1`/`2`/`3`/`7` siempre cae en la posición segura `SERVO_PULSO_MIN`; `4` y `5` son las excepciones que sí mueven el servo por encima de `SERVO_PULSO_MIN` de forma automática, en pasos chicos y acotados (ver sección 11 y 12). En `1` o `2` se habilita cambiar `SERVO_PULSO_MIN/MAX`. El firmware fuerza `CALIB=0` localmente en el instante que el motor arranca **solo si estaba en `1` o `2`** (nunca en `3`/`4`/`5`/`6`/`7`/`8`/`9`/`10`, que necesitan que el motor siga operando; `6`/`8`/`9` en cambio SÍ se auto-abortan a `0` si el motor se DETIENE a mitad del escalón, o si `MODO` cambia, ver sección 9/12), y también fuerza a `0` en cada arranque del firmware (`CalibFlash_Init()`), sin importar el valor que haya quedado guardado en flash de una sesión anterior — nunca reanuda ningún modo de calibración solo; los modos `3`, `4`, `5`, `6`, `7`, `8` y `9` además se auto-completan solos (vuelven a `0` sin downlink al terminar, ver secciones 9, 10, 11 y 12). **Medida de seguridad adicional**: al entrar a `1`-`10` (downlink aceptado con valor != 0), `SET_RPM` se limpia a `0` (su estado "sin comandar") — evita que un `SET_RPM` que haya quedado de una operación anterior active el PID solo al entrar a `10`, sin que el operador lo haya vuelto a pedir explícitamente para esa sesión (`6` y `9` se pisan solos con su propio escalón de todas formas, ver sección 9/12). Mismo criterio en el camino de regreso: cuando el apagado de seguridad de `main.c` fuerza `CALIB` de `1`/`2` de vuelta a `0` (motor arrancando durante calibración del servo), también limpia `SET_RPM` a `0` — por si se había mandado un `SET_RPM` mientras se calibraba (categoría Proceso, siempre se acepta, sin importar el modo), que no quede activando el PID solo al volver a operación normal |
 | 14 | `INTERVALO_ENVIO_OPERATIVO_S` | directo (s) | 2B uint16 | Configuración | Uplink en operación |
 | 15 | `INTERVALO_ENVIO_STANDBY_S` | directo (s) | 2B uint16 | Configuración | Uplink en standby |
 | 16 | `MODO` | — | 1B | Configuración | 0=Ralentí, 1=Local, 2=Remoto |
-| 17 | `PRESION` | x10 | 2B uint16 | Proceso | Presión del aspersor (remota) |
+| 17 | `PRESION_REMOTO` | x10 | 2B uint16 | Proceso | Presión del aspersor (remota) |
 | 18 | `NODE_ID` | — | 1B | Configuración | Uso futuro (multicast) |
 | 19 | `RESTAURAR_DEFAULTS` | — | 1B | Comando | Requiere byte confirmación `0xA5` |
 | 20 | `FORZAR_REPORTE` | — | 1B | Comando | Requiere byte confirmación `0xA5` |
 | 21 | `HISTERESIS_MODO_S` | directo (s) | 2B uint16 | Configuración | Anti-parpadeo intervalo envío |
 | 22 | `RESET_REMOTO` | — | 1B | Comando | ⚠️ No conectado aún, ver pendientes |
-| 23 | `PRESION_OBJETIVO` | x10 | 2B uint16 | Configuración | Setpoint del lazo externo de `MODO=1` (`presion_pid.c`, sección 4.3) -- también pensado como umbral fase llenado→régimen |
+| 23 | `PRESION_OBJETIVO_LOCAL` | x10 | 2B uint16 | Configuración | Setpoint del lazo externo de `MODO=1` (`presion_pid.c`, sección 4.3) -- también pensado como umbral fase llenado→régimen |
 | 24 | `TASA_MAX_CAMBIO_RPM_LLENADO_S` | x10 | 2B uint16 | Configuración | Rampa conservadora (llenado tubería) |
 | 25 | `SET_RATIO_AUTO` | x10 (entrada) | 2B uint16 | Calibración | El valor recibido es el RPM que marca un tacómetro de referencia externo en ese instante, NO el ratio — el firmware calcula `SET_RATIO = frecuenciaHz_actual × 60 / RPM_recibido` y lo aplica (misma validación de rango que `SET_RATIO`, mismo campo persistido). El valor vigente devuelto en el ACK es el ratio resultante, codificado x100 como `SET_RATIO` (no eco del RPM recibido). `OUT_OF_RANGE` si se manda `0` o si el motor no tiene lectura de tacómetro válida (`frecuenciaHz == 0`) — no hay nada que calcular sin motor girando. Ver sección 12 |
-| 26 | `PRESION_REMOTO_PID_KP` | x100 | 2B int16 | Calibración | Con signo. Ganancia proporcional del lazo EXTERNO de presión remota de `MODO=2` (sección 4.3, `presion_pid_remoto.c`) — solo se acepta con `CONTROL_HABILITADO=10`, igual que `PID_KP/KI/KD`. Default `0` (sin calibrar). ID reusado 2026-09-23 (antes `PRESION_GANANCIA_RPM`, formula lineal reemplazada por este PID — ver sección 4.3) |
-| 27 | `PRESION_REMOTO_PID_KI` | x1000 | 2B int16 | Calibración | Con signo. Ganancia integral del mismo lazo. Igual gate que `PRESION_REMOTO_PID_KP`. Default `0`. ID reusado 2026-09-23 (antes `PRESION_OFFSET_RPM`) |
-| 28 | `PRESION_PID_KP` | x100 | 2B int16 | Calibración | Con signo. Ganancia proporcional del lazo EXTERNO de presión local de `MODO=1` (sección 4.3, `presion_pid.c`) — solo se acepta con `CONTROL_HABILITADO=10`, igual que `PID_KP/KI/KD`. Default `0` (sin calibrar). Antes libre (parte de `MECANISMO_*`, removido 2026-09-11), reasignado 2026-09-14 |
-| 29 | `PRESION_PID_KI` | x1000 | 2B int16 | Calibración | Con signo. Ganancia integral del lazo EXTERNO de presión local. Igual gate que `PRESION_PID_KP`. Default `0`. Antes libre, reasignado 2026-09-14 |
-| 30 | `PRESION_OBJETIVO_REMOTO` | x10 | 2B uint16 | Proceso | Presión que se ESPERA que reporte el aspersor remoto en `MODO=2` (distinta de `PRESION`, ID 17, que es la lectura real). Es el setpoint real del PID de `MODO=2` (`presion_pid_remoto.c`) Y alimenta el supervisor de "`MODO=2` no alcanza el objetivo" (sección 8). Default `0` = sin configurar (a diferencia de `PRESION_OBJETIVO` local, sí acepta `0` explícitamente, aunque con `0` el PID persigue 0 PSI). Agregado 2026-09-23, cambió de rol el mismo día al reemplazarse la fórmula lineal por el PID |
+| 26 | `PID_ASP_KP` | x100 | 2B int16 | Calibración | Con signo. Ganancia proporcional del lazo EXTERNO de presión remota de `MODO=2` (sección 4.3, `presion_pid_remoto.c`) — solo se acepta con `MODO=CALIBRACIÓN` Y `CALIB=0`, igual que `PID_RPM_KP/KI` (gate actualizado 2026-09-29, ver sección 4.4). Default `0` (sin calibrar). ID reusado 2026-09-23 (antes `PRESION_GANANCIA_RPM`, formula lineal reemplazada por este PID — ver sección 4.3) |
+| 27 | `PID_ASP_KI` | x1000 | 2B int16 | Calibración | Con signo. Ganancia integral del mismo lazo. Igual gate que `PID_ASP_KP`. Default `0`. ID reusado 2026-09-23 (antes `PRESION_OFFSET_RPM`) |
+| 28 | `PID_PSI_KP` | x100 | 2B int16 | Calibración | Con signo. Ganancia proporcional del lazo EXTERNO de presión local de `MODO=1` (sección 4.3, `presion_pid.c`) — solo se acepta con `MODO=CALIBRACIÓN` Y `CALIB=0`, igual que `PID_RPM_KP/KI` (gate actualizado 2026-09-29, ver sección 4.4). Default `0` (sin calibrar). Antes libre (parte de `MECANISMO_*`, removido 2026-09-11), reasignado 2026-09-14 |
+| 29 | `PID_PSI_KI` | x1000 | 2B int16 | Calibración | Con signo. Ganancia integral del lazo EXTERNO de presión local. Igual gate que `PID_PSI_KP`. Default `0`. Antes libre, reasignado 2026-09-14 |
+| 30 | `PRESION_OBJETIVO_REMOTO` | x10 | 2B uint16 | Proceso | Presión que se ESPERA que reporte el aspersor remoto en `MODO=2` (distinta de `PRESION_REMOTO`, ID 17, que es la lectura real). Es el setpoint real del PID de `MODO=2` (`presion_pid_remoto.c`) Y alimenta el supervisor de "`MODO=2` no alcanza el objetivo" (sección 8). Default `0` = sin configurar (a diferencia de `PRESION_OBJETIVO_LOCAL` local, sí acepta `0` explícitamente, aunque con `0` el PID persigue 0 PSI). Agregado 2026-09-23, cambió de rol el mismo día al reemplazarse la fórmula lineal por el PID |
+| 31 | `SET_PRESION` | x10 | 2B uint16 | Proceso | Equivalente de `SET_RPM` (ID 3) pero para presión -- solo tiene efecto (y solo se acepta) con `MODO=3` (`MANUAL_BANCO`, rechaza con `APPLY_ERROR` en cualquier otro `MODO`, mismo patrón que `SET_RPM`). Arma la misma cascada de `MODO=1` (`presion_pid.c`) sin rampa de llenado, ver sección 4.3.1. Mutuamente excluyente con `SET_RPM` (gana el último que llega, el otro se limpia a `0`); se limpia a `0` también al entrar a `MODO=3`. Agregado 2026-09-25 |
 
 **Ganancias PID con signo**: se codifican como `int16` (complemento a
 2), no `uint16` — un consumidor debe reinterpretar valores > 32767
@@ -777,7 +826,7 @@ de `0` confiable.
 `estado` cambia, usando `Reloj_GetUnixTimeLocal()` (ver el detalle del
 "desplazamiento en vez de reinicio" al sincronizar, sección 2.2).
 
-### 4.3 Modos de operación del motor (`MODO` 0/1/2/3) — **implementado, renumerado 2026-09-14**
+### 4.3 Modos de operación del motor (`MODO` 0/1/2/3/4) — **implementado, renumerado 2026-09-14, extendido 2026-09-24**
 
 `MODO` (ID 16) gobierna de dónde sale el setpoint de RPM del lazo
 interno (`pid.c`). Es un parámetro real de protocolo (se manda por
@@ -786,35 +835,61 @@ terminología que ya usa el cliente en campo:
 
 ```
 MODO=0 (Ralentí):        sin control activo, sin importar SET_RPM/
-                          PRESION/presión local -- el servo cae a
+                          PRESION_REMOTO/presión local -- el servo cae a
                           SERVO_PULSO_MIN (ralentí natural). Estado
                           seguro/neutro.
 MODO=1 (Presión local):  setpoint = salida del lazo EXTERNO de presión
                           (presion_pid.c), comparando la presión real
                           medida por el sensor PROPIO de este TID
-                          contra PRESION_OBJETIVO. Ver detalle abajo.
+                          contra PRESION_OBJETIVO_LOCAL. Ver detalle abajo.
 MODO=2 (Remoto):         setpoint = salida del lazo EXTERNO de presión
                           REMOTA (presion_pid_remoto.c, PID en cascada
                           evento-driven), comparando PRESION_OBJETIVO_REMOTO
-                          contra PRESION recibida por downlink de un nodo
+                          contra PRESION_REMOTO recibida por downlink de un nodo
                           aspersor REMOTO (no del sensor local). Reemplaza
                           desde 2026-09-23 a la fórmula lineal abierta que
                           tenía antes. Ver detalle abajo.
-MODO=3 (Manual/banco):   setpoint = SET_RPM (downlink/serial directo),
-                          sin ningún lazo automático. Dos usos
-                          legítimos que comparten el mismo MODO
-                          (se diferencian por CONTROL_HABILITADO, ver
-                          4.4): ajuste operativo rápido en campo (ej.
-                          trasladar manguera/aspersor) con
-                          CONTROL_HABILITADO=0, o sesión de
-                          sintonización del PID interno con
-                          CONTROL_HABILITADO=10 (renumerado 2026-09-23
-                          DOS VECES el mismo día -- primero de 7 a 9,
-                          después de 9 a 10 -- así se hizo toda la
-                          sintonización de esta sección, Kp=0.047/
-                          Ki=0.11 -- ese modo exige MODO=3 para que el
-                          motor reciba algún setpoint, si no el PID
-                          queda "activado" pero sin moverse).
+MODO=3 (Manual/banco):   setpoint = SET_RPM (downlink/serial directo,
+                          RPM cruda) O SET_PRESION (downlink directo,
+                          agregado 2026-09-25 -- arma la MISMA cascada
+                          de presión que MODO=1, sin rampa de llenado,
+                          ver sección 4.4), sin ningún lazo automático
+                          más allá de la elección del operador. USO
+                          OPERATIVO REAL DE CAMPO ÚNICAMENTE (ej.
+                          trasladar manguera/aspersor, o sostener una
+                          presión puntual sin recomisionar
+                          PRESION_OBJETIVO_LOCAL) -- un operador cualquiera
+                          puede estar en este modo en plena operación
+                          normal, con CALIB=0. Hasta el
+                          2026-09-23 este mismo valor también se usaba
+                          para las sesiones de calibración (toda la
+                          sintonización del PID interno de esta
+                          sección, Kp=0.047/Ki=0.11, se hizo en
+                          MODO=3) -- desde el 2026-09-24 ESO se movió a
+                          MODO=4 (ver abajo), justamente para no
+                          mezclar "operador moviendo una manguera" con
+                          "sesión de ingeniería" bajo el mismo valor.
+MODO=4 (Calibración):    setpoint = SET_RPM para la mayoría de las
+                          rutinas (mismo cálculo que MODO=3, ver
+                          main.c) -- EXCEPTO con CALIB=10
+                          activo, donde en cambio arma el lazo de
+                          presión LOCAL real (idéntico a MODO=1, ver
+                          nota de `presionLocalActivoAhora` en main.c
+                          y sección 4.4/9/12). Agregado 2026-09-24,
+                          decisión explícita del usuario: es el ÚNICO
+                          MODO desde el que se acepta un
+                          CALIB != 0 -- SIN excepciones,
+                          ni siquiera `10` (un intento anterior lo
+                          eximía aceptando también MODO=1, se descartó
+                          a pedido explícito del usuario en favor de
+                          esta regla única). Nunca se usa en operación
+                          normal de campo, exclusivo de sesiones de
+                          banco/ingeniería (puesta en marcha,
+                          recalibración anual). Reemplaza a MODO=3 para
+                          TODO lo que antes era "modo de banco para
+                          calibrar" en esta misma sección 9/12 del
+                          README (la sintonización del PID interno, los
+                          auto-escalón 6/10/12/9, etc.).
 ```
 
 ⚠️ **RENUMERADO 2026-09-14**: antes `MODO=1` era "SET_RPM directo"
@@ -828,7 +903,7 @@ cambio, no asumir que quedó en el valor correcto.
 
 ⚠️ **`MODO` NUNCA arranca en el valor persistido en flash -- siempre
 arranca en `RALENTI` (0)** (decisión explícita del usuario, agregado
-2026-09-22, mismo criterio que ya existía para `CONTROL_HABILITADO` en
+2026-09-22, mismo criterio que ya existía para `CALIB` en
 `CalibFlash_Init()`). Motivo: se confirmó en campo que el equipo puede
 resetearse solo (ver hallazgo de hardware sobre el riel de 3.3V
 compartido con el RAK3172, sección de hardware) -- si eso pasara con la
@@ -862,7 +937,8 @@ comportamiento viejo, y el motor no reaccionaba porque `MODO=1` no lee
 `SET_RPM` para nada). Antes de este cambio, `SET_RPM` se aceptaba
 igual (`STATUS=OK`) sin importar `MODO`, simplemente no tenía ningún
 efecto -- ahora el ACK avisa de una vez, mismo patrón que
-`PID_KP/KI/KD` exigiendo `CONTROL_HABILITADO=10`.
+`PID_RPM_KP/KI` exigiendo `MODO=CALIBRACIÓN` + `CALIB=0` (ver
+sección 4.4).
 
 ⚠️ **Pregunta abierta para el cliente**: su equipo anterior
 mencionaba una función donde se manda un `SET_RPM` que "se queda
@@ -880,19 +956,20 @@ calcula su setpoint automáticamente:
 presión medida (PresionV_GetPresionPsi(), sensor propio del TID)
         │
         ▼
-   PresionPid_CalcularSetpointRpm(PRESION_OBJETIVO, presión medida)
-        │  (PI, ganancias PRESION_PID_KP/KI, sin derivativo)
+   PresionPid_CalcularSetpointRpm(PRESION_OBJETIVO_LOCAL, presión medida)
+        │  (PI, ganancias PID_PSI_KP/KI, sin derivativo)
         ▼
    setpointRpm  ──────────►  PID_CalcularSalidaUs() (lazo interno, sin cambios)
 ```
 
 | ID | Nombre | Escala | Notas |
 |---|---|---|---|
-| 28 | `PRESION_PID_KP` | x100, con signo | Ganancia proporcional del lazo externo |
-| 29 | `PRESION_PID_KI` | x1000, con signo | Ganancia integral del lazo externo |
+| 28 | `PID_PSI_KP` | x100, con signo | Ganancia proporcional del lazo externo |
+| 29 | `PID_PSI_KI` | x1000, con signo | Ganancia integral del lazo externo |
 
-Mismo patrón de calibración que `PID_KP/KI/KD`/`PRESION_GANANCIA_RPM`:
-solo se aceptan con `CONTROL_HABILITADO=10`, con el motor operando,
+Mismo patrón de calibración que `PID_RPM_KP/KI`/`PRESION_GANANCIA_RPM`:
+solo se aceptan con `MODO=CALIBRACIÓN` + `CALIB=0` (ver
+sección 4.4), con el motor operando,
 observando la RPM real contra la presión real -- **arrancan en `0`
 (sin calibrar)**, así que `MODO=1` no hace nada hasta que se
 caractericen en campo (mismo método usado para el mecanismo directo:
@@ -913,7 +990,7 @@ que el watchdog de `MODO=2` de abajo. Cuando el circuito 4-20mA esté
 listo, sustituir por `Presion_GetPresionPsi()`/`Presion_SensorValido()`
 -- la arquitectura de la cascada no depende de qué sensor la alimenta.
 
-**Supervisor de "no se puede llegar a `PRESION_OBJETIVO`"** (agregado
+**Supervisor de "no se puede llegar a `PRESION_OBJETIVO_LOCAL`"** (agregado
 2026-09-14, ver detalle completo en sección 8): si el lazo externo
 queda 30s seguidos pidiendo `RPM_MAX` (el techo permitido) sin que la
 presión real se acerque al objetivo (±5%), y eso pasa 3 veces seguidas,
@@ -926,7 +1003,7 @@ solo para enterarse si la meta pedida no es alcanzable.
 **`MODO=2` (Remoto) — PID en cascada evento-driven, igual patrón que
 `MODO=1`, pero contra un objetivo remoto — reemplaza desde 2026-09-23 a
 la fórmula lineal abierta que tenía antes (`PRESION_OFFSET_RPM +
-PRESION_GANANCIA_RPM * PRESION`).** Motivo del reemplazo (decisión
+PRESION_GANANCIA_RPM * PRESION_REMOTO`).** Motivo del reemplazo (decisión
 explícita del usuario): la fórmula lineal exigía calibrar dos
 constantes **en cada instalación**, porque la relación real
 RPM→presión remota depende de la tubería/bomba/aspersor físicos de ese
@@ -941,12 +1018,13 @@ para `MODO=1`.
 
 | ID | Nombre | Escala | Notas |
 |---|---|---|---|
-| 26 | `PRESION_REMOTO_PID_KP` | x100, con signo | Ganancia proporcional |
-| 27 | `PRESION_REMOTO_PID_KI` | x1000, con signo | Ganancia integral |
+| 26 | `PID_ASP_KP` | x100, con signo | Ganancia proporcional |
+| 27 | `PID_ASP_KI` | x1000, con signo | Ganancia integral |
 
-Mismo patrón de calibración que `PID_KP/KI/KD`/`PRESION_PID_KP/KI`:
-solo se aceptan con `CONTROL_HABILITADO=10`, con el motor operando,
-observando la RPM real contra la `PRESION` remota real. Default de
+Mismo patrón de calibración que `PID_RPM_KP/KI`/`PID_PSI_KP/KI`:
+solo se aceptan con `MODO=CALIBRACIÓN` + `CALIB=0` (ver
+sección 4.4), con el motor operando,
+observando la RPM real contra la `PRESION_REMOTO` remota real. Default de
 ambos: `0` (sin calibrar, `MODO=2` no empuja el motor hasta que se
 sintonice deliberadamente).
 
@@ -961,14 +1039,14 @@ en cada vuelta del loop.** El aspersor remoto reporta con una cadencia
 muy irregular según su propio estado (confirmado en campo 2026-09-23):
 ~20-25min con presión en 0, ~20s mientras está en rampa, ~90s ya
 estabilizado en su propio objetivo. `presion_pid_remoto.c` solo se
-llama cuando llega un reporte **nuevo** de `PRESION` (detectando
+llama cuando llega un reporte **nuevo** de `PRESION_REMOTO` (detectando
 cambios en `CalibFlash_GetPresionUltimoTickMs()`, el mismo truco que ya
 usa el supervisor de abajo) -- entre reportes, el motor sostiene el
 último setpoint calculado, no se vuelve a calcular con el mismo dato
 viejo. El paso de integración usa el tiempo REAL transcurrido entre
 llamadas (no un ciclo fijo), para que el término integral sea correcto
 pese a esa cadencia tan variable. Al entrar a `MODO=2` se calcula un
-primer setpoint inmediato con el último dato de `PRESION` conocido (sin
+primer setpoint inmediato con el último dato de `PRESION_REMOTO` conocido (sin
 esperar a un reporte nuevo), para no quedarse en `0` hasta 20-25min si
 el aspersor está reportando presión baja.
 
@@ -990,13 +1068,13 @@ silencio, sin que el supervisor de abajo llegue a dispararse nunca
 (nunca se satura en `RPM_MAX` si el objetivo es `0`).
 
 **Watchdog de `TIMEOUT_SIN_COMANDO_S` (ID 11) — implementado, solo
-aplica en `MODO=2`.** Si no llega una `PRESION` válida en más de ese
+aplica en `MODO=2`.** Si no llega una `PRESION_REMOTO` válida en más de ese
 tiempo (cuenta desde el arranque si nunca llegó ninguna), el firmware
 fuerza el setpoint a "sin comandar" -- el motor cae a ralentí natural
 (misma rama física que `MODO=0`) en vez de sostener indefinidamente el
 último valor de presión, ya viejo (ej. si la Lambda que reenvía
-`PRESION` se cae, o los aspersores se quedan sin batería). Se loguea
-por flanco (`MODO_REMOTO: sin PRESION valida...`/`...reanudando control
+`PRESION_REMOTO` se cae, o los aspersores se quedan sin batería). Se loguea
+por flanco (`MODO_REMOTO: sin PRESION_REMOTO valida...`/`...reanudando control
 por presion`), no en cada vuelta del loop. `MODO=0`/`1`/`3` no usan
 este parámetro para nada -- solo importa en `MODO=2`.
 
@@ -1015,11 +1093,11 @@ de pérdida de paquetes de su enlace LoRa lo justifica.
 **`PRESION_OBJETIVO_REMOTO` (ID 30) — setpoint del PID de `MODO=2` Y
 objetivo del supervisor, agregado 2026-09-23, cambió de rol el mismo
 día (ver arriba).** Es la presión que **se espera** que reporte el
-aspersor remoto -- distinta de `PRESION` (ID 17), que es la lectura
+aspersor remoto -- distinta de `PRESION_REMOTO` (ID 17), que es la lectura
 real que manda el remoto por downlink. Se configura en este mismo TID
 (categoría PROCESO, se puede cambiar en caliente con el motor operando,
-igual que `PRESION_OBJETIVO` local). Default `0.0` = "sin configurar" --
-técnicamente sigue aceptándose (a diferencia de `PRESION_OBJETIVO`
+igual que `PRESION_OBJETIVO_LOCAL` local). Default `0.0` = "sin configurar" --
+técnicamente sigue aceptándose (a diferencia de `PRESION_OBJETIVO_LOCAL`
 local, que rechaza `0`), pero ya no es inofensivo: con el PID como
 consumidor real de este valor, dejarlo en `0` hace que el motor
 persiga `0` PSI.
@@ -1029,7 +1107,7 @@ persiga `0` PSI.
 usuario sobre la primera versión):
 1. La ventana de 30s de `PRESION_SUPERVISOR_VENTANA_MS` tiene sentido
    para `MODO=1` porque el sensor es local (lectura nueva cada vuelta
-   del loop). En `MODO=2` la `PRESION` viene de un nodo remoto que
+   del loop). En `MODO=2` la `PRESION_REMOTO` viene de un nodo remoto que
    reporta cada ~90s, más el retraso real de transporte por la tubería
    -- contar segundos de reloj no tiene sentido ahí, el setpoint ni
    cambia entre un reporte y el siguiente. **Corregido**: ahora se
@@ -1039,7 +1117,7 @@ usuario sobre la primera versión):
    cualquier cadencia real del enlace remoto.
 2. **Corregido**: ahora sí compara contra un objetivo real
    (`PRESION_OBJETIVO_REMOTO` de arriba) cuando está calibrado -- mismo
-   criterio que `MODO=1`: saturado en `RPM_MAX` **y** la `PRESION`
+   criterio que `MODO=1`: saturado en `RPM_MAX` **y** la `PRESION_REMOTO`
    remota real sigue lejos del objetivo (±5%, `PRESION_SUPERVISOR_TOLERANCIA_FRACCION`).
    Si `PRESION_OBJETIVO_REMOTO` no está calibrado (`0`, default), cae al
    criterio más simple: solo "saturado en `RPM_MAX`" (igual que la
@@ -1111,7 +1189,117 @@ existe un ID de alerta en el protocolo para mandarlo por LoRa.
   pendiente y seguir cambiando `MODO` manualmente sin restricciones**
   hasta que el flujo operativo real esté más definido.
 
-### 4.4 Modo calibración del servo (`CONTROL_HABILITADO`, implementada)
+#### 4.3.1 `SET_PRESION` (ID 31) — sostener una presión puntual en `MODO=3` (agregado 2026-09-25)
+
+Equivalente de `SET_RPM` (ID 3) pero para el lazo de presión -- un
+downlink de PROCESO (no persistente, se puede mandar con el motor
+operando), exclusivo de `MODO=3`, que le da al operador la opción de
+elegir, estando en modo banco, entre mandar `SET_RPM` (RPM directa) o
+`SET_PRESION` (que el sistema sostenga esa presión solo, vía la misma
+cascada `presion_pid.c` que ya usa `MODO=1`, sin necesitar cambiar de
+`MODO`).
+
+**Por qué no reusar `PRESION_OBJETIVO_LOCAL` para esto**: `PRESION_OBJETIVO_LOCAL`
+es el objetivo de campo ya comisionado para `MODO=1` -- pensado para
+configurarse una vez y no andar cambiándolo de un downlink a otro
+(decisión explícita del usuario). `SET_PRESION` es lo opuesto: un
+valor crudo, de un solo uso, igual de "efímero" que `SET_RPM` --
+mismo patrón exacto, solo que para presión en vez de RPM.
+
+**Diferencias con la cascada real de `MODO=1`**:
+- **Sin rampa de llenado** (`TASA_LLENADO_PSI_S` no aplica) -- el
+  operador es responsable directo del valor que manda, mismo criterio
+  que `SET_RPM` (tampoco tiene rampa).
+- **SÍ hereda la caída a ralentí si el sensor de presión está en
+  falla** (`PresionV_SensorValido()==false`) -- es una protección de
+  HARDWARE, no depende de qué valor eligió el operador, así que se
+  mantiene igual que en `MODO=1`.
+- **SÍ hereda el supervisor de "no alcanza objetivo"** (ver sección
+  8), comparando contra `SET_PRESION` en vez de `PRESION_OBJETIVO_LOCAL`
+  mientras esté activo.
+
+**Mutuamente excluyente con `SET_RPM`**: gana el último que llega --
+mandar `SET_RPM` limpia `SET_PRESION` a `0` y viceversa. `SET_PRESION`
+también se limpia a `0` automáticamente al ENTRAR a `MODO=3` (no en
+cada downlink `MODO=3` redundante mientras ya se está en `MODO=3`),
+para que no quede activando la cascada con un valor de una sesión
+anterior sin que el operador lo haya vuelto a pedir.
+
+⚠️ **Bug real encontrado y corregido de paso, al implementar esto**:
+el bloque de `main.c` que asigna `setpointRpmCrudo` para
+`MODO=3`/`MODO=4` corría DESPUÉS del bloque de la cascada de presión,
+y no tenía ninguna condición sobre qué `CALIB` estaba
+activo -- le pisaba SIEMPRE el valor ya calculado por
+`PresionPid_CalcularSetpointRpm()` con el `SET_RPM` crudo (típicamente
+`0`, sin comandar). Esto significa que **`CALIB=10` nunca
+llegó a mover RPM de verdad desde que se ensanchó
+`presionLocalActivoAhora` el 2026-09-24** para incluir
+`MODO=CALIBRACIÓN+CALIB=10` -- el cálculo se hacía, pero se pisaba antes
+de llegar al servo. Corregido agregando `&& !presionLocalActivoAhora`
+a la condición de ese bloque (mismo arreglo necesario para que
+`SET_PRESION` funcione, ya que comparte el mismo camino de código).
+
+#### 4.3.2 `RPM_MAX` vs `RPM_MAX_CARGA` (ID 4 y 32) — dos techos de RPM distintos (agregado 2026-09-28)
+
+Las motobombas de este proyecto tienen un **embrague físico** que
+conecta/desconecta la bomba del motor -- esto separa dos riesgos
+completamente distintos que antes se confundían bajo un solo concepto
+de "techo de RPM":
+
+- **`RPM_MAX`** (ID 4, ya existía): el techo **MECÁNICO** del
+  motor/motobomba -- fijo por modelo, no depende de la instalación ni
+  de si la bomba está embragada o no. Protege contra sobre-acelerar el
+  motor en sí (relevante incluso con la bomba desembragada, girando en
+  vacío).
+- **`RPM_MAX_CARGA`** (ID 32, nuevo): el techo **CON CARGA**
+  (hidráulico) -- específico de cada instalación (ej. "no reventar la
+  tubería de esta bomba en particular"), SIEMPRE `≤ RPM_MAX` (rechazado
+  si se intenta configurar más alto). Solo tiene sentido cuando la
+  bomba está embragada y hay presión hidráulica real de por medio.
+
+**Cuál se usa en cada momento** (`main.c`, variable `cargaConectada`,
+recalculada en cada vuelta del loop antes de aplicar el clamp final al
+setpoint que llega al servo):
+
+```
+CON CARGA (RPM_MAX_CARGA):
+  MODO=1 (presión local, real)
+  MODO=2 (remoto, real)
+  MODO=3 (manual/banco, CUALQUIER uso -- SET_RPM o SET_PRESION -- se
+          asume embragada por default, más conservador)
+  MODO=4 (calibración) con CALIB=9, =10 u =12 (todos
+          corren con presión/aspersor real de por medio)
+
+SIN CARGA (RPM_MAX):
+  MODO=4 (calibración) con cualquier OTRO CALIB --
+          0/4/5/6/7/8 (zona muerta, curva de ganancia interna,
+          ralentí, sintonización/validación del PID interno) -- son
+          las rutinas de banco tempranas de la secuencia de
+          comisionamiento (sección 12), pensadas para correrse con la
+          bomba DESEMBRAGADA.
+```
+
+Este mismo criterio también decide qué techo usa el mapeo de ganancia
+interno: `CALIB=5` (sin carga) usa `RPM_MAX` directo, vía
+su propio chequeo. `CALIB=9` (presión, ver sección
+4.4/9) usa `RPM_MAX_CARGA` como techo de su propia rampa, y además
+queda acotado por el mismo clamp final universal (`cargaConectada` lo
+incluye en la lista "con carga") como segunda protección. Los
+supervisores de presión local/remota (sección 8) también comparan
+contra `RPM_MAX_CARGA`, no `RPM_MAX` (siempre corren en escenarios con
+carga real).
+
+⚠️ **Este cambio agregó un campo nuevo a la estructura de flash
+persistida** (`rpmMaxCarga`) -- el "magic" de flash subió de `"CALL"`
+a `"CALM"` (ver `calibracion_flash.c`), así que **la próxima reflash
+de un TID ya en campo va a resetear TODA la calibración a los valores
+por defecto** (mismo efecto ya documentado en incidentes previos de
+este tipo) -- hay que reasertar `SET_RATIO`/`RPM_MIN`/`RPM_MAX`/PID/etc.
+a mano después de esa reflash. `RPM_MAX_CARGA` arranca en el mismo
+valor que `RPM_MAX` (sin restricción adicional) hasta que se configure
+explícitamente el límite real de cada instalación.
+
+### 4.4 Modo calibración del servo (`CALIB`, implementada)
 
 Independiente de 4.1-4.3 — no es un modo de operación del motor, es el
 mecanismo para ajustar en banco los topes mecánicos del acelerador
@@ -1120,61 +1308,71 @@ ralentí y el propio `SERVO_PULSO_MIN`, sin reflashear. Tres grupos,
 por seguridad (ver también la tabla de categorías en la sección 2.3):
 
 ```
-APAGADO   (CONTROL_HABILITADO=1 o =2): mueven el servo directo, sin
+APAGADO   (CALIB=1 o =2): mueven el servo directo, sin
           ninguna realimentación de RPM -- exigen el motor detenido
           para ENTRAR (rechazo REJECTED_ENGINE_RUNNING si no), y se
           fuerza la salida a 0 si el motor arranca mientras se está en
           cualquiera de los dos.
-ENCENDIDO (CONTROL_HABILITADO=0, =6, =7, =8, =9, =10 o =11): no cambian
-          cómo se maneja el servo respecto a la operación normal -- no
-          exigen detener el motor para entrar; de hecho 6/7/8/9/10/11
-          solo tienen sentido con el motor ya operando.
-CALIBRACIÓN-SERVO-MIN (CONTROL_HABILITADO=4): también mueve el servo
+ENCENDIDO (CALIB=0, =6, =7, =8, =9, =10, =11 o =12): no
+          cambian cómo se maneja el servo respecto a la operación
+          normal -- no exigen detener el motor para entrar; de hecho
+          6/7/8/9/10/11/12 solo tienen sentido con el motor ya operando.
+CALIBRACIÓN-SERVO-MIN (CALIB=4): también mueve el servo
           directo, como 1/2 -- pero a diferencia de esos dos, SÍ mira
           la RPM en cada paso (ver sección 11), así que tampoco exige
           el motor operando para entrar, igual que 4.
 ```
 
-`CONTROL_HABILITADO=0` en realidad cubre dos sub-casos, resueltos en
+`CALIB=0` en realidad cubre dos sub-casos, resueltos en
 `main.c` cada vuelta del loop según el motor **y** si se comandó
 control (`SET_RPM > RPM_MIN`, ver 2.4):
 
 ```
-CALIBRACIÓN-BARRIDO (CONTROL_HABILITADO=2): servo en barrido continuo
+CALIBRACIÓN-BARRIDO (CALIB=2): servo en barrido continuo
                                      MIN <-> MAX. Requiere motor
                                      detenido para entrar y para
                                      permanecer -- se sale solo si el
                                      motor arranca.
-CALIBRACIÓN-MANUAL  (CONTROL_HABILITADO=1): servo quieto en su
+CALIBRACIÓN-MANUAL  (CALIB=1): servo quieto en su
                                      posición actual; cada downlink de
                                      SERVO_PULSO_MIN o SERVO_PULSO_MAX
                                      lo mueve directo a ese valor.
                                      Requiere motor detenido para
                                      entrar y para permanecer, igual
                                      que el barrido.
-SINTONIZACIÓN-PID   (CONTROL_HABILITADO=10): el servo lo maneja el PID
-                                     normal, EXACTAMENTE igual que en
-                                     SEGURO/PID ACTIVO -- lo único que
-                                     cambia es que PID_KP/KI se
-                                     desbloquean y se activa el log
-                                     PID_TEST (ver sección 9). NO exige
-                                     motor detenido ni para entrar ni
-                                     para permanecer -- la
-                                     sintonización en lazo cerrado solo
-                                     tiene sentido con el motor ya
-                                     corriendo (README sección 9).
-                                     Renumerado 2026-09-23 DOS VECES el
-                                     mismo día -- primero de `7` a `9`
-                                     (al agregarse los auto-escalón de
-                                     presión), después de `9` a `10`
-                                     (segunda renumeración, al
-                                     reordenarse la secuencia de puesta
-                                     en marcha para que zona
-                                     muerta/curva de ganancia/PID
-                                     interno queden ANTES de conectar
-                                     la carga hidráulica -- ver sección
-                                     12).
-CALIBRACIÓN-SERVO-MIN (CONTROL_HABILITADO=4): barre el pulso hacia
+⚠️ SINTONIZACIÓN-PID (CALIB=10 en la numeración anterior a
+                                     2026-09-29 -- no confundir con el
+                                     CALIB=10 actual, auto-escalón de
+                                     presión local) ELIMINADO 2026-09-29 --
+                                     decisión explícita del usuario: las
+                                     rutinas CALIB existen para que el
+                                     operador no tenga que saltar de una
+                                     a otra, y exigir entrar a `=10`
+                                     solo para poder tocar ganancias iba
+                                     contra esa idea. `PID_RPM_KP/KI` (y
+                                     `PID_PSI_KP/KI`/
+                                     `PID_ASP_KP/KI`) ahora
+                                     se desbloquean con `MODO=CALIBRACIÓN`
+                                     + `CALIB=0` (ningún CALIB
+                                     activo) -- apenas un CALIB automático
+                                     termina y vuelve solo a `0`, ya se
+                                     puede tocar la ganancia directo,
+                                     sin ese salto de más. El log
+                                     `PID_TEST` (y sus equivalentes de
+                                     presión) sigue activo bajo los CALIB
+                                     automáticos que ya lo generaban
+                                     (`=6`/`=7` para RPM, `=10`/`=11`
+                                     para presión local, `=12` para
+                                     remoto) -- si se quiere ver el log
+                                     en una sesión totalmente manual sin
+                                     ningún CALIB automático, ya no hay un
+                                     modo dedicado para eso.
+                                     El viejo `CALIB=10` (numeración
+                                     anterior a 2026-09-29, sintonización
+                                     manual) ahora se
+                                     RECHAZA explícitamente (no queda
+                                     solo "sin uso").
+CALIBRACIÓN-SERVO-MIN (CALIB=4): barre el pulso hacia
                                      arriba en pasos chicos desde
                                      SERVO_PULSO_MIN, buscando dónde el
                                      motor empieza a acelerar de verdad
@@ -1185,8 +1383,8 @@ CALIBRACIÓN-SERVO-MIN (CONTROL_HABILITADO=4): barre el pulso hacia
                                      medir la línea base y barrer.
                                      Solo se puede pedir viniendo de
                                      SEGURO/PID ACTIVO
-                                     (CONTROL_HABILITADO=0), no directo
-                                     desde 1/2/7/10. Renumerado
+                                     (CALIB=0), no directo
+                                     desde 1/2/8. Renumerado
                                      2026-09-23 (antes era el valor
                                      `5`) -- se corrió a un número MÁS
                                      BAJO, antes del ralentí, porque
@@ -1194,27 +1392,47 @@ CALIBRACIÓN-SERVO-MIN (CONTROL_HABILITADO=4): barre el pulso hacia
                                      de la propia fórmula de salida de
                                      `pid.c` (`rango = maximo -
                                      minimo`): sintonizar el PID
-                                     interno (`10`, más abajo) con una
+                                     interno (el viejo CALIB=10 de
+                                     aquel momento, numeración anterior
+                                     a 2026-09-29 -- hoy CALIB=0, más
+                                     abajo) con una
                                      zona muerta todavía no definitiva
                                      invalidaría esa sintonización en
                                      cuanto se corrigiera después.
-AUTO-ESCALÓN-INTERNO (CONTROL_HABILITADO=6, agregado 2026-09-23 en la
+AUTO-ESCALÓN-INTERNO (CALIB=6, agregado 2026-09-23 en la
                                      segunda renumeración): automatiza
                                      un escalón del lazo INTERNO de RPM
                                      (PID#1) -- mismo espíritu que
                                      AUTO-ESCALÓN-LOCAL/REMOTO de abajo
                                      (mismo patrón que `REMOTO_CAL`),
                                      pero para este lazo. Requiere
-                                     `MODO=3` (MANUAL_BANCO) y el motor
+                                     `MODO=4` (CALIBRACIÓN, antes era
+                                     `MANUAL_BANCO`=3 hasta el
+                                     2026-09-24) y el motor
                                      operando; usa `RPM_MIN` como línea
                                      base (no `CalibFlash_GetSetRpm()`,
                                      que leería `0`, porque cualquier
-                                     entrada a `CONTROL_HABILITADO` con
+                                     entrada a `CALIB` con
                                      valor `!=0` ya limpia `SET_RPM`,
                                      ver más abajo) y comanda
                                      `SET_RPM = RPM_MIN + 200` RPM fijo
-                                     (`INTERNO_CAL_ESCALON_RPM`),
-                                     dejándolo correr una ventana FIJA
+                                     (`INTERNO_CAL_ESCALON_RPM`). Al
+                                     ENTRAR, guarda el `PID_RPM_KP/KI` que
+                                     hubiera en flash y los pisa con
+                                     `1.0`/`0.0` fijo (agregado
+                                     2026-09-25 -- antes era una
+                                     convención PROCEDIMENTAL, el
+                                     operador los bajaba a mano por
+                                     downlink antes de mandar `=6`);
+                                     restaura los valores guardados al
+                                     SALIR, sin importar el motivo
+                                     (completo, abortado, o incluso
+                                     cancelado mientras todavía esperaba
+                                     el motor) -- la `Kp`/`Ki` ya
+                                     sintonizada que hubiera cargada
+                                     nunca se pierde, solo queda en
+                                     pausa mientras dura la prueba.
+                                     Dejándolo correr una ventana FIJA
                                      de 60 segundos
                                      (`INTERNO_CAL_DURACION_MS` --
                                      margen generoso: el lazo interno
@@ -1222,36 +1440,91 @@ AUTO-ESCALÓN-INTERNO (CONTROL_HABILITADO=6, agregado 2026-09-23 en la
                                      de los lazos de presión que
                                      necesitan 10-60 minutos). Loguea
                                      con el mismo formato `PID_TEST`
-                                     que ya usa la sesión manual de
-                                     `CONTROL_HABILITADO=10` (ver
+                                     que ya usa la sesión manual (ver
                                      sección 9), para que
                                      `pid_tuning.py identify`/`auto
                                      --loop interno` funcionen sin
                                      cambios sobre su salida. Se aborta
                                      y resetea `SET_RPM` a `0.0` si el
                                      motor se detiene o `MODO` deja de
-                                     ser `3` a mitad de la prueba;
-                                     auto-revierte `CONTROL_HABILITADO`
+                                     ser `4` (CALIBRACIÓN) a mitad de la
+                                     prueba;
+                                     auto-revierte `CALIB`
                                      a `0` al completar o abortar. Log:
                                      `INTERNO_CAL,INICIO,...` /
                                      `INTERNO_CAL,ESCALON,...` /
                                      `INTERNO_CAL,COMPLETO,duracion_s=...`
                                      / `INTERNO_CAL,ABORTADO,motivo=...`.
-                                     Igual que `8`/`9` (más abajo), NO
+                                     Igual que `10`/`12` (más abajo), NO
                                      aplica ninguna ganancia sola --
                                      solo automatiza capturar el log
                                      del escalón; el operador sigue
                                      corriendo `pid_tuning.py auto
                                      --loop interno --ganancia-log <log
-                                     de CONTROL_HABILITADO=5>` y
+                                     de CALIB=5>` y
                                      cargando/confirmando `Kp`/`Ki` a
-                                     mano vía `CONTROL_HABILITADO=10`
+                                     mano (con `MODO=CALIBRACIÓN` +
+                                     `CALIB=0`, ver sección
+                                     4.4)
                                      antes de confiar en el resultado
                                      (ver sección 9/12). Solo se puede
                                      pedir viniendo de SEGURO/PID
-                                     ACTIVO (CONTROL_HABILITADO=0), no
-                                     directo desde 1/2/4/7/8/9/10.
-CALIBRACIÓN-RALENTÍ (CONTROL_HABILITADO=7): servo fijo en
+                                     ACTIVO (CALIB=0), no
+                                     directo desde 1/2/4/8/10/12.
+AUTO-VALIDACIÓN-INTERNO (CALIB=7, agregado 2026-09-25):
+                                     verifica en el motor real la Kp/Ki
+                                     ya recomendada y cargada, en vez de
+                                     identificar una nueva -- a
+                                     diferencia de `6` (que SIEMPRE
+                                     fuerza `PID_RPM_KP=1/PID_RPM_KI=0` fijo
+                                     para la identificación), este modo
+                                     NO toca `PID_RPM_KP/KI`: usa lo que ya
+                                     esté en flash. Mismo escalón
+                                     (`SET_RPM = RPM_MIN + 200`) y mismo
+                                     log `PID_TEST` que `6`, pero con
+                                     una ventana de 4 minutos
+                                     (`VALIDACION_CAL_DURACION_MS`, más
+                                     larga que los 60s de `6` porque con
+                                     `Ki` real activo puede tardar más
+                                     en asentar) y un watchdog de
+                                     oscilación sostenida en vivo: pasada
+                                     una espera inicial de 30s
+                                     (`VALIDACION_CAL_ESPERA_ASENTAMIENTO_MS`,
+                                     para no confundir el acercamiento
+                                     normal al setpoint con oscilación),
+                                     cuenta cada vez que
+                                     `RPM_filtrada - SET_RPM` cruza de
+                                     signo tras superar un piso de 15 RPM
+                                     (`VALIDACION_CAL_OSC_UMBRAL_RPM`,
+                                     anti-ruido) -- si se acumulan 4
+                                     cruces (`VALIDACION_CAL_OSC_MAX_CRUCES`)
+                                     dentro de una ventana móvil de 20s
+                                     (`VALIDACION_CAL_OSC_VENTANA_MS`),
+                                     aborta de inmediato
+                                     (`SET_RPM=0.0`), mismo criterio que
+                                     el operador aplicaba a ojo ("si veo
+                                     que loquea, mando SET_RPM=0"), ahora
+                                     automático. También se aborta si el
+                                     motor se detiene o `MODO` deja de
+                                     ser `4` a mitad de la prueba, y
+                                     auto-revierte a `CALIB=0`
+                                     al completar o abortar (por
+                                     cualquiera de los tres motivos). Log:
+                                     `VALIDACION_CAL,INICIO,...` /
+                                     `VALIDACION_CAL,ESCALON,...` /
+                                     `VALIDACION_CAL,COMPLETO,duracion_s=...`
+                                     / `VALIDACION_CAL,ABORTADO,motivo=motor_se_detuvo|modo_cambio|oscilacion_sostenida`.
+                                     El log resultante (mismo formato
+                                     `PID_TEST` que `6` -- y que el viejo
+                                     CALIB=10 pre-2026-09-29, eliminado)
+                                     se le pasa
+                                     directo a `pid_tuning.py compare`
+                                     (ver sección 9) -- reemplaza el
+                                     "dejalo asentar 4 minutos y mirá
+                                     cómo se ve" manual. Solo se puede
+                                     pedir viniendo de SEGURO/PID ACTIVO
+                                     (CALIB=0).
+CALIBRACIÓN-RALENTÍ (CALIB=8): servo fijo en
                                      SERVO_PULSO_MIN mientras dura la
                                      ventana de medición (ver sección
                                      10). Tampoco exige motor detenido
@@ -1260,8 +1533,8 @@ CALIBRACIÓN-RALENTÍ (CONTROL_HABILITADO=7): servo fijo en
                                      a que arranque antes de empezar a
                                      contar la ventana. Solo se puede
                                      pedir viniendo de SEGURO/PID
-                                     ACTIVO (CONTROL_HABILITADO=0), no
-                                     directo desde 1/2/10. Renumerado
+                                     ACTIVO (CALIB=0), no
+                                     directo desde 1/2. Renumerado
                                      2026-09-23 (antes era el valor
                                      `4`) -- se corrió a un número MÁS
                                      ALTO, después de zona
@@ -1275,38 +1548,73 @@ CALIBRACIÓN-RALENTÍ (CONTROL_HABILITADO=7): servo fijo en
                                      en campo) -- conviene medirlo una
                                      sola vez, ya con la tubería
                                      conectada, en vez de repetirlo.
-AUTO-ESCALÓN-LOCAL  (CONTROL_HABILITADO=8, agregado 2026-09-23,
+AUTO-ESCALÓN-LOCAL  (CALIB=10, agregado 2026-09-23,
                                      renumerado de `7` a `8` en la
                                      segunda renumeración del mismo
                                      día): automatiza un escalón del
-                                     lazo EXTERNO de presión LOCAL
-                                     (`MODO=1`) -- manda
-                                     `PRESION_OBJETIVO` + 5 PSI fijo
-                                     (`PRESION_CAL_ESCALON_PSI`) y
-                                     loguea `PRESION_PID_TEST` durante
-                                     una ventana fija de 10 minutos
+                                     lazo EXTERNO de presión LOCAL --
+                                     una vez motor+`MODO=4` confirmados,
+                                     primero MIDE una presión base real
+                                     (promedio de `PresionV_GetPresionPsi()`
+                                     sobre `PRESION_CAL_BASE_PROMEDIO_MS`,
+                                     agregado 2026-09-25 -- antes el
+                                     escalón salía del `PRESION_OBJETIVO_LOCAL`
+                                     PERSISTIDO, un setpoint operativo de
+                                     campo que podía estar desactualizado,
+                                     sin relación con la presión real del
+                                     momento; ahora usa la misma
+                                     medición que ve la cascada real),
+                                     y recién con esa base manda
+                                     `PRESION_OBJETIVO_LOCAL` = base medida +
+                                     5 PSI fijo (`PRESION_CAL_ESCALON_PSI`)
+                                     y loguea `PRESION_PID_TEST` durante
+                                     una ventana fija de 3 minutos
                                      (`PRESION_CAL_DURACION_MS`, ver
-                                     sección 9). Solo automatiza mandar
-                                     el escalón y esperar -- el PID
-                                     sigue siendo el que maneja el
-                                     servo, igual que en `0`/`10`.
-                                     Requiere `MODO=1` ya puesto por el
+                                     sección 9). Al ENTRAR, guarda el
+                                     `PRESION_OBJETIVO_LOCAL` original (para
+                                     restaurarlo al salir, sin importar
+                                     el motivo) y el `PID_PSI_KI`
+                                     que hubiera, pisándolo a `0` fijo
+                                     durante la prueba (mismo motivo
+                                     matemático que en el lazo interno --
+                                     con `Ki` activo la fórmula de `K` se
+                                     indefine) -- restaura ambos al
+                                     salir. El `PID_PSI_KP` de prueba
+                                     NO se toca (a diferencia del lazo
+                                     interno, la ganancia de presión
+                                     varía mucho por instalación, así que
+                                     sigue siendo el operador quien lo
+                                     elige -- ver `pid_tuning.py
+                                     sugerir-kp-presion`, sección 9).
+                                     Solo automatiza mandar el escalón y
+                                     esperar -- el PID sigue siendo el
+                                     que maneja el servo, igual que en
+                                     `0`. Requiere `MODO=4` (CALIBRACIÓN,
+                                     NO `MODO=1` desde 2026-09-24 --
+                                     ver 4.3) ya puesto por el
                                      operador y el motor operando para
-                                     ARRANCAR el escalón -- si se pide
-                                     antes, se queda esperando (no es
-                                     un error). Solo se puede pedir
+                                     ARRANCAR el escalón -- el lazo de
+                                     presión REAL igual corre mientras
+                                     tanto (`main.c` trata
+                                     MODO=CALIBRACIÓN+CALIB=10 igual que
+                                     MODO=1 real para todo lo que
+                                     importa: init, rampa de llenado,
+                                     falla de sensor, supervisor). Si
+                                     se pide antes, se queda esperando
+                                     (no es un error). Solo se puede pedir
                                      viniendo de SEGURO/PID ACTIVO
-                                     (CONTROL_HABILITADO=0), no directo
-                                     desde 1/2/4/6/7/9/10/11. Ver sección
+                                     (CALIB=0), no directo
+                                     desde 1/2/4/6/8/9/12. Ver sección
                                      12 (Fase E).
-AUTO-ESCALÓN-REMOTO (CONTROL_HABILITADO=9, agregado 2026-09-23,
+AUTO-ESCALÓN-REMOTO (CALIB=12, agregado 2026-09-23,
                                      renumerado de `8` a `9` en la
                                      segunda renumeración del mismo
                                      día): mismo espíritu que el
                                      anterior pero para el lazo EXTERNO
                                      de presión REMOTA (`MODO=2`),
-                                     probado en banco con `MODO=3`
-                                     (MANUAL_BANCO) -- manda `SET_RPM`
+                                     probado en banco con `MODO=4`
+                                     (CALIBRACIÓN, antes `MANUAL_BANCO`=3
+                                     hasta el 2026-09-24) -- manda `SET_RPM`
                                      = `RPM_MIN` + 200 RPM fijo
                                      (`REMOTO_CAL_ESCALON_RPM`) y
                                      loguea `REMOTO_PID_TEST`. Termina
@@ -1320,94 +1628,157 @@ AUTO-ESCALÓN-REMOTO (CONTROL_HABILITADO=9, agregado 2026-09-23,
                                      aspersor remoto es irregular (20s
                                      a 20-25min), así que no alcanza un
                                      tiempo fijo como en el escalón
-                                     local. Requiere `MODO=3` ya puesto
+                                     local. Requiere `MODO=4`
+                                     (CALIBRACIÓN) ya puesto
                                      y el motor operando para arrancar;
                                      si se pide antes, espera. Solo se
                                      puede pedir viniendo de SEGURO/PID
-                                     ACTIVO (CONTROL_HABILITADO=0), no
-                                     directo desde 1/2/4/6/7/8/10/11. Ver
+                                     ACTIVO (CALIB=0), no
+                                     directo desde 1/2/4/6/8/9/10. Ver
                                      sección 12 (Fase E).
-AUTO-BARRIDO-GANANCIA-PRESIÓN (CONTROL_HABILITADO=11, agregado
-                                     2026-09-24): equivalente de
-                                     CALIBRACIÓN-CURVA-DE-GANANCIA
-                                     (`5`, sección 11) pero para el
-                                     PID#2 (presión local) en vez del
-                                     PID#1 -- barre `SET_RPM` en `MODO=3`
-                                     (sin `presion_pid.c` corriendo,
-                                     lazo ABIERTO para la relación
-                                     RPM→presión), registrando el par
-                                     (RPM, PSI) en cada paso. Solo mide y
-                                     loguea (`PRESION_GANANCIA_CAL,...`),
-                                     igual que `5` -- no aplica ninguna
-                                     corrección directamente. Su log
-                                     alimenta `pid_tuning.py auto --loop
-                                     presion --ganancia-log <log de
-                                     CONTROL_HABILITADO=11>` (ver sección
-                                     9) para una `K` peor-caso más
-                                     confiable que la del escalón cerrado
-                                     de `8`, misma lógica que ya usa el
-                                     lazo interno con el log de `5`. A
-                                     diferencia de `5`, este SÍ tiene un
-                                     riesgo físico real (golpe de ariete,
-                                     hay una tubería con presión de por
-                                     medio) -- por eso el `SET_RPM` de
-                                     cada paso se RAMPEA (no se salta) y
-                                     el techo de corte es relativo a la
-                                     presión base medida en ralentí
-                                     (`+10 PSI`), no un valor absoluto.
-                                     Asume la tubería YA llena/
-                                     presurizada -- no es una rutina de
-                                     primer llenado (ver sección 12, Fase
-                                     D, que agrega un paso manual previo
-                                     para eso). Requiere `MODO=3` ya
-                                     puesto y el motor operando para
-                                     arrancar; si se pide antes, espera.
-                                     Solo se puede pedir viniendo de
-                                     SEGURO/PID ACTIVO
-                                     (CONTROL_HABILITADO=0), no directo
-                                     desde 1/2/4/6/7/8/9/10.
-SEGURO      (CONTROL_HABILITADO=0 o =10, motor detenido, O motor
+AUTO-MAPEO-GANANCIA-PRESIÓN (CALIB=9, agregado
+                                     2026-09-24, diseño definitivo
+                                     2026-09-28 -- ver sección 9): rampa
+                                     de `SET_RPM` en lazo ABIERTO (sin
+                                     `presion_pid.c`, sin
+                                     `PID_PSI_KP/KI` de por medio --
+                                     el servo lo mueve el PID#1 de RPM
+                                     ya validado), de `RPM_MIN` hacia
+                                     `RPM_MAX_CARGA`, con un FRENO POR
+                                     PSI REAL: mide la presión base en
+                                     `RPM_MIN` (5s), calcula el ritmo
+                                     máximo seguro `(PRESION_OBJETIVO_LOCAL −
+                                     base) / TIEMPO_LLENADO_S` (el mismo
+                                     que ya usa la rampa de llenado de
+                                     `MODO=1`), y en cada ciclo solo
+                                     sigue subiendo RPM si la presión
+                                     real va POR DEBAJO de ese ritmo --
+                                     si lo alcanza, pausa (no baja) hasta
+                                     que el ritmo la vuelva a superar.
+                                     Así la subida de presión nunca es
+                                     más rápida de lo que el operador ya
+                                     definió como seguro, sin importar
+                                     la ganancia real de la instalación,
+                                     y la prueba dura lo que el operador
+                                     dijo que tarda el llenado. Loguea
+                                     `PRESION_GANANCIA_CAL,PASO,rpm=...,
+                                     psi=...,salto=...` cada vez que el
+                                     PSI real avanza 1 PSI (tamaño del
+                                     log acotado por el rango de
+                                     presión, no por el tiempo) --
+                                     compatible directo con
+                                     `pid_tuning.py sugerir-kp-presion`/
+                                     `--ganancia-log`. Termina por lo que
+                                     ocurra primero: PSI real llega a
+                                     `PRESION_OBJETIVO_LOCAL`
+                                     (`objetivo_alcanzado`); RPM llega a
+                                     `RPM_MAX_CARGA` sin alcanzarlo
+                                     (`rpm_max_carga_alcanzado` --
+                                     respaldo de seguridad, y además
+                                     diagnóstico: la bomba no llega a esa
+                                     presión dentro de su límite seguro);
+                                     o timeout de último recurso de
+                                     `1.5 × TIEMPO_LLENADO_S`. Si la
+                                     presión base ya está en o sobre el
+                                     objetivo, completa de inmediato
+                                     (`objetivo_ya_alcanzado`). Aborta si
+                                     el motor se detiene, cambia `MODO`,
+                                     o el sensor de presión deja de ser
+                                     válido (`sensor_invalido`). ⚠️ NO
+                                     reemplaza el primer llenado/purga
+                                     de aire manual (sección 12, Fase
+                                     D): el sensor de presión no puede
+                                     distinguir agua real de aire
+                                     comprimido, así que ninguna rampa,
+                                     por lenta que sea, puede verificar
+                                     por software que el aire ya salió
+                                     -- asume la tubería YA llena. Dos
+                                     diseños previos se descartaron el
+                                     mismo día: pasos discretos con
+                                     espera/umbral de salto (3 bugs
+                                     reales de calibración) y reusar la
+                                     cascada de `MODO=1` (dependía de un
+                                     `Kp` ya cargado -- con `Kp=0` de
+                                     fábrica no hacía nada -- y el PID
+                                     contaminaba la curva medida).
+                                     Requiere
+                                     `MODO=4` (CALIBRACIÓN) ya puesto y
+                                     el motor operando para arrancar; si
+                                     se pide antes, espera. Solo se puede
+                                     pedir viniendo de SEGURO/PID ACTIVO
+                                     (CALIB=0), no directo
+                                     desde 1/2/4/6/8/10/12.
+SEGURO      (CALIB=0, motor detenido, O motor
              operando en su ralentí natural sin SET_RPM > RPM_MIN
              comandado):             servo fijo/regresando a
                                      SERVO_PULSO_MIN (sin
                                      aceleración). Estado por defecto.
-PID ACTIVO  (CONTROL_HABILITADO=0 o =10, motor operando, Y SET_RPM >
+PID ACTIVO  (CALIB=0, motor operando, Y SET_RPM >
              RPM_MIN comandado explícitamente): servo controlado por
                                      pid.c/h (ver 2.4), no por una
                                      posición fija.
 ```
 
-- `* -> CALIBRACIÓN-BARRIDO/MANUAL`: downlink `CONTROL_HABILITADO=1`
+- `* -> CALIBRACIÓN-BARRIDO/MANUAL`: downlink `CALIB=1`
   o `=2`, solo se acepta con el motor detenido — con el motor operando
   se rechaza con `REJECTED_ENGINE_RUNNING` (STATUS=5).
-- `SEGURO/PID ACTIVO (0) -> SINTONIZACIÓN-PID (10),
-  AUTO-ESCALÓN-INTERNO (6), AUTO-ESCALÓN-LOCAL (8), AUTO-ESCALÓN-REMOTO
-  (9), AUTO-BARRIDO-GANANCIA-PRESIÓN (11), CALIBRACIÓN-RALENTÍ (7) o
-  CALIBRACIÓN-SERVO-MIN (4)`: downlink directo, con el motor operando o
-  detenido indistinto — `6`/`7`/`8`/`9`/`10`/`11` no mueven el servo de
+- ⚠️ **Cualquier `CALIB` distinto de `0` exige `MODO=4`
+  (CALIBRACIÓN) ya puesto — SIN EXCEPCIONES, ni siquiera `8`**
+  (agregado 2026-09-24, decisión explícita del usuario, versión final
+  tras varios rediseños en la misma sesión -- primero se probó exigir
+  `MODO=0`, rompía `8`/`10`; después una excepción puntual para `8`
+  aceptando `MODO=1`, funcionaba pero el usuario pidió eliminar
+  cualquier excepción; el motivo real de fondo era que
+  `MODO=3`/`MANUAL_BANCO` hacía doble función, uso operativo de campo Y
+  modo de banco, sin forma de distinguir una cosa de la otra — ver
+  `CALIB_MODO_CALIBRACION` en la sección 4.3). Rechazo `OUT_OF_RANGE`
+  si se pide con cualquier otro `MODO`. Antes de este cambio (numeración
+  de la época, pre-2026-09-29: sintonización de PID era el viejo `10`),
+  `1`/`2`/`3`/`4`/`5`/`10` no tenían **ninguna** protección contra
+  mandarse por error durante producción real (`MODO=1`/`2`): por
+  ejemplo, `CALIBRACIÓN-SERVO-MIN` (`4`) mandado sin querer con el
+  equipo bombeando de verdad tomaría control directo del servo,
+  sacándolo del lazo de presión en pleno funcionamiento. `AUTO-ESCALÓN-LOCAL`
+  (`10`) necesita el lazo de presión LOCAL corriendo DE VERDAD para
+  poder meterle un escalón -- en vez de una excepción en este candado,
+  `main.c` ensancha su propia condición interna para que
+  `MODO=4`+`CALIB=10` dispare el mismo lazo real que `MODO=1` (init,
+  rampa de llenado, falla de sensor, supervisor, ver sección 9), así
+  que `10` también corre EXCLUSIVAMENTE bajo `MODO=4`, sin necesitar
+  ninguna excepción acá. Esta regla se apoya en el forzado automático
+  de `MODO=0` al detenerse el motor (ver más abajo) -- detener el
+  motor (o recién haber arrancado el TID) deja el camino libre para
+  pasar a `MODO=4` y arrancar cualquier sesión. `CALIB=0`
+  (salir) siempre se acepta, sin importar `MODO`.
+- `SEGURO/PID ACTIVO (0) -> AUTO-ESCALÓN-INTERNO (6), AUTO-ESCALÓN-LOCAL
+  (10), AUTO-ESCALÓN-REMOTO (12), AUTO-BARRIDO-GANANCIA-PRESIÓN (9),
+  VALIDACIÓN-INTERNO (7), VALIDACIÓN-PRESIÓN (11), CALIBRACIÓN-RALENTÍ
+  (8) o CALIBRACIÓN-SERVO-MIN (4)`: downlink directo, con el motor
+  operando o detenido indistinto — ninguno de estos mueve el servo de
   forma distinta a la operación normal, así que no hace falta detener
-  el motor primero (`6`/`8`/`9`/`11` en la práctica solo arrancan el
-  escalón/barrido con el motor ya operando y `MODO=3`/`1`/`3`/`3`
-  puesto respectivamente, pero se quedan esperando en vez de rechazar
-  el downlink si se piden antes); `4` sí mueve el servo directo, pero
-  como mira la RPM en cada paso tampoco exige detenerlo, solo espera si
-  hace falta. `4`, `6`, `7`, `8`, `9` y `11` además solo se aceptan
-  viniendo de `0` (rechazo `OUT_OF_RANGE` si se piden desde `1`, `2`,
-  `10`, o uno desde el otro) — `10` es el único de este grupo sin esa
-  restricción de origen.
+  el motor primero (en la práctica la mayoría solo arrancan el
+  escalón/barrido con el motor ya operando y `MODO=4` puesto, pero se
+  quedan esperando en vez de rechazar el downlink si se piden antes);
+  `4` sí mueve el servo directo, pero como mira la RPM
+  en cada paso tampoco exige detenerlo, solo espera si hace falta.
+  Todos estos además solo se aceptan viniendo de `0` (rechazo
+  `OUT_OF_RANGE` si se piden desde `1`, `2`, o uno desde el otro).
+  ⚠️ `SINTONIZACIÓN-PID (10)` ELIMINADO 2026-09-29 (ver sección 4.4) --
+  era el único de este grupo sin la restricción de origen desde `0`,
+  ya no existe.
 - `CALIBRACIÓN-BARRIDO ⇄ CALIBRACIÓN-MANUAL`: por downlink directo
   entre `1` y `2` (ambos requieren motor detenido para el cambio). Al
   entrar a `CALIBRACIÓN-MANUAL` el servo arranca quieto en la posición
   en la que estaba (no salta a `SERVO_PULSO_MIN` ni `MAX`) hasta el
   primer downlink de esos dos parámetros.
 - `CALIBRACIÓN-BARRIDO/MANUAL -> SEGURO`: por downlink
-  `CONTROL_HABILITADO=0`, **o** automáticamente en el firmware (sin
+  `CALIB=0`, **o** automáticamente en el firmware (sin
   downlink) si el motor arranca mientras se está en uno de esos dos
   modos — medida de seguridad, nunca se deja el servo bajo barrido o
   posición manual con el motor operando. Si además ya había un
   `SET_RPM > RPM_MIN` comandado desde antes, ese mismo arranque cae
-  directo en `PID ACTIVO` en vez de `SEGURO`. **`SINTONIZACIÓN-PID`,
-  `CALIBRACIÓN-RALENTÍ`, `CALIBRACIÓN-SERVO-MIN`, `AUTO-ESCALÓN-INTERNO`,
+  directo en `PID ACTIVO` en vez de `SEGURO`. **`CALIBRACIÓN-RALENTÍ`,
+  `CALIBRACIÓN-SERVO-MIN`, `AUTO-ESCALÓN-INTERNO`,
   `AUTO-ESCALÓN-LOCAL` y `AUTO-ESCALÓN-REMOTO` no tienen esta salida
   automática por ARRANQUE del motor** — el motor arrancando (o ya
   estando operando) ahí es justamente lo esperado, no una condición de
@@ -1415,6 +1786,21 @@ PID ACTIVO  (CONTROL_HABILITADO=0 o =10, motor operando, Y SET_RPM >
   sí tienen su propia salida automática, pero por el motivo contrario
   (el motor DETENIÉNDOSE, o `MODO` cambiando) — ver los bullets
   siguientes.
+- ⚠️ **`CALIBRACIÓN-BARRIDO`/`MANUAL`/`AUTO-ALPHA`/`CALIBRACIÓN-SERVO-MIN`/
+  `CALIBRACIÓN-CURVA-DE-GANANCIA`/`CALIBRACIÓN-RALENTÍ` (`1`/`2`/`3`/`4`/`5`/`8`)
+  salen automáticamente a `SEGURO` si `MODO` deja de ser `CALIBRACIÓN`
+  a mitad de sesión, sin esperar ningún downlink nuevo** (bug real
+  encontrado en campo y corregido 2026-09-25: con `MODO=4` puesto,
+  `CALIB=2` arrancado, y `MODO` vuelto a `0` después, el
+  barrido seguía corriendo -- el candado de `MODO=CALIBRACIÓN` solo se
+  chequeaba UNA VEZ, al aceptar el downlink de `CALIB`,
+  nada lo volvía a chequear mientras la sesión seguía activa). Este
+  grupo específico (`1`/`2`/`3`/`4`/`5`/`8`) no tenía ningún chequeo
+  continuo de `MODO` propio, a diferencia de `6`/`7`/`9`/`10`/`11`/`12`
+  (que ya abortan solos si `MODO` cambia, dentro de su propia máquina
+  de estados). Mismo criterio que la salida
+  automática por arranque del motor (bullet anterior): control físico
+  real, nunca un switch remoto para algo de seguridad.
 - `AUTO-ESCALÓN-INTERNO -> SEGURO`: automático, sin downlink, al
   completar la ventana fija de 60 segundos del escalón
   (`INTERNO_CAL,COMPLETO`, ver sección 9/12), reseteando `SET_RPM` a
@@ -1422,9 +1808,9 @@ PID ACTIVO  (CONTROL_HABILITADO=0 o =10, motor operando, Y SET_RPM >
   (`INTERNO_CAL,ABORTADO,motivo=...`) si el motor se detiene o `MODO`
   deja de ser `3` a mitad del escalón.
 - `AUTO-ESCALÓN-LOCAL -> SEGURO`: automático, sin downlink, al
-  completar la ventana fija de 10 minutos del escalón
+  completar la ventana fija de 3 minutos del escalón
   (`PRESION_CAL,COMPLETO`, ver sección 9/12), restaurando
-  `PRESION_OBJETIVO` a su valor anterior — o abortado antes al mismo
+  `PRESION_OBJETIVO_LOCAL` a su valor anterior — o abortado antes al mismo
   destino (`PRESION_CAL,ABORTADO,motivo=...`) si el motor se detiene o
   `MODO` deja de ser `1` a mitad del escalón.
 - `AUTO-ESCALÓN-REMOTO -> SEGURO`: automático, sin downlink, al
@@ -1436,29 +1822,30 @@ PID ACTIVO  (CONTROL_HABILITADO=0 o =10, motor operando, Y SET_RPM >
   `MODO` deja de ser `3` a mitad del escalón.
 - `CALIBRACIÓN-RALENTÍ -> SEGURO`: automático, sin downlink, en cuanto
   se completa la ventana de medición de 2 minutos (aplica el nuevo
-  `RPM_MIN` y vuelve a `CONTROL_HABILITADO=0` solo, ver sección 10). Si
+  `RPM_MIN` y vuelve a `CALIB=0` solo, ver sección 10). Si
   el motor se detiene a mitad de la ventana, la medición en curso se
   descarta pero se permanece en `CALIBRACIÓN-RALENTÍ`, esperando a que
   el motor vuelva a arrancar, sin necesidad de reenviar el downlink.
 - `CALIBRACIÓN-SERVO-MIN -> SEGURO`: automático, sin downlink, al
   detectar el umbral de aceleración (aplica el nuevo `SERVO_PULSO_MIN`
-  y vuelve a `CONTROL_HABILITADO=0` solo) o al llegar al techo de
+  y vuelve a `CALIB=0` solo) o al llegar al techo de
   seguridad sin detectar nada (ver sección 11 — en ese caso no se
   aplica ningún cambio, es un error, no un resultado). Igual que en
   `CALIBRACIÓN-RALENTÍ`, si el motor se detiene a mitad del barrido, se
   descarta el progreso pero se permanece en el modo esperando a que
   vuelva a arrancar.
-- `SEGURO ⇄ PID ACTIVO` (dentro de `CONTROL_HABILITADO=0` **o** `=10`):
+- `SEGURO ⇄ PID ACTIVO` (dentro de `CALIB=0`):
   automático según `Tacometro_EstaDetenido()` y si `SET_RPM` supera
   `RPM_MIN`, sin downlink de por medio para el motor (arrancar/detener
   basta) — el ralentí (Modo 0, sección 4.3) es deliberadamente sin
   control, nunca se recorta `SET_RPM` hacia arriba hasta `RPM_MIN` para
   forzar el lazo. Al entrar a `PID ACTIVO` se llama `PID_Init()` una
   sola vez (flanco de entrada), para no arrastrar estado de una
-  activación anterior. El comportamiento del servo es idéntico en `0`
-  y en `10` — la diferencia entre ambos está solo en qué parámetros se
+  activación anterior. El comportamiento del servo en `CALIB=0` no
+  cambia según `MODO=CALIBRACIÓN` haya desbloqueado `PID_RPM_KP/KI` (ver
+  sección 9) o no — la diferencia está solo en qué parámetros se
   pueden tocar y si se ve el log `PID_TEST`, no en el control en sí. En
-  `CALIBRACIÓN-RALENTÍ` (`7`) el servo siempre está en
+  `CALIBRACIÓN-RALENTÍ` (`8`) el servo siempre está en
   `SERVO_PULSO_MIN`, no existe un "PID ACTIVO" propio de este modo. En
   `CALIBRACIÓN-SERVO-MIN` (`4`) el servo va en pasos automáticos por
   encima de `SERVO_PULSO_MIN` mientras dura el barrido (ver sección
@@ -1466,7 +1853,7 @@ PID ACTIVO  (CONTROL_HABILITADO=0 o =10, motor operando, Y SET_RPM >
   fuera de esa posición sin ser por el PID.
 - `SERVO_PULSO_MIN/MAX` solo se pueden cambiar **por downlink**
   estando en `CALIBRACIÓN-BARRIDO` o `CALIBRACIÓN-MANUAL` (NO en
-  `SINTONIZACIÓN-PID`, `CALIBRACIÓN-RALENTÍ`, `CALIBRACIÓN-SERVO-MIN`,
+  `CALIBRACIÓN-RALENTÍ`, `CALIBRACIÓN-SERVO-MIN`,
   `AUTO-ESCALÓN-INTERNO`, `AUTO-ESCALÓN-LOCAL` ni `AUTO-ESCALÓN-REMOTO`);
   fuera de esos dos modos se rechazan con `APPLY_ERROR` (STATUS=4)
   aunque el motor esté apagado. En `CALIBRACIÓN-BARRIDO` el cambio
@@ -1475,12 +1862,15 @@ PID ACTIVO  (CONTROL_HABILITADO=0 o =10, motor operando, Y SET_RPM >
   configurado. `CALIBRACIÓN-SERVO-MIN` (`4`) es la única forma de que
   `SERVO_PULSO_MIN` cambie sin un downlink explícito de ese parámetro
   — lo hace `main.c` directo, al completar el barrido (ver sección 11).
-- `PID_KP/PID_KI` (`PID_KD` eliminado 2026-09-23, ver sección 9) solo se pueden cambiar estando en
-  `SINTONIZACIÓN-PID` (`CONTROL_HABILITADO=10`); en cualquier otro modo
-  (incluida la operación normal, `=0`, y `CALIBRACIÓN-RALENTÍ`, `=7`)
-  se rechazan con `APPLY_ERROR`, motor operando o no — evita que las
+- `PID_RPM_KP/PID_RPM_KI` (`PID_KD` eliminado 2026-09-23, ver sección 9) solo se pueden cambiar
+  con `MODO=CALIBRACIÓN` Y `CALIB=0` (ningún `CALIB` activo
+  -- gate actualizado 2026-09-29, antes exigía `CALIB=10`,
+  ver sección 4.4); en cualquier otro caso (incluida la operación
+  normal, `MODO≠4`, y mientras cualquier `CALIB` esté corriendo) se
+  rechazan con `APPLY_ERROR`, motor operando o no — evita que las
   ganancias del PID cambien fuera de una sesión deliberada de
-  sintonización.
+  calibración, o a mitad de una prueba automática que depende de que
+  no cambien.
 
 ---
 
@@ -1550,12 +1940,45 @@ de acondicionamiento, ver hardware sección 5.6.
 - El log serial muestra ambos canales lado a lado (`Presion: ... |
   PresionV: ...`) para comparar en vivo.
 
+**Retraso conocido de `PresionV` (hallado 2026-09-29, sin corregir
+todavía)**: con el sensor ya bien conectado (GND corregido, lee 0 PSI al
+aire, VDDA 3.31 V), la lectura en PSI tarda bastante en alcanzar al
+voltaje cuando la presión cambia rápido. Causa, confirmada en
+`COM3_2026_09_29.18.57.30.564.txt`: en `ProcesarTanda()` el limitador de
+velocidad (`PRESIONV_TASA_MAX_CAMBIO_PSI_S = 5.0`) recorta la muestra
+**antes** del EMA (`PRESIONV_ALPHA_FILTRO = 0.08`), y el EMA la vuelve a
+suavizar, así que la velocidad máxima real de cambio es
+`5.0 × 0.08 = 0.4 PSI/s`, no 5 PSI/s. En el log un salto de voltaje a
+~2.4 V (más de 100 PSI reales) se ve como una rampa perfectamente
+lineal de +2.0 PSI cada 5 s (0.74 → 2.74 → 4.74 → 6.74 …), y al bajar
+igual (−2.0 PSI cada 5 s).
+
+- Cambios lentos (dinámica hidráulica real, décimas de PSI por segundo)
+  **no se ven afectados** — el limitador solo actúa en saltos grandes.
+- Efecto en operación: un cambio brusco real de presión (apertura de
+  válvula, arranque/paro, purga) tarda minutos en reflejarse; ej. 100 PSI
+  ≈ 250 s. Como `PresionV_GetPresionPsi()` alimenta el lazo en cascada
+  (`MODO=1`), el uplink y `ESTADO_ACTIVO`, todos ven ese retraso.
+- Aparte hay un retraso fijo menor: una lectura nueva solo sale cada
+  tanda de `PRESIONV_MUESTRAS_POR_PROMEDIO = 21` conversiones, y luego
+  el EMA α=0.08 (~12 tandas para llegar al 63 % de un escalón).
+- Opciones si se decide corregir (ninguna aplicada): (a) aplicar el
+  limitador a la salida ya filtrada en vez de a la entrada del EMA
+  (así el techo real sería los 5 PSI/s); (b) subir
+  `PRESIONV_TASA_MAX_CAMBIO_PSI_S` a ~`5.0 / 0.08 ≈ 60` para conservar
+  el techo efectivo de 5 PSI/s; (c) subir `PRESIONV_ALPHA_FILTRO`. Ojo:
+  el limitador se agregó a propósito el 2026-09-22 para rechazar ráfagas
+  de ruido del RAK3172 (~1.4 PSI de un instante a otro), y el EMA a 0.08
+  para rechazar ruido en el lazo externo — revisar ambos motivos antes
+  de aflojarlos.
+
 ---
 
 ## 6. Integración con AWS IoT Core for LoRaWAN
 
-- **Dispositivo**: `DSL-0001`, Device Profile `RIO-DSL` (US915, Clase
-  C, LoRaWAN 1.0.3), Service Profile `RIO` (compartido con el nodo
+- **Dispositivo**: `DSL-0001`, Device Profile `RIO-DSL-AU915` (AU915 sub-banda 2, Clase
+  C, LoRaWAN 1.0.3; migrado desde US915 el 2026-09-29 — el wireless device
+  se recreó en AWS, su WirelessDeviceId cambió, DevEUI/AppEUI/AppKey no), Service Profile `RIO` (compartido con el nodo
   aspersor del equipo).
 - **Regla de IoT**: `RIO_DSL_Lambda`, tópico de entrada `RIO/DSL`.
 - **Lambda de uplinks**: `RIO-DSL-DecodeUplink` (Python 3.12,
@@ -1565,6 +1988,50 @@ de acondicionamiento, ver hardware sección 5.6.
   `iotwireless:SendDataToWirelessDevice` a partir de un mensaje MQTT
   con el nombre del parámetro (ej. `{"SET_RPM": 450}`), sin exponer
   el ID numérico al usuario.
+
+### Migración de banda US915 → AU915 (2026-09-29)
+
+Gateway RAK2287 (Basic Station) en AU915 sub-banda 2 y AWS ya migrados.
+Los wireless devices se borraron y recrearon con las mismas llaves
+(DevEUI/AppEUI/AppKey), por lo que su `WirelessDeviceId` cambió (AWS no
+permite cambiar la región de un device). Perfiles nuevos:
+`RIO-DSL-AU915` y `RIO-ASP-AU915` (MAC 1.0.3, RP002-1.0.1).
+
+**Sensor (RAK3172, RUI3).** La región, la clase y el DR **no están en el
+firmware del STM32**: viven en la memoria del módulo y se configuran una
+sola vez por consola serial (reflashear el STM32 no las cambia):
+
+```
+AT+NJM=1
+AT+BAND=6        (AU915)
+AT+MASK=0002     (sub-banda 2: canales 8-15 + 65, 916.8-918.2 MHz)
+AT+CLASS=C       (DSL-0001; el aspersor ASP-0001 usa AT+CLASS=A)
+ATZ
+```
+
+Antes de cambiar, guardar el estado con `AT+BAND=?`, `AT+MASK=?`,
+`AT+CLASS=?`, `AT+DEVEUI=?`, `AT+APPEUI=?`, `AT+APPKEY=?`. No forzar
+RX2 ni DR (los defaults de AU915 son correctos; la numeración de DR
+cambia respecto a US915). El firmware sigue mandando `AT+MASK=0002` en el
+arranque y antes de cada reintento de join — misma sintaxis en AU915. El
+uplink de 28 bytes cabe desde DR0 (51 bytes máx. en DR0-2; en US915 DR0
+solo admitía 11).
+
+**Lambdas.** Revisadas, sin cambios necesarios:
+- `RIO-DSL-DecodeUplink` solo lee `Fport` y `PayloadData`; no depende de
+  banda, frecuencia, DR ni ID del device.
+- `RIO-DSL-SendDownlink` no tiene UUIDs fijos: resuelve el device por
+  `Name` (`DSL-0001`) con `list_wireless_devices`, así que toma el ID
+  nuevo solo — **siempre que el device recreado se llame exactamente
+  `DSL-0001`**. Publicar en `RIO/DSL-0001/downlink`, no con el UUID viejo.
+- Verificar en AWS (fuera del código): que la política IAM del rol de
+  SendDownlink no limite `iotwireless:SendDataToWirelessDevice` al ARN del
+  device viejo, y que la regla/destino sigan apuntando a la Lambda correcta.
+
+**Verificación.** `+EVT:JOINED` y uplinks sin error en el log serial;
+tráfico entre 916.8 y 918.2 MHz en el gateway; eventos en CloudWatch con
+el ID nuevo; downlink de prueba a DSL-0001 (Clase C) con ACK en FPort 3.
+**Estado: DSL-0001 ya conectó en AU915** (2026-09-29).
 
 ### Forma real del evento que recibe la Lambda de uplinks (confirmada con tráfico real)
 
@@ -1721,7 +2188,7 @@ escribir `SET_RATIO 17.5` y Enter.
       implementado (2026-09-23).** Hoy, si se cae la señal remota, el
       motor se COMPORTA como ralentí (`setpointRpmCrudo=0`, ver watchdog
       de `TIMEOUT_SIN_COMANDO_S` sección 4.3) pero `MODO` nunca cambia
-      de verdad -- en cuanto vuelve un downlink válido de `PRESION`,
+      de verdad -- en cuanto vuelve un downlink válido de `PRESION_REMOTO`,
       retoma control automático de inmediato, sin que nadie tenga que
       reconfirmar nada. Preocupación real planteada por el usuario: si
       la caída dura mucho (ejemplo dado: ~1 hora), el motor detenido
@@ -1791,7 +2258,7 @@ escribir `SET_RATIO 17.5` y Enter.
       solo enciende fijo, y si necesita algún driver (la salida directa
       de un GPIO alcanza para un LED simple, sin transistor, si la
       corriente está dentro de lo que tolera el pin del G431).
-- [x] **Supervisor de "no se llega a `PRESION_OBJETIVO`" — implementado
+- [x] **Supervisor de "no se llega a `PRESION_OBJETIVO_LOCAL`" — implementado
       2026-09-14 para `MODO=1` (planteado originalmente 2026-09-09 para
       `MODO=2`, ver historial abajo).** No es una protección nueva
       contra sobre-acelerar el motor — esa ya existe sola, ver
@@ -1809,7 +2276,7 @@ escribir `SET_RATIO 17.5` y Enter.
          manual. Un "intento fallido" es una ventana de
          `PRESION_SUPERVISOR_VENTANA_MS` (**30s**) sostenida con el
          lazo saturado en `RPM_MAX` y la presión fuera de tolerancia.
-      3. Tolerancia: **±5%** de `PRESION_OBJETIVO`
+      3. Tolerancia: **±5%** de `PRESION_OBJETIVO_LOCAL`
          (`PRESION_SUPERVISOR_TOLERANCIA_FRACCION`).
       4. "3 veces" = 3 ventanas de 30s seguidas en esa condición
          (`PRESION_SUPERVISOR_INTENTOS_MAX`) — si la presión entra en
@@ -1833,18 +2300,19 @@ escribir `SET_RATIO 17.5` y Enter.
       una vez que `MODO=1` esté validado en campo.
 - [x] Lazo PID (`pid.c/h`) implementado y activo en `main.c` (motor
       operando, sin calibración) — ver secciones 2.4 y 4.4.
-- [ ] Ganancias reales `PID_KP/KI/KD` — siguen en default (`1.0/0/0`),
+- [ ] Ganancias reales `PID_RPM_KP/KI` — siguen en default (`1.0/0`),
       pendientes de sintonizar en el motor real. Ver sección 9 para el
       procedimiento (Ziegler-Nichols en lazo cerrado, sin MATLAB) — solo
-      se pueden tocar en `CONTROL_HABILITADO=10`.
-- [x] **AWS**: `send_downlink.py`'s `PARAMETER_TABLE["CONTROL_HABILITADO"]["max"]`
+      se pueden tocar con `MODO=CALIBRACIÓN` + `CALIB=0`
+      (ver sección 4.4, gate actualizado 2026-09-29).
+- [x] **AWS**: `send_downlink.py`'s `PARAMETER_TABLE["CALIB"]["max"]`
       subido de `2` a `3` para aceptar el nuevo modo de sintonización de
       PID (mismo ajuste que ya se había hecho cuando se agregó el valor
       `2`).
 - [ ] **AWS, pendientes acumulados (ir agregando acá cada vez que el
       firmware agregue/cambie algo del lado de `send_downlink.py`, para
       no perder el hilo entre sesiones)**:
-      - `PARAMETER_TABLE["CONTROL_HABILITADO"]["max"]` subir a `10`
+      - `PARAMETER_TABLE["CALIB"]["max"]` subir a `10`
         (quedó en `3` la última vez que se confirmó hecho — cubre de
         una vez los modos `3` a `10` agregados/renumerados después, ver
         secciones 4.4/9/10/11/12; incluye el modo `6` -- auto-escalón
@@ -1856,7 +2324,7 @@ escribir `SET_RATIO 17.5` y Enter.
         parámetro solo funciona por serial, no por downlink LoRa —
         ver sección 12).
       - `ALPHA_AUTO` NO necesita entrada propia — quedó como
-        `CONTROL_HABILITADO=3`, cubierto por el bump de arriba.
+        `CALIB=3`, cubierto por el bump de arriba.
       - **Nuevo 2026-09-11**: IDs `26-29` (antes `MECANISMO_*`) quedaron
         libres al quitarse el mecanismo biela-manivela — si ya se
         habían agregado a `PARAMETER_TABLE`, quitarlos de ahí también.
@@ -1870,8 +2338,8 @@ escribir `SET_RATIO 17.5` y Enter.
         `MODO=2` no se puede calibrar por downlink LoRa, solo por
         serial. Ver sección 4.3.
       - **Nuevo 2026-09-14**: IDs `28-29` (que habían quedado libres el
-        2026-09-11) se reasignaron a `PRESION_PID_KP` (ID `28`, escala
-        x100, con signo) y `PRESION_PID_KI` (ID `29`, escala x1000, con
+        2026-09-11) se reasignaron a `PID_PSI_KP` (ID `28`, escala
+        x100, con signo) y `PID_PSI_KI` (ID `29`, escala x1000, con
         signo) — las ganancias del lazo EXTERNO de presión local de
         `MODO=1` (sección 4.3, `presion_pid.c`). `PARAMETER_TABLE`
         necesita estas 2 entradas nuevas, sin ellas `MODO=1` no se
@@ -1893,7 +2361,7 @@ escribir `SET_RATIO 17.5` y Enter.
       - [x] **`send_downlink.py`/`PARAMETER_TABLE` (dirección downlink)
         — corregido y entregado 2026-09-17.** Tenía 3 problemas reales
         (bloqueaban funcionalidad, no solo imprecisión de rango):
-        `CONTROL_HABILITADO["max"]` en `3` (subido a `7`), `MODO["max"]`
+        `CALIB["max"]` en `3` (subido a `7`), `MODO["max"]`
         en `2` (subido a `3`), y faltaban por completo las entradas para
         `25-29` (`ValueError: nombre de parametro desconocido` al
         intentar mandarlos). De paso se ajustaron los rangos min/max de
@@ -1912,12 +2380,12 @@ escribir `SET_RATIO 17.5` y Enter.
       - **Aviso importante, no es un cambio de tabla**: `MODO` (ID 16)
         ahora sí tiene efecto real en el firmware (antes era un no-op
         aceptado y ACKeado sin hacer nada) — si alguna Lambda/servicio
-        ya manda `MODO=2` + `PRESION` esperando que el motor reaccione,
+        ya manda `MODO=2` + `PRESION_REMOTO` esperando que el motor reaccione,
         confirmar primero que `PRESION_GANANCIA_RPM`/`PRESION_OFFSET_RPM`
         ya se calibraron en ese nodo (ver sección 4.3) y que el nodo no
         se quedó en `MODO=0` tras la actualización (ver aviso de
         migración en esa misma sección) — si no, `MODO=2` no va a mover
-        el motor aunque el downlink de `PRESION` llegue y se ACKee OK.
+        el motor aunque el downlink de `PRESION_REMOTO` llegue y se ACKee OK.
       - **Pendiente de diseño (no de AWS), agregado 2026-09-14**: switch
         físico selector de `MODO` en el gabinete, prioridad de control
         local (serial) sobre remoto (downlink, estilo variador ABB por
@@ -1928,21 +2396,21 @@ escribir `SET_RATIO 17.5` y Enter.
 - [ ] Posible parámetro 25, `INTEGRAL_MAX` (anti-windup configurable
       del PID) — hoy el anti-windup es fijo en `pid.c` (integración
       condicional, sin límite configurable por downlink).
-- [x] **Puente aspersor → motor (`MODO`/`PRESION`/`TIMEOUT_SIN_COMANDO_S`)
+- [x] **Puente aspersor → motor (`MODO`/`PRESION_REMOTO`/`TIMEOUT_SIN_COMANDO_S`)
       — implementado 2026-09-07** (encontrado al revisar qué pasaría si
-      otra Lambda empezara a mandar `PRESION` como downlink automático
+      otra Lambda empezara a mandar `PRESION_REMOTO` como downlink automático
       desde los aspersores; ver sección 4.3 para el detalle completo):
       `MODO` ahora rama el ciclo de control real (antes era un no-op);
-      `MODO=2` deriva el setpoint de `PRESION` vía una fórmula lineal
+      `MODO=2` deriva el setpoint de `PRESION_REMOTO` vía una fórmula lineal
       calibrable en campo (`PRESION_GANANCIA_RPM`/`PRESION_OFFSET_RPM`,
-      IDs 30/31, mismo gate `CONTROL_HABILITADO=7` que `PID_KP/KI/KD`);
+      IDs 30/31, mismo gate `CALIB=7` que `PID_RPM_KP/KI/KD`);
       el enum `CalibFlash_Modo_t` se renombró a
       `CALIB_MODO_RALENTI/LOCAL/REMOTO` para coincidir con el README
       (⚠️ desactualizado — renombrado de nuevo 2026-09-14 a
       `CALIB_MODO_RALENTI/PRESION_LOCAL/REMOTO/MANUAL_BANCO`, ver
       sección 4.3); y
       el watchdog de `TIMEOUT_SIN_COMANDO_S` fuerza ralentí si `MODO=2`
-      deja de recibir `PRESION` fresca. **Pendientes reales que quedan**
+      deja de recibir `PRESION_REMOTO` fresca. **Pendientes reales que quedan**
       (no de diseño, de calibración/AWS): `PRESION_GANANCIA_RPM`/
       `PRESION_OFFSET_RPM` siguen en `0` (sin calibrar) hasta que se
       corra una sesión real con el motor y el sistema hidráulico
@@ -2061,14 +2529,17 @@ más cuidado y de forma incremental.
 
 ### Restricción importante del firmware: no hay "lazo abierto" con el motor operando
 
-`CONTROL_HABILITADO=1`/`=2` (manual/barrido, sección 2.4) — que sí
+`CALIB=1`/`=2` (manual/barrido, sección 2.4) — que sí
 permitirían mandar un pulso fijo al servo sin que el PID reaccione —
 **requieren el motor detenido para entrar y para permanecer**, y si el
 motor arranca estando en cualquiera de esos dos modos, el firmware los
-apaga solo de inmediato (medida de seguridad, ver 4.4). `=9`
-(sintonización PID) no tiene esa restricción — de hecho solo tiene
-sentido con el motor ya operando — pero tampoco da un lazo abierto: el
-servo lo sigue manejando el PID igual que en `=0`. Esto es
+apaga solo de inmediato (medida de seguridad, ver 4.4). El viejo modo
+dedicado de sintonización de PID (numeración anterior a 2026-09-29,
+ELIMINADO, ver sección 4.4) no tenía esa restricción — de hecho solo
+tenía sentido con el motor ya operando — pero tampoco daba un lazo
+abierto: el servo lo seguía manejando el PID igual que en `=0`. Hoy
+`PID_RPM_KP/KI` se tocan directo en `CALIB=0` (con `MODO=CALIBRACIÓN`), sin
+ese modo dedicado, pero la conclusión es la misma. Esto es
 intencional y no se debe evadir: significa que **no se puede hacer una
 prueba de "curva de reacción" en lazo abierto** (mandar un escalón de
 pulso fijo y medir cómo responde la RPM) con el motor corriendo —
@@ -2079,16 +2550,14 @@ en lazo cerrado (ganancia última)**.
 
 ### Procedimiento (Ziegler-Nichols en lazo cerrado)
 
-1. Mandar `CONTROL_HABILITADO=10` (modo sintonización PID, ver sección
-   4.4) — es el único modo en el que `PID_KP/KI/KD` se aceptan; en
-   cualquier otro modo (incluida la operación normal, `=0`) se
-   rechazan con `APPLY_ERROR`, por medida de seguridad (que no se
-   puedan tocar las ganancias por accidente fuera de una sesión
-   deliberada). A diferencia de `=1`/`=2`, este modo no exige el motor
-   detenido para entrar ni se apaga solo cuando arranca — se puede
-   activar con el motor ya corriendo, o antes de arrancarlo, indistinto.
-   Con el motor ya estabilizado en ralentí caliente, seguir al paso 2.
-2. Confirmar `PID_KI=0` y `PID_KD=0` (default de fábrica) — se
+1. ⚠️ Paso desactualizado (`CALIB=10` ELIMINADO
+   2026-09-29, ver sección 4.4): `PID_RPM_KP/KI` ahora se aceptan con
+   `MODO=CALIBRACIÓN` + `CALIB=0` (ningún `CALIB` activo), no
+   con un modo dedicado de sintonización — por medida de seguridad,
+   que no se puedan tocar las ganancias por accidente fuera de una
+   sesión deliberada de calibración. Con el motor ya estabilizado en
+   ralentí caliente, seguir al paso 2.
+2. Confirmar `PID_RPM_KI=0` y `PID_KD=0` (default de fábrica) — se
    sintoniza `Kp` solo primero.
 3. Mandar un `SET_RPM` por encima de `RPM_MIN` (un escalón moderado,
    no extremo — ej. 200-300 RPM sobre el ralentí, no el máximo del
@@ -2097,7 +2566,7 @@ en lazo cerrado (ganancia última)**.
    PuTTY/Tera Term, o un script de Python leyendo el puerto COM y
    guardando CSV con marca de tiempo) para poder medirlo con precisión
    después en vez de a ojo.
-4. Ir subiendo `Kp` en pasos pequeños (ej. `PID_KP 1.5`, `PID_KP 2.0`,
+4. Ir subiendo `Kp` en pasos pequeños (ej. `PID_RPM_KP 1.5`, `PID_RPM_KP 2.0`,
    ...) repitiendo el mismo escalón de `SET_RPM` cada vez, hasta que la
    RPM empiece a **oscilar de forma sostenida** (ni crece sin control
    ni se apaga, se mantiene oscilando con amplitud pareja alrededor del
@@ -2119,7 +2588,7 @@ en lazo cerrado (ganancia última)**.
    `Kd`) dado el ruido de medición ya conocido en el ralentí — agregar
    `Kd` solo si de verdad hace falta amortiguar más el sobre-impulso, y
    con cautela.
-6. Cargar esas ganancias (`PID_KP`/`PID_KI`/`PID_KD` por downlink o
+6. Cargar esas ganancias (`PID_RPM_KP`/`PID_RPM_KI`/`PID_KD` por downlink o
    serial) y repetir el escalón de `SET_RPM` del paso 3 — buscar una
    respuesta que llegue al setpoint sin oscilar más de una vez y sin
    error de estado estable notorio. Ajustar a mano desde ahí si hace
@@ -2257,7 +2726,7 @@ un escalón cerrado con `Kp=0.3`). Pero ese `K` salió de una señal
 débil y ruidosa (el escalón nunca llegó cerca del setpoint con
 `Kp=0.3` solo), así que no es confiable por sí solo — el `K` real se
 tomó del mapeo de curva de ganancia en lazo abierto
-(`CONTROL_HABILITADO=5`, sección 12), que varía entre **1.9 y 6.3
+(`CALIB=5`, sección 12), que varía entre **1.9 y 6.3
 RPM/µs** según la zona del rango (~3.4x de variación, menos que las
 ~8.8x de la biela-manivela, pero todavía significativo — sigue siendo
 una planta con ganancia no uniforme, ver "gain-scheduling" en
@@ -2329,7 +2798,7 @@ con agua real todavía pendiente.
 `PRESION_GANANCIA_RPM`/`PRESION_OFFSET_RPM`) subió el "magic" de
 validación de la flash (`"CALF"`→`"CALG"`).** En el siguiente reflash,
 esto borró TODA la calibración guardada (`SET_RATIO`, `SERVO_PULSO_MIN/MAX`,
-`PID_KP/KI/KD`, todo) y la volvió a los valores de fábrica del código,
+`PID_RPM_KP/KI/KD`, todo) y la volvió a los valores de fábrica del código,
 sin ningún aviso visible más que el pulso quedandose fijo en el
 `SERVO_PULSO_MIN` de fábrica (`1000`, no el `1124` calibrado) sin
 reaccionar a ningún `SET_RPM`. Hay que estar atento a esto cada vez
@@ -2351,16 +2820,16 @@ reclasificó de `CONFIGURACION` a `CALIBRACION`** (2026-09-08) para
 poder cambiarlo sin detener el motor — antes de que tuviera un efecto
 real, no importaba en qué categoría cayera.
 
-**Log `PID_GANANCIAS` (agregado 2026-09-08)**: mientras se está en
-`CONTROL_HABILITADO=10` (renumerado 2026-09-23 DOS VECES el mismo día
--- primero de `7` a `9`, después de `9` a `10`), el firmware imprime
-`PID_GANANCIAS,Kp=...,Ki=...` apenas se entra al modo, y de nuevo cada
-vez que `PID_KP`/`PID_KI` cambian (por serial o por downlink LoRa, los
-dos pasan por el mismo dispatcher) — para que nunca más quede la duda
-de qué ganancias están realmente vigentes en una sesión de
-sintonización, después del incidente de arriba. ⚠️ Formato corregido
-2026-09-23: ya no imprime `Kd=...` (`PID_KD` se eliminó del protocolo,
-ver más abajo).
+**Log `PID_GANANCIAS` (agregado 2026-09-08)**: mientras `PID_RPM_KP/KI`
+están habilitados para tocarse (`MODO=CALIBRACIÓN` + `CALIB=0`,
+gate actualizado 2026-09-29 -- antes era `CALIB=10`, ver
+sección 4.4), el firmware imprime `PID_GANANCIAS,Kp=...,Ki=...` apenas
+se cumple esa condición, y de nuevo cada vez que `PID_RPM_KP`/`PID_RPM_KI`
+cambian (por serial o por downlink LoRa, los dos pasan por el mismo
+dispatcher) — para que nunca más quede la duda de qué ganancias están
+realmente vigentes en una sesión de calibración, después del incidente
+de arriba. ⚠️ Formato corregido 2026-09-23: ya no imprime `Kd=...`
+(`PID_KD` se eliminó del protocolo, ver más abajo).
 
 **Investigación de discrepancia RPM vs. tacómetro analógico
 (2026-09-08) — resuelta, no era el TID.** En campo se armó una tabla
@@ -2468,18 +2937,17 @@ PID_TEST,<ms_desde_arranque>,<SET_RPM>,<RPM_filtrada>,<pulso_servo_us>
 - Se imprime cada `200ms` (5Hz) — mucho más seguido que el log general
   de 1s, para tener suficientes puntos por constante de tiempo al
   ajustar la curva.
-- **Solo se activa en `CONTROL_HABILITADO=10`** (modo sintonización PID,
-  renumerado 2026-09-23 DOS VECES el mismo día -- primero de `7` a `9`,
-  después de `9` a `10`, ver sección 4.4) — la misma condición que
-  desbloquea
-  `PID_KP/KI/KD`, una sola fuente de verdad para "¿estamos en una
-  sesión de sintonización?". Fuera de ese modo el monitor se ve
-  exactamente como antes de que existiera este log (solo la línea de
-  1s). Se apaga solo en cuanto se sale del modo `10` (downlink
-  `CONTROL_HABILITADO=0`). El mismo log también se activa, con el
-  mismo formato, en `CONTROL_HABILITADO=6` (auto-escalón interno, ver
-  más abajo) — así `pid_tuning.py identify`/`auto --loop interno`
-  funcionan igual sobre la salida de cualquiera de los dos modos.
+- ⚠️ Actualizado 2026-09-29: **se activa en `CALIB=6`**
+  (auto-escalón interno, ver más abajo) **o `=7`** (validación con
+  ganancias reales, ver sección 4.4) — ya NO existe el viejo `CALIB=10`
+  (numeración anterior a 2026-09-29) como modo dedicado de sintonización
+  (eliminado, ver sección 4.4);
+  `PID_RPM_KP/KI` ahora se desbloquean con `MODO=CALIBRACIÓN` +
+  `CALIB=0`, condición separada de este log. Fuera de `=6`/`=7`
+  el monitor se ve exactamente como antes de que existiera este log
+  (solo la línea de 1s). Se apaga solo en cuanto ese `CALIB` termina o se
+  aborta. `pid_tuning.py identify`/`auto --loop interno` funcionan
+  igual sobre la salida de cualquiera de los dos modos.
 - Usa `HAL_GetTick()` (ms desde el arranque), **no** la hora del RTC —
   el RTC se resincroniza cada ~30s por GPS/LoRaWAN (sección 2.2) y esas
   correcciones contaminarían el tiempo relativo de un escalón en
@@ -2505,18 +2973,20 @@ las unidades de este lazo (RPM de corrección → PSI, en vez de µs de
 servo → RPM).
 
 ```
-PRESION_PID_TEST,<ms_desde_arranque>,<PRESION_OBJETIVO>,<PresionV_medida>,<RPM_generado_por_el_lazo_externo>,<RPM_real>
+PRESION_PID_TEST,<ms_desde_arranque>,<PRESION_OBJETIVO_LOCAL>,<PresionV_medida>,<RPM_generado_por_el_lazo_externo>,<RPM_real>
 ```
 
 - Se imprime cada `200ms` (5Hz), igual cadencia que `PID_TEST`.
-- **Solo se activa con `CONTROL_HABILITADO=10` Y `MODO=1` a la vez** —
-  fuera de `MODO=1` el lazo externo no corre, no tendría sentido
-  loguearlo (a diferencia de `PID_TEST`, que solo depende de
-  `CONTROL_HABILITADO=10`/`=6`). El mismo escalón también se puede
-  disparar automáticamente con `CONTROL_HABILITADO=8` (auto-escalón
-  local, ver más abajo) — ese modo escribe el mismo log
-  `PRESION_PID_TEST`, solo cambia quién manda el escalón de
-  `PRESION_OBJETIVO` (el operador a mano, o el firmware solo).
+- ⚠️ Actualizado 2026-09-29: **se activa con `CALIB=10`**
+  (auto-escalón local, antes numerado `=8`, ver más abajo) **o `=11`**
+  (validación con ganancias reales, antes numerado `=13`, ver sección
+  4.4) **Y la cascada real corriendo**
+  (`presionLocalActivoAhora`) — ya no existe el viejo `CALIB=10` de
+  sintonización manual (numeración anterior a 2026-09-29 -- no
+  confundir con el `CALIB=10` actual, arriba, que es otra cosa).
+  Ambos modos escriben el mismo log `PRESION_PID_TEST`, solo cambia el
+  propósito de cada uno (identificación con `Ki=0` forzado en `=10`,
+  validación con las ganancias reales sin forzar nada en `=11`).
 - Incluye las dos variables de la cascada en la misma línea: la
   presión (lo que este lazo controla) y el RPM resultante (su salida,
   que a su vez es el setpoint que recibe el lazo interno ya validado)
@@ -2525,19 +2995,19 @@ PRESION_PID_TEST,<ms_desde_arranque>,<PRESION_OBJETIVO>,<PresionV_medida>,<RPM_g
 **Flujo de sintonización recomendado (Fase E de la sección 12), usando
 `pid_tuning.py`:**
 1. **Caracterización en lazo abierto** (paso 9 de la Fase E): en
-   `MODO=3` (manual/banco), mandar distintos `SET_RPM` a mano y anotar
+   `MODO=4` (calibración), mandar distintos `SET_RPM` a mano y anotar
    la presión resultante del log general de 1s (`Presion: .../PresionV: ...`)
    — no hace falta `PRESION_PID_TEST` para esto todavía, ya que
-   `PRESION_PID_KP/KI` en `0` significa que el lazo externo no corre.
+   `PID_PSI_KP/KI` en `0` significa que el lazo externo no corre.
 2. **Identificación del modelo**: `pid_tuning.py identify-presion --log
-   <captura> --kp <PRESION_PID_KP usada>` sobre un log de
+   <captura> --kp <PID_PSI_KP usada>` sobre un log de
    `PRESION_PID_TEST` en lazo cerrado, para obtener `K`/`τ`/`L` de la
    relación presión↔RPM de este sistema hidráulico específico.
-   **Requiere `PRESION_PID_KI=0` durante ESA captura** (mismo motivo
+   **Requiere `PID_PSI_KI=0` durante ESA captura** (mismo motivo
    que el lazo interno, sección 9: con el integral activo el error de
    estado estable se borra en cada escalón y la fórmula de `K` se
    indefine — confirmado en campo 2026-09-21, un log con
-   `PRESION_PID_KI=0.3` ya activo no sirve para este paso, aunque sí
+   `PID_PSI_KI=0.3` ya activo no sirve para este paso, aunque sí
    sirve para validar el paso 4). El `K` del paso 1 (lazo abierto) es
    preferible de todas formas por la misma razón que se explica en la
    sección 9 para el lazo de RPM — usar `identify-presion` sobre todo
@@ -2548,72 +3018,155 @@ PRESION_PID_TEST,<ms_desde_arranque>,<PRESION_OBJETIVO>,<PresionV_medida>,<RPM_g
    abierto (paso 1) sobre el que salga de un escalón cerrado chico,
    por la misma razón que se explica en la sección 9 para el lazo de
    RPM.
-4. **Validación real**: cargar `PRESION_PID_KP/KI`, entrar a `MODO=1`,
+4. **Validación real**: cargar `PID_PSI_KP/KI`, entrar a `MODO=1`,
    y repetir el escalón en el motor real, ajustando de a poco --
    idéntica metodología a la sección 9, solo que la variable
    controlada es presión en vez de RPM.
 
-### Automatizando el escalón: `CONTROL_HABILITADO=6`/`=8`/`=9`/`=11` y `pid_tuning.py auto` (agregado 2026-09-23, extendido 2026-09-24)
+### Automatizando el escalón: `CALIB=6`/`=7`/`=9`/`=10`/`=12` y `pid_tuning.py auto`/`compare`/`sugerir-kp-presion` (agregado 2026-09-23, extendido 2026-09-24 y 2026-09-25)
 
 Todo el procedimiento de arriba (los tres lazos: interno de RPM, local
 de presión y remoto) sigue siendo **100% manual y de campo** en su
 esencia -- lo único que se automatizó es la parte más mecánica y
 propensa a error humano de repetirlo: mandar el escalón, medir el
-tiempo/cantidad de reportes, y no olvidarse de deshacerlo. Cuatro
+tiempo/cantidad de reportes, y no olvidarse de deshacerlo. Siete
 piezas (la tercera, `=6`, agregada en la segunda renumeración del mismo
 día para darle al lazo interno la misma comodidad que ya tenían los
-dos lazos de presión; la cuarta, `=11`, agregada un día después para
+dos lazos de presión; la cuarta, `=9`, agregada un día después para
 darle al PID#2 el mismo tipo de barrido en LAZO ABIERTO que ya tenía el
-PID#1 con `=5`), pensadas para usarse juntas:
+PID#1 con `=5`; la quinta, `compare`, agregada otro día después para
+verificar en campo lo que `auto` solo predice; la sexta, `=7`, agregada
+el mismo día que `compare` para automatizar justo el log que `compare`
+necesita; la séptima, `sugerir-kp-presion`, agregada el mismo día para
+que el operador ya no tenga que adivinar qué `Kp` de prueba usar en
+`=10`), pensadas para usarse juntas:
 
-- **`CONTROL_HABILITADO=6`** (ver sección 4.4/12) automatiza el
-  escalón del lazo INTERNO de RPM (PID#1) -- requiere `MODO=3`
-  (MANUAL_BANCO) y el motor operando, comanda `SET_RPM = RPM_MIN + 200`
+- **`CALIB=6`** (ver sección 4.4/12) automatiza el
+  escalón del lazo INTERNO de RPM (PID#1) -- requiere `MODO=4`
+  (CALIBRACIÓN) y el motor operando, comanda `SET_RPM = RPM_MIN + 200`
   RPM fijo (`INTERNO_CAL_ESCALON_RPM`) y loguea `PID_TEST` (el mismo
-  log de la sesión manual de `=10`) durante una ventana FIJA de 60
+  log que usaba la vieja sesión de sintonización manual, `CALIB=10`
+  numeración anterior a 2026-09-29, eliminada) durante una ventana FIJA de 60
   segundos (`INTERNO_CAL_DURACION_MS`) -- de sobra frente a lo rápido
   que asienta este lazo, a diferencia de los lazos de presión que
   necesitan 10-60 minutos. Se aborta y resetea `SET_RPM` a `0.0` si el
-  motor se detiene o `MODO` deja de ser `3` a mitad de la prueba, y
-  auto-revierte a `CONTROL_HABILITADO=0` al completar o abortar. Log:
+  motor se detiene o `MODO` deja de ser `4` a mitad de la prueba, y
+  auto-revierte a `CALIB=0` al completar o abortar. Log:
   `INTERNO_CAL,INICIO,...` / `INTERNO_CAL,ESCALON,...` /
   `INTERNO_CAL,COMPLETO,duracion_s=...` /
   `INTERNO_CAL,ABORTADO,motivo=...`.
-- **`CONTROL_HABILITADO=8`/`=9`** (ver sección 4.4/12) automatizan
+- **`CALIB=10`/`=12`** (ver sección 4.4/12) automatizan
   SOLO el envío del escalón y la espera para los lazos de presión --
-  `8` para el lazo local (`MODO=1`, escalón fijo de `PRESION_OBJETIVO`,
-  ventana fija de 10min, loguea `PRESION_PID_TEST`) y `9` para el
-  remoto (`MODO=3`, escalón fijo de `SET_RPM`, termina por reportes o
-  timeout, loguea el log `REMOTO_PID_TEST`). El servo lo sigue
-  manejando el PID normal en los tres casos (`6`/`8`/`9`) -- no es un
-  modo de lazo abierto, y ninguno calcula ninguna ganancia por sí
-  solo. Los tres se auto-abortan y deshacen el escalón si el motor se
-  detiene o `MODO` cambia a mitad de la prueba, así que no hace falta
-  estar pendiente para "limpiar" manualmente si algo interrumpe la
-  sesión.
-- **`CONTROL_HABILITADO=11`** (agregado 2026-09-24, ver sección 4.4/12)
-  automatiza el barrido de ganancia en LAZO ABIERTO del PID#2 (presión
-  local) -- equivalente de `=5` (que hace lo mismo para el PID#1) pero
-  con `SET_RPM` en `MODO=3` en vez del pulso del servo, ya que acá el
-  lazo abierto significa que `presion_pid.c` no corre, no que el PID
-  interno se salte. A diferencia de `5`/`6`/`8`/`9`, este SÍ tiene un
-  riesgo físico real (golpe de ariete, hay presión hidráulica de por
-  medio), así que el `SET_RPM` de cada paso se rampea gradualmente en
-  vez de saltar, y el techo de corte es relativo a la presión medida en
-  ralentí (`+10 PSI`) en vez de un valor fijo. Asume la tubería YA
-  llena/presurizada -- no reemplaza un primer llenado manual (ver
-  sección 12, Fase D). Log: `PRESION_GANANCIA_CAL,INICIO,...` /
-  `PRESION_GANANCIA_CAL,BASE,...` / `PRESION_GANANCIA_CAL,PASO,...` /
-  `PRESION_GANANCIA_CAL,COMPLETO,...` /
-  `PRESION_GANANCIA_CAL,ABORTADO,...`.
+  `10` para el lazo local (`MODO=1`, mide una presión base real antes de
+  arrancar y manda `PRESION_OBJETIVO_LOCAL` = base + 5 PSI fijo, agregado
+  2026-09-25, ver sección 4.4; ventana fija de 3min (bajada de 10min
+  2026-09-28 tras identificar el modelo real con el log de campo, ver
+  sección 9), loguea
+  `PRESION_PID_TEST`) y `12` para el remoto (`MODO=4`, escalón fijo de
+  `SET_RPM`, termina por reportes o timeout, loguea el log
+  `REMOTO_PID_TEST`). `10` también guarda y fuerza `PID_PSI_KI=0`
+  durante la prueba (restaurado al salir, mismo motivo que el lazo
+  interno) -- el `Kp` de prueba sigue siendo libre, ver
+  `sugerir-kp-presion` más abajo. El servo lo sigue manejando el PID
+  normal en los tres casos (`6`/`10`/`12`) -- no es un modo de lazo
+  abierto, y ninguno calcula ninguna ganancia por sí solo. Los tres se
+  auto-abortan y deshacen el escalón si el motor se detiene o `MODO`
+  cambia a mitad de la prueba, así que no hace falta estar pendiente
+  para "limpiar" manualmente si algo interrumpe la sesión.
+- **`CALIB=9`** (agregado 2026-09-24, diseño definitivo
+  2026-09-28, ver sección 4.4/12) automatiza el mapeo de ganancia en LAZO
+  ABIERTO del PID#2 (presión local) -- equivalente de `=5` (que hace lo
+  mismo para el PID#1) pero con `SET_RPM` en `MODO=4` en vez del pulso
+  del servo: `presion_pid.c` no corre y no hay `PID_PSI_KP/KI` de por
+  medio (así la curva no queda contaminada por un controlador, y no
+  depende de que ya haya un `Kp` cargado), pero el PID#1 de RPM ya
+  validado sí sigue moviendo el servo. A diferencia de `5`/`6`/`10`/`12`,
+  este SÍ tiene un riesgo físico real (golpe de ariete, hay presión
+  hidráulica de por medio), así que la subida está frenada por la
+  presión REAL medida:
+  1. Posa el motor en `RPM_MIN` y promedia la presión real durante 5s
+     (`PRESION_CAL_BASE_PROMEDIO_MS`, misma ventana que `=10`) → presión
+     base.
+  2. Calcula el ritmo máximo seguro de subida
+     `(PRESION_OBJETIVO_LOCAL − base) / TIEMPO_LLENADO_S` en PSI/s -- el mismo
+     que ya usa la rampa de llenado real de `MODO=1` (sección 4.3.1) --
+     y un ritmo nominal de avance de RPM
+     `(RPM_MAX_CARGA − RPM_MIN) / TIEMPO_LLENADO_S`.
+  3. En cada ciclo compara la presión real contra la "línea ideal"
+     `base + ritmo_seguro × tiempo_transcurrido`: si va POR DEBAJO, sube
+     RPM al ritmo nominal; si ya la alcanzó o superó, **pausa** el avance
+     (RPM se mantiene, no baja) hasta que la línea la vuelva a superar.
+     No es un PID (no hay ganancia ni integral que calibrar) -- es un
+     semáforo avanza/pausa. Resultado: la presión nunca sube más rápido
+     de lo que el operador ya definió como seguro, SIN IMPORTAR la
+     ganancia real de la instalación, y la prueba dura lo que el operador
+     dijo que tarda el llenado (ejemplo real que motivó este diseño: si
+     la bomba llega a 60 PSI con solo 900 de 1200 RPM, una rampa pautada
+     solo por RPM hubiera subido 50 PSI en ~10 min en vez de los 30 min
+     que el operador validó -- el freno por PSI lo evita).
+  4. Loguea `PRESION_GANANCIA_CAL,PASO,rpm=...,psi=...,salto=...` cada
+     vez que la presión real avanza 1 PSI
+     (`PRESION_GANANCIA_CAL_PASO_LOG_PSI`) -- el tamaño del log queda
+     acotado por el rango de presión recorrido (p.ej. ~50 líneas de 10 a
+     60 PSI), no por cuánto tarde la prueba. Si la presión brinca más de
+     1 PSI en un solo ciclo, sale UNA línea con el `salto` real (p.ej.
+     `salto=3.00`) en vez de tres -- no se pierde información de
+     ganancia (el análisis usa la pendiente entre líneas consecutivas),
+     y con una rampa tan lenta un brinco así sería en sí mismo anómalo
+     (probable ruido de sensor), visible en el log.
+
+  Termina por lo que ocurra primero: presión real llega a
+  `PRESION_OBJETIVO_LOCAL` (`objetivo_alcanzado`, el caso normal); RPM llega a
+  `RPM_MAX_CARGA` sin alcanzarlo (`rpm_max_carga_alcanzado` -- respaldo
+  de seguridad que en una instalación normal no debería tocarse nunca,
+  y que si se toca es en sí mismo un diagnóstico: la bomba no llega a
+  esa presión dentro de su límite seguro de RPM); o un timeout de
+  último recurso de `1.5 × TIEMPO_LLENADO_S`
+  (`PRESION_GANANCIA_CAL_TIMEOUT_MARGEN`, solo por si el sensor se traba
+  sin marcarse inválido). Guardas explícitas: si la presión base ya está
+  en o sobre el objetivo completa de inmediato
+  (`objetivo_ya_alcanzado`), y si `TIEMPO_LLENADO_S=0` o
+  `RPM_MAX_CARGA ≤ RPM_MIN` sale con `ERROR,motivo=config_invalida`. Se
+  aborta y resetea `SET_RPM` a `0.0` si el motor se detiene, `MODO` deja
+  de ser `4`, o el sensor de presión deja de ser válido
+  (`sensor_invalido`); auto-revierte a `CALIB=0` al
+  terminar por cualquier motivo. Asume la tubería YA llena/presurizada
+  -- no reemplaza un primer llenado manual (ver sección 12, Fase D). Dos
+  diseños previos se descartaron el mismo día: pasos discretos de
+  `SET_RPM` con espera de asentamiento y umbral de salto anormal (sus
+  constantes propias causaron 3 bugs reales de calibración) y reusar la
+  cascada real de `MODO=1` (dependía de un `Kp` ya cargado -- con `Kp=0`
+  de fábrica no hacía nada -- y el PID contaminaba la curva).
+  Log: `PRESION_GANANCIA_CAL,INICIO,...` /
+  `PRESION_GANANCIA_CAL,BASE,psi_base=...` /
+  `PRESION_GANANCIA_CAL,RAMPA,objetivo=...,tasa_psi_s=...,tasa_rpm_s=...,rpm_max_carga=...,timeout_s=...` /
+  `PRESION_GANANCIA_CAL,PASO,rpm=...,psi=...,salto=...` /
+  `PRESION_GANANCIA_CAL,COMPLETO,motivo=objetivo_alcanzado|objetivo_ya_alcanzado|rpm_max_carga_alcanzado|timeout,...` /
+  `PRESION_GANANCIA_CAL,ABORTADO,motivo=motor_se_detuvo|modo_cambio|sensor_invalido` /
+  `PRESION_GANANCIA_CAL,ERROR,motivo=config_invalida,...`.
+- **`CALIB=7`** (agregado 2026-09-25, ver sección 4.4)
+  automatiza el log de VALIDACIÓN del lazo interno (PID#1) -- clon
+  mecánico de `=6` (mismo escalón, mismo log `PID_TEST`, requiere
+  `MODO=4` + motor operando), pero **sin forzar `PID_RPM_KP=1/PID_RPM_KI=0`**
+  (usa la ganancia YA cargada en flash, la recomendada por `auto` y
+  bajada por downlink) y con una ventana de 4 minutos en vez de 1 --
+  reemplaza el "dejalo asentar y mirá cómo se ve" manual. Suma un
+  watchdog de oscilación sostenida que no tienen `6`/`9`/`10`/`12`: pasada
+  una espera de 30s, cuenta cruces de signo de `RPM - SET_RPM` (con piso
+  anti-ruido de 15 RPM) en una ventana móvil de 20s -- 4 cruces abortan
+  de inmediato (`SET_RPM=0.0`), mismo criterio que antes aplicaba el
+  operador a ojo. El log resultante se le pasa directo a `compare` (ver
+  más abajo). Log: `VALIDACION_CAL,INICIO,...` /
+  `VALIDACION_CAL,ESCALON,...` / `VALIDACION_CAL,COMPLETO,...` /
+  `VALIDACION_CAL,ABORTADO,motivo=motor_se_detuvo|modo_cambio|oscilacion_sostenida`.
 - **`pid_tuning.py auto --loop {interno,presion,remoto}`** encadena en
   un solo comando lo que antes eran pasos sueltos (`identify`/
   `identify-presion`/`identify-remoto` → `simc` → `simulate`) y sugiere
-  ganancias directo sobre el log capturado (con `CONTROL_HABILITADO=10`
-  o `=6` para el lazo interno, o con el log que resulte de `=8`/`=9`
+  ganancias directo sobre el log capturado (con `CALIB=6`
+  o `=7` para el lazo interno, o con el log que resulte de `=10`/`=12`/`=11`
   para los lazos de presión). `--loop interno` y `--loop presion`
   aceptan además `--ganancia-log <log del barrido correspondiente>`
-  (`CONTROL_HABILITADO=5` para interno, `=11` para presión) para
+  (`CALIB=5` para interno, `=9` para presión) para
   reemplazar la `K` identificada en lazo cerrado (poco confiable, ver
   sección 9 más arriba) por la `K` peor caso del mapeo de ganancia en
   lazo abierto -- para `--loop interno` es la misma metodología real
@@ -2624,23 +3177,62 @@ PID#1 con `=5`), pensadas para usarse juntas:
   campo (bloqueado por falta de motobomba al momento de escribir esto).
   El lazo remoto además tiene `identify-remoto`, para la identificación
   en LAZO ABIERTO específica de ese caso (ver el comentario de `main.c`
-  sobre el log `REMOTO_PID_TEST`, evento-driven y gateado a `MODO=3`,
+  sobre el log `REMOTO_PID_TEST`, evento-driven y gateado a `MODO=4`,
   no `MODO=2`) -- por eso `--ganancia-log` no aplica a `--loop remoto`,
   ese lazo ya se identifica en lazo abierto directo, sin el problema de
   `K` poco confiable que las otras dos opciones corrigen.
+- **`pid_tuning.py compare --loop {interno,presion,remoto}`** (agregado
+  2026-09-25) cierra el ciclo: `auto`/`simulate` dan una `Kp`/`Ki`
+  sugerida sobre un MODELO simulado, pero eso no reemplaza confirmar en
+  el motor real -- `compare` toma un log normal (`PID_TEST`/
+  `PRESION_PID_TEST`/`REMOTO_PID_TEST`, con esas ganancias YA cargadas y
+  corriendo, a diferencia de `identify`/`auto` que exigen `Ki=0` durante
+  la captura) y lo compara contra la simulación del mismo modelo
+  (`--K --tau --L`) con esas mismas ganancias (`--kp --ki`). Dos
+  salidas: un **% de parecido** (100% menos el error cuadrático medio
+  normalizado al tamaño del escalón, no correlación cruzada -- penaliza
+  mejor una oscilación real que la correlación, que puede seguir dando
+  alto aunque el real oscile encima de la forma general) y una
+  **detección de oscilación** aparte, contando cambios de signo del
+  residuo (real menos simulado) en la ventana de asentamiento -- 3 o más
+  cruces dispara la advertencia, específicamente para el caso de "el %
+  de parecido se ve bien pero el real igual empezó a oscilar" que un
+  solo número podría esconder. También compara sobre-impulso, tiempo de
+  asentamiento y error de estado estacionario real vs. simulado, y
+  `--plot-out` da el gráfico con el residuo en un segundo eje. Sirve
+  para los tres lazos (mismo motor de simulación que `simulate`/`auto`,
+  solo cambian los parámetros que se le pasan). Para el lazo interno, el
+  log del `CALIB=7` de arriba ya viene en el formato que
+  este comando espera, sin captura manual.
+- **`pid_tuning.py sugerir-kp-presion --ganancia-log <log de CALIB=9>`**
+  (agregado 2026-09-25) resuelve la pregunta de "¿qué `Kp` de prueba
+  mando antes de correr `CALIB=10`?" sin que el operador tenga que adivinar
+  ni mandar varios logs a revisar -- calcula un `Kp` sugerido a partir
+  de la ganancia (`K`) YA medida por el barrido en lazo abierto de
+  `CALIB=9`, usando `G_cl = K·Kp/(1+K·Kp)` despejada para un `G_cl`
+  objetivo configurable (`--g-cl-objetivo`, default `0.3`). Usa el `K`
+  MÍNIMO del barrido (la zona de menor ganancia) para garantizar señal
+  suficiente en toda la zona operativa, y avisa si esa elección deja el
+  `G_cl` demasiado alto en la zona de mayor ganancia (riesgo de
+  inestabilidad numérica en la identificación posterior, no de golpe de
+  ariete -- ver la derivación completa más arriba). El siguiente paso
+  que imprime es literal: bajar `PID_PSI_KP`/`PID_PSI_KI=0` por
+  downlink con ese valor, y recién ahí mandar `CALIB=10`
+  (que además ya fuerza `PID_PSI_KI=0` solo, ver sección 4.4).
 
-⚠️ **Ninguna de las cuatro piezas aplica ganancias sola.** `auto` termina
+⚠️ **Ninguna de las siete piezas aplica ganancias sola.** `auto` termina
 en una recomendación (`Kp`/`Ki` sugeridos), no en un downlink -- cargar
-esas ganancias (`PID_KP/KI`, `PRESION_PID_KP/KI` o
-`PRESION_REMOTO_PID_KP/KI`, según el lazo) y confirmar que la respuesta
+esas ganancias (`PID_RPM_KP/KI`, `PID_PSI_KP/KI` o
+`PID_ASP_KP/KI`, según el lazo) y confirmar que la respuesta
 real no oscila sigue siendo un paso manual, con el mismo criterio de
 "validar en el motor real antes de confiar en el modelo" que el resto
 de esta sección. Ver `tools/pid_tuning/` para el detalle de los
 subcomandos.
 
-## 10. Auto-calibración de ralentí (`CONTROL_HABILITADO=7`)
+## 10. Auto-calibración de ralentí (`CALIB=8`)
 
-⚠️ **Renumerado 2026-09-23 (antes era el valor `4`)** — se corrió a un
+⚠️ **Renumerado 2026-09-23 (antes era el valor `4`), y de nuevo
+2026-09-29 (era `7`, ver sección 4.4)** — se corrió a un
 número más alto, después de la zona muerta/curva de ganancia/PID
 interno (`4`/`5`/`6`), porque el ralentí real de un motor diesel SÍ
 cambia según haya o no carga hidráulica conectada (confirmado en
@@ -2661,10 +3253,10 @@ construirse, no es un ajuste chico).
 `RPM_filtrada`) y actualiza `RPM_MIN` automáticamente, en vez de que
 alguien tenga que mirar el log y copiar un número a mano.
 
-**Cómo usarla**: estando en operación normal (`CONTROL_HABILITADO=0`),
+**Cómo usarla**: estando en operación normal (`CALIB=0`),
 mandar
 ```
-CONTROL_HABILITADO 7
+CALIB 8
 ```
 (por downlink o por el mando manual de serial, sección 7). A
 diferencia de los modos `1`/`2` (calibración de servo), **no hace
@@ -2673,15 +3265,15 @@ sentido con el motor operando. Se puede mandar con el motor ya
 corriendo, o antes de arrancarlo (en ese caso, la rutina simplemente
 espera a que arranque antes de empezar a contar la ventana de 2
 minutos). Ver sección 4.4 para el resto de la máquina de estados de
-`CONTROL_HABILITADO`.
+`CALIB`.
 
 **Condiciones para que se acepte el downlink** (si no se cumplen, se
 rechaza de una vez, sin quedar pendiente):
-- Modo actual `CONTROL_HABILITADO=0` — no se puede pedir `7` directo
-  desde `1`, `2`, `10`, ni desde `4`/`5`/`6`/`8`/`9` (rechazo
+- Modo actual `CALIB=0` — no se puede pedir `8` directo
+  desde `1`, `2`, ni desde `4`/`5`/`6`/`10`/`12` (rechazo
   `OUT_OF_RANGE`, ver sección 4.4).
 
-Una vez dentro del modo `7`, el servo queda fijo en `SERVO_PULSO_MIN`
+Una vez dentro del modo `8`, el servo queda fijo en `SERVO_PULSO_MIN`
 todo el tiempo (igual que "sin control activo" en operación normal),
 sin importar en qué punto esté la ventana de medición.
 
@@ -2696,15 +3288,15 @@ calentamiento/estabilización y se descartan.
 
 **Si el motor se detiene a mitad de la ventana**: la medición en curso
 se descarta (no tiene sentido promediar con el motor parado), pero se
-permanece en modo `7` esperando a que vuelva a arrancar — no hace
+permanece en modo `8` esperando a que vuelva a arrancar — no hace
 falta reenviar el downlink, la ventana de 2 minutos arranca de nuevo
 sola apenas el motor esté operando otra vez.
 
 **Resultado**: `RPM_MIN` = promedio de los últimos 30s + margen fijo
 de 30 RPM (para que el ruido normal de medición, ±10-15 RPM, no cruce
 el umbral por accidente y dispare el PID solo por ruido). Al aplicar
-el resultado, el firmware vuelve solo a `CONTROL_HABILITADO=0` — no
-hace falta un downlink extra para salir del modo `7`.
+el resultado, el firmware vuelve solo a `CALIB=0` — no
+hace falta un downlink extra para salir del modo `8`.
 
 **"ACK" por LoRa al terminar**: además del log serial, al completar la
 medición el firmware fuerza un uplink inmediato (`CalibFlash_ForzarReporte()`,
@@ -2722,16 +3314,16 @@ RALENTI_CAL,INICIO,esperando_motor=<0/1>
 RALENTI_CAL,MIDIENDO,duracion_total_s=120,ventana_promedio_s=30
 RALENTI_CAL,PROGRESO,transcurrido_s=<s>,rpm_actual=<rpm>            -- cada 5s
 RALENTI_CAL,COMPLETO,promedio=<rpm>,RPM_MIN_nuevo=<rpm>,muestras=<n>,ok=<0/1>
-RALENTI_CAL,ABORTADO,motivo=motor_se_detuvo                         -- vuelve a esperar, sigue en modo 7
+RALENTI_CAL,ABORTADO,motivo=motor_se_detuvo                         -- vuelve a esperar, sigue en modo 8
 ```
 
 **Pendiente**: `send_downlink.py` (Lambda AWS, fuera de este repo)
-necesita `PARAMETER_TABLE["CONTROL_HABILITADO"]["max"]` bumped hasta
-`10` (cubre este modo y el de la sección 11, más los agregados
+necesita `PARAMETER_TABLE["CALIB"]["max"]` bumped hasta
+`12` (cubre este modo y el de la sección 11, más los agregados
 después) — mismo patrón que cuando se agregaron
-`CONTROL_HABILITADO=2` y los modos posteriores.
+`CALIB=2` y los modos posteriores.
 
-## 11. Auto-calibración de `SERVO_PULSO_MIN` (`CONTROL_HABILITADO=4`)
+## 11. Auto-calibración de `SERVO_PULSO_MIN` (`CALIB=4`)
 
 ⚠️ **Renumerado 2026-09-23 (antes era el valor `5`)** — se corrió a un
 número más bajo, ANTES del ralentí (sección 10) y del PID interno,
@@ -2751,20 +3343,20 @@ muerta, las correcciones chicas del PID cerca de ralentí caen a veces
 adentro (sin efecto) y a veces la cruzan (respuesta brusca) — un
 posible motivo de la oscilación intermitente observada a RPM bajas.
 
-A diferencia de `CONTROL_HABILITADO=1`/`=2` (que también mueven el
+A diferencia de `CALIB=1`/`=2` (que también mueven el
 servo directo, pero a ciegas, sin mirar la RPM — por eso exigen el
 motor detenido), este modo sí mira la RPM en cada paso, así que puede
 correr con el motor operando de forma seguro y acotada.
 
-**Cómo usarla**: estando en operación normal (`CONTROL_HABILITADO=0`),
+**Cómo usarla**: estando en operación normal (`CALIB=0`),
 mandar
 ```
-CONTROL_HABILITADO 4
+CALIB 4
 ```
-Igual que el modo `7` (ralentí): no hace falta detener el motor primero
+Igual que el modo `8` (ralentí): no hace falta detener el motor primero
 (si se manda sin el motor operando, la rutina espera a que arranque).
 Solo se acepta viniendo de modo `0` (rechazo `OUT_OF_RANGE` si se pide
-desde `1`/`2`/`10`, ni desde `5`/`6`/`7`/`8`/`9`).
+desde `1`/`2`, ni desde `5`/`6`/`8`/`10`/`12`).
 
 **Algoritmo:**
 1. **Línea base fresca**: al arrancar (con el motor ya operando),
@@ -2793,7 +3385,7 @@ desde `1`/`2`/`10`, ni desde `5`/`6`/`7`/`8`/`9`).
    frena ya en vez de aplicar cualquier resultado automático).
 8. **Al completar** (éxito o error): el servo vuelve a
    `SERVO_PULSO_MIN` (el nuevo si se encontró, el de entrada si no), y
-   `CONTROL_HABILITADO` vuelve solo a `0`. Si se aplicó un valor nuevo,
+   `CALIB` vuelve solo a `0`. Si se aplicó un valor nuevo,
    dispara el mismo "ACK" por LoRa que la calibración de ralentí
    (`CalibFlash_ForzarReporte()`, sección 10).
 
@@ -2862,14 +3454,14 @@ Cada paso depende de que el/los anteriores ya estén bien, así que no
 conviene saltarlos ni cambiar el orden.
 
 **Fase A — motor apagado (mecánico):**
-1. `CONTROL_HABILITADO=1` — verificación visual manual de mínimos y
+1. `CALIB=1` — verificación visual manual de mínimos y
    máximos (sección 2.4/4.4). Sirve también como chequeo de seguridad:
    si a simple vista el servo ya se ve "abierto" más de la cuenta en
    la posición de reposo, es señal de que el `SERVO_PULSO_MIN` heredado
    (de otra máquina o calibración anterior) no aplica a este montaje
    mecánico nuevo, y hay que ajustarlo a mano antes de automatizar nada
    con el modo `4`.
-2. `CONTROL_HABILITADO=2` — barrido automático sin restricción, para
+2. `CALIB=2` — barrido automático sin restricción, para
    confirmar que el servo se mueve libre en todo el rango sin
    resistencia mecánica anómala.
 
@@ -2921,13 +3513,13 @@ conviene saltarlos ni cambiar el orden.
    no hace falta recalcularlo en cada instalación si el default ya
    funciona bien.
 
-   **`CONTROL_HABILITADO=3` (agregado 2026-09-03) — calibración
+   **`CALIB=3` (agregado 2026-09-03) — calibración
    automática de `ALPHA`.** A diferencia de `SET_RATIO_AUTO`, acá no
    hay ninguna referencia externa que darle — el firmware mide su
    propio ruido, así que no necesita cargar ningún valor: se manda
    igual que los modos `4`/`7` (calibración de zona muerta y de
    ralentí, respectivamente, renumerados 2026-09-23, antes eran los
-   valores `5`/`4`, ver secciones 10/11) (`CONTROL_HABILITADO 3`, solo aceptado
+   valores `5`/`4`, ver secciones 10/11) (`CALIB 3`, solo aceptado
    viniendo de modo `0`, con o sin el motor operando — si no está
    operando, la rutina espera). Con el motor ya operando, toma ~8s de
    muestras de `RPM_instantánea` sin filtrar (cada 200ms), calcula su
@@ -2939,7 +3531,7 @@ conviene saltarlos ni cambiar el orden.
    `r = objetivo/desviación_cruda`. Se aplica y persiste directo (mismo
    `CalibFlash_SetAlphaFiltro()` que usa `ALPHA`), sin que el operador
    tenga que copiar ningún número, y al terminar vuelve sola a
-   `CONTROL_HABILITADO=0` (igual que `4`/`7`), disparando el mismo
+   `CALIB=0` (igual que `4`/`7`), disparando el mismo
    "ACK" por LoRa (`CalibFlash_ForzarReporte()`). **Techo de seguridad
    (`ALPHA_CAL_TECHO_ALPHA=0.5`, agregado 2026-09-03 tras un caso real
    en campo)**: si el ruido crudo medido en la ventana de 8s ya sale en
@@ -2960,7 +3552,7 @@ conviene saltarlos ni cambiar el orden.
    cargar/restaurar un valor ya conocido desde la base de datos sin
    tener que correr la medición de nuevo (mismo argumento que
    `SET_RATIO` vs `SET_RATIO_AUTO`). **Pendiente**: falta el bump de
-   `send_downlink.py`'s `PARAMETER_TABLE["CONTROL_HABILITADO"]["max"]`
+   `send_downlink.py`'s `PARAMETER_TABLE["CALIB"]["max"]`
    hasta `10` (mismo patrón que las subidas anteriores) y una prueba
    real en campo (por ahora solo compila limpio).
 
@@ -2983,10 +3575,10 @@ PID de presión para después, ya con carga real.
 
 **Fase C — motor encendido, SIN carga hidráulica (calibración
 automática del servo y del lazo interno):**
-5. `CONTROL_HABILITADO=4` — calibración automática de zona muerta del
+5. `CALIB=4` — calibración automática de zona muerta del
    servo (`SERVO_PULSO_MIN`, sección 11; renumerado 2026-09-23, antes
    era el valor `5`).
-6. **`CONTROL_HABILITADO=5` (opcional, diagnóstico) — mapeo de curva de
+6. **`CALIB=5` (opcional, diagnóstico) — mapeo de curva de
    ganancia.** Renumerado 2026-09-23, antes era el valor `6`. Agregado
    2026-09-03 a raíz de una discusión sobre la geometría del mecanismo
    brazo-varilla que mueve la cremallera de la bomba: el brazo del
@@ -3000,9 +3592,12 @@ automática del servo y del lazo interno):**
    para no arriesgarse a pasarse del techo de RPM de un salto grande en
    la zona de más ganancia) desde `SERVO_PULSO_MIN`, en **lazo abierto**
    (sin PID), con una espera de asentamiento de `2.5s` en cada paso,
-   registrando el par `(pulso, RPM real)` — hasta llegar a una RPM
-   techo fija (`GANANCIA_CAL_RPM_TECHO`, elegida por el usuario según lo
-   que considere seguro para su motor, no el máximo del servo) o hasta
+   registrando el par `(pulso, RPM real)` — hasta llegar a `RPM_MAX`
+   (el techo real ya configurado para esa instalación; hasta
+   2026-09-28 usaba un techo fijo propio,
+   `GANANCIA_CAL_RPM_TECHO=1500.0f`, pensado específicamente para este
+   escenario SIN CARGA — eliminado a pedido del usuario para no pedirle
+   configurar dos techos de RPM distintos, ver sección 4.4) o hasta
    `SERVO_PULSO_MAX`. Aborta si el motor se detiene a mitad del
    barrido, o si un solo paso sube la RPM más de
    `GANANCIA_CAL_SALTO_ANORMAL_RPM` de golpe (protege contra pasarse
@@ -3019,48 +3614,64 @@ automática del servo y del lazo interno):**
    `ABORTADO,motivo=motor_se_detuvo` /
    `ABORTADO,motivo=salto_rpm_anormal` /
    `ERROR,motivo=servo_pulso_max_alcanzado_sin_llegar_al_techo`.
-7. **`CONTROL_HABILITADO=6` (opcional, agregado 2026-09-23 en la
+7. **`CALIB=6` (opcional, agregado 2026-09-23 en la
    segunda renumeración) — auto-escalón del lazo INTERNO de RPM (PID#1)
-   — O el escalón manual equivalente con `MODO=3` +
-   `CONTROL_HABILITADO=10`** (ver más abajo, paso 9): cualquiera de los
-   dos deja un log `PID_TEST` para el paso siguiente. ⚠️ **Este paso es
-   INDEPENDIENTE del paso 6 (`CONTROL_HABILITADO=5`, curva de
+   — O el escalón manual equivalente con `MODO=3` (MANUAL_BANCO,
+   mandando `SET_RPM` a mano) — ver paso 9** (⚠️ actualizado
+   2026-09-29: ya no existe `CALIB=10`, ver sección 4.4):
+   cualquiera de los dos deja un log `PID_TEST` para el paso siguiente.
+   ⚠️ **Este paso es
+   INDEPENDIENTE del paso 6 (`CALIB=5`, curva de
    ganancia)** -- `=6` NO corre el barrido de ganancia de nuevo ni lo
    reemplaza, es una rutina completamente aparte (solo el escalón de
    `SET_RPM`). Hacen falta LOS DOS logs por separado (el de este paso Y
-   el del paso 6) para el paso 8 de abajo. `CONTROL_HABILITADO=6`
-   automatiza mandar el escalón: requiere `MODO=3` y el motor operando,
-   comanda `SET_RPM = RPM_MIN + 200` RPM fijo
+   el del paso 6) para el paso 8 de abajo. `CALIB=6`
+   automatiza mandar el escalón: requiere `MODO=4` y el motor operando,
+   guarda `PID_RPM_KP/KI` y los pisa a `1.0`/`0.0` fijo (agregado
+   2026-09-25 -- restaura los valores guardados al salir, por cualquier
+   motivo, sin que el operador tenga que bajarlos a mano antes ni
+   después), comanda `SET_RPM = RPM_MIN + 200` RPM fijo
    (`INTERNO_CAL_ESCALON_RPM`) y lo deja correr una ventana FIJA de 60s
    (`INTERNO_CAL_DURACION_MS`), logueando `PID_TEST` con la misma
    cadencia de 5Hz que la sesión manual. Se aborta y resetea `SET_RPM`
-   a `0.0` si el motor se detiene o `MODO` deja de ser `3`, y vuelve
-   solo a `CONTROL_HABILITADO=0` al terminar o abortar. Log:
+   a `0.0` si el motor se detiene o `MODO` deja de ser `4`, y vuelve
+   solo a `CALIB=0` al terminar o abortar. Log:
    `INTERNO_CAL,INICIO,...` / `INTERNO_CAL,ESCALON,...` /
    `INTERNO_CAL,COMPLETO,duracion_s=...` /
    `INTERNO_CAL,ABORTADO,motivo=...`. Ver sección 4.4/9.
 8. ⚠️ **Este paso se corre en tu computadora, no en el TID** -- el
    firmware ya hizo su parte (pasos 6 y 7), solo generó los dos logs
    por serial. Acá los combinás vos: correr `pid_tuning.py auto --loop
-   interno --kp <Kp usada durante el escalón> --log <PID_TEST del paso
-   7> --ganancia-log <GANANCIA_CAL del paso 6>` para obtener una
-   recomendación de `Kp`/`Ki` — ver sección 9 ("Automatizando el
-   escalón") para el detalle de por qué conviene preferir la `K` del
-   mapeo de ganancia (paso 6) sobre la que sale de identificar el
-   escalón en lazo cerrado.
-9. `MODO=3` (manual/banco) + `CONTROL_HABILITADO=10` (renumerado
-   2026-09-23 DOS VECES el mismo día -- primero de `7` a `9`, después
-   de `9` a `10`) — cargar y confirmar `Kp`/`Ki` (sección 9), mandando
-   `SET_RPM` a mano y observando la respuesta real (con o sin haber
-   usado el paso 7/8 antes, este paso sigue siendo obligatorio: la
-   recomendación de `auto` se confirma en el motor real antes de
-   confiar en ella). `MODO=3` es imprescindible acá (no solo
-   `CONTROL_HABILITADO=10`) -- sin él, `setpointRpmCrudo` nunca sale de
-   `0` y el PID queda "activado" sin moverse (ver sección 4.3). Con
-   esto el lazo interno queda validado, todavía SIN carga hidráulica
-   conectada -- sin importar si el equipo va a operar después por
-   presión local o remota, es el mismo lazo en los dos casos, no
-   cambia.
+   interno --log <PID_TEST del paso 7> --ganancia-log <GANANCIA_CAL del
+   paso 6>` para obtener una recomendación de `Kp`/`Ki` — ver sección 9
+   ("Automatizando el escalón") para el detalle de por qué conviene
+   preferir la `K` del mapeo de ganancia (paso 6) sobre la que sale de
+   identificar el escalón en lazo cerrado. **`--kp` ya no hace falta
+   pasarlo** (agregado 2026-09-25): default `1.0` para `--loop interno`,
+   porque `CALIB=6` siempre se hace con `PID_RPM_KP=1`/`PID_RPM_KI=0` fijo -- el
+   propio firmware guarda lo que hubiera en `PID_RPM_KP/KI` al entrar a
+   `=6`, los pisa a `1.0`/`0.0` durante la prueba, y restaura los
+   valores guardados al salir (agregado 2026-09-25, ver paso 7 y
+   sección 4.4 — antes esto era una convención procedimental, ahora es
+   automático) -- solo especificalo a mano si alguna vez usás un valor
+   distinto de `1.0` para el escalón.
+9. ⚠️ **Actualizado 2026-09-29** (antes decía `MODO=4`+`CALIB=10`
+   -- eso nunca funcionó del todo bien, porque `SET_RPM` exige
+   `MODO=3` exacto para aceptarse, no `MODO=4`, ver sección 4.3):
+   cargar `PID_RPM_KP`/`PID_RPM_KI` (sección 9) con `MODO=CALIBRACIÓN` +
+   `CALIB=0` (ningún `CALIB` activo, ver sección 4.4), y
+   LUEGO cambiar a `MODO=3` (MANUAL_BANCO) para mandar `SET_RPM` a
+   mano y observar la respuesta real (con o sin haber usado el paso
+   7/8 antes, este paso sigue siendo obligatorio: la recomendación de
+   `auto` se confirma en el motor real antes de confiar en ella). Si
+   hace falta ajustar la ganancia de nuevo tras observar, volver a
+   `MODO=4`+`CALIB=0` para cambiarla y otra vez a `MODO=3` para
+   reprobarla -- ya no se puede ajustar en caliente sin salir de
+   `MODO=3` (a diferencia de como funcionaba con el extinto
+   `CALIB=10`). Con esto el lazo interno queda validado,
+   todavía SIN carga hidráulica conectada -- sin importar si el
+   equipo va a operar después por presión local o remota, es el mismo
+   lazo en los dos casos, no cambia.
 
 **— Conectar la tubería/aspersor físicamente —**
 10. Recién acá se conecta la carga hidráulica real, UNA sola vez. Todo
@@ -3070,19 +3681,18 @@ automática del servo y del lazo interno):**
 **Fase D — motor encendido, CON carga hidráulica (ralentí real y
 sintonización de los lazos de presión, `MODO=1`/`MODO=2`, agregado
 2026-09-14):**
-11. `CONTROL_HABILITADO=7` — calibración automática de ralentí
+11. `CALIB=8` — calibración automática de ralentí
     (`RPM_MIN`, sección 10; renumerado 2026-09-23, antes era el valor
-    `4`). Se hace recién ACÁ, y no antes junto con la zona muerta,
+    `4`, y de nuevo 2026-09-29, antes era el valor `7`). Se hace recién ACÁ, y no antes junto con la zona muerta,
     porque el ralentí real de un motor diesel depende de si hay carga
     conectada (confirmado en campo) -- a diferencia de la zona muerta y
     la curva de ganancia (Fase C), que no dependen de eso.
 
-Seguir en `CONTROL_HABILITADO=10` (sigue siendo la misma sesión de
-sintonización):
-
 12. ⚠️ **Primer llenado manual — SOLO la primera vez que se presuriza
     ESA tubería en ESA instalación** (agregado 2026-09-24, ver también
-    la nota de riesgo del paso 13): con `MODO=3`, subir `SET_RPM` a
+    la nota de riesgo del paso 14): con `MODO=3` (MANUAL_BANCO --
+    corregido 2026-09-29, `SET_RPM` exige `MODO=3` exacto, no `MODO=4`,
+    ver sección 4.3), subir `SET_RPM` a
     mano en incrementos chicos, esperando y observando/escuchando la
     tubería entre cada uno, hasta confirmar la línea llena de agua
     (sin aire atrapado) y una lectura de presión estable en `RPM_MIN`.
@@ -3093,92 +3703,134 @@ sintonización):
     firmware no tiene forma de detectar "hay aire en la línea" por sí
     solo. En una recalibración posterior de una máquina que ya operó
     (tubería ya llena de antes), este paso se puede saltar.
-13. **`CONTROL_HABILITADO=11` (opcional, agregado 2026-09-24) —
-    barrido de ganancia en LAZO ABIERTO del PID#2 (presión local).**
-    Reemplaza a la caracterización manual que tenía este paso en
-    versiones anteriores del README -- equivalente de `CONTROL_HABILITADO=5`
-    (curva de ganancia del PID#1, paso 6) pero para la relación
-    RPM→presión: en `MODO=3` (sin `presion_pid.c` corriendo), promedia
-    la presión base en ralentí, y sube `SET_RPM` en pasos chicos
-    **rampeados** (no un salto -- el asentamiento de presión por paso
-    NO hace lento el cambio de RPM en sí, así que la rampa es
-    necesaria aparte, ver `main.c`) hasta un techo de `presión base +
-    10 PSI` o hasta el mismo techo de RPM que ya usa el paso 6, lo que
-    ocurra primero, logueando `PRESION_GANANCIA_CAL,PASO,rpm=...,
-    psi=...,salto=...`. **Asume la tubería ya llena/presurizada
-    (paso 12 ya hecho)** -- no es una rutina de primer llenado. Se
-    aborta y resetea `SET_RPM` a `0.0` si el motor se detiene, si
-    `MODO` deja de ser `3`, o si un solo paso sube la presión de forma
-    anormal, y vuelve sola a `CONTROL_HABILITADO=0` al completar o
-    abortar. Rutina estimada en ~13-18 minutos (variable según la `K`
-    real de esa instalación). Log: `PRESION_GANANCIA_CAL,INICIO,...` /
-    `PRESION_GANANCIA_CAL,BASE,...` / `PRESION_GANANCIA_CAL,PASO,...` /
-    `PRESION_GANANCIA_CAL,COMPLETO,...` /
-    `PRESION_GANANCIA_CAL,ABORTADO,...`. Solo mide y loguea -- el
-    cálculo de ganancias sigue siendo con `pid_tuning.py auto --loop
-    presion --ganancia-log <este log>` (ver sección 9), y alimenta el
-    paso 15 de abajo.
-14. Definir y mandar `PRESION_OBJETIVO` (ID 23) — el PSI que se quiere
-    sostener en operación.
-15. Mandar `PRESION_PID_KP`/`PRESION_PID_KI` (IDs 28/29) con valores
-    conservadores (arrancan en `0`, sin efecto -- o la recomendación
-    del paso 13 si ya se corrió `pid_tuning.py auto --loop presion` con
-    ese log) y pasar a `MODO=1` (todavía con `CONTROL_HABILITADO=10`)
-    — observar si el lazo externo persigue `PRESION_OBJETIVO` sin
-    oscilar, subiendo las ganancias de a poco si se arrancó en `0`.
-    Mismo criterio de sintonización que el paso 9, ver sección 4.3/9.
-16. **`CONTROL_HABILITADO=8` (opcional, agregado 2026-09-23, renumerado
-    en la segunda renumeración -- antes era el valor `7`) —
+13. Definir y mandar `PRESION_OBJETIVO_LOCAL` (ID 23) — el PSI que se quiere
+    sostener en operación — y `TIEMPO_LLENADO_S` (ID 33) — cuántos
+    segundos tarda un llenado seguro de esta tubería, según ya lo sabe
+    el operador. **Ambos son obligatorios ANTES del paso 14** (movido
+    2026-09-28): `CALIB=9` ya no caracteriza a ciegas
+    hasta un techo fijo -- usa estos dos valores para calcular su
+    propio ritmo máximo seguro de subida de presión, así que necesita
+    conocerlos de antemano.
+14. **`CALIB=9` (opcional, agregado 2026-09-24, diseño
+    definitivo 2026-09-28) — mapeo de ganancia en LAZO ABIERTO del
+    PID#2 (presión local).** Reemplaza a la caracterización manual que
+    tenía este paso en versiones anteriores del README -- equivalente
+    de `CALIB=5` (curva de ganancia del PID#1, paso 6)
+    pero para la relación RPM→presión: en `MODO=4` (sin
+    `presion_pid.c`/`Kp`/`Ki` corriendo), mide la presión base real en
+    `RPM_MIN`, y sube `SET_RPM` en una rampa continua PAUSADA por la
+    presión real (nunca más rápido que el ritmo seguro que ya definen
+    `PRESION_OBJETIVO_LOCAL`/`TIEMPO_LLENADO_S` del paso 13 -- ver sección 9
+    para el detalle del freno), logueando `PRESION_GANANCIA_CAL,PASO,
+    rpm=...,psi=...,salto=...` cada vez que la presión real avanza
+    1 PSI. **Asume la tubería ya llena/presurizada (paso 12 ya
+    hecho)** -- no es una rutina de primer llenado. Termina al llegar
+    a `PRESION_OBJETIVO_LOCAL`, al llegar a `RPM_MAX_CARGA` sin alcanzarlo
+    (respaldo de seguridad), o por timeout de último recurso; se
+    aborta y resetea `SET_RPM` a `0.0` si el motor se detiene, `MODO`
+    cambia, o el sensor de presión deja de ser válido, y vuelve sola a
+    `CALIB=0` al terminar (`CALIB=9`). La duración real coincide con
+    lo que el operador ya dijo que tarda el llenado (`TIEMPO_LLENADO_S`),
+    o termina antes si la presión objetivo se alcanza con menos RPM.
+    Log completo: ver sección 9. Solo mide y loguea -- el cálculo de
+    ganancias sigue siendo con `pid_tuning.py auto --loop presion
+    --ganancia-log <este log>` (ver sección 9), y alimenta el paso 15
+    de abajo.
+15. ⚠️ Actualizado 2026-09-29: con `MODO=CALIBRACIÓN` + `CALIB=0`
+    (sección 4.4), mandar `PID_PSI_KP`/`PID_PSI_KI` (IDs 28/29)
+    con valores conservadores (arrancan en `0`, sin efecto -- o la
+    recomendación del paso 14 si ya se corrió `pid_tuning.py auto
+    --loop presion` con ese log), y LUEGO pasar a `MODO=1` para
+    observar si el lazo externo persigue `PRESION_OBJETIVO_LOCAL` sin
+    oscilar, subiendo las ganancias de a poco si se arrancó en `0` (para
+    subir de nuevo, volver a `MODO=4`+`CALIB=0`, ajustar, y otra vez a
+    `MODO=1` para reprobar). Mismo criterio de sintonización que el
+    paso 9, ver sección 4.3/9.
+16. **`CALIB=10` (opcional, agregado 2026-09-23, renumerado
+    en la segunda renumeración -- antes era el valor `7`, y de nuevo
+    2026-09-29, antes era el valor `8`) —
     auto-escalón del lazo de presión LOCAL.** Alternativa/complemento a
-    repetir el paso 15 a mano: con `MODO=1` ya puesto (paso anterior) y
-    el motor operando, automatiza mandar un escalón fijo de
-    `PRESION_OBJETIVO` (+`PRESION_CAL_ESCALON_PSI`, 5 PSI) y lo deja
-    correr una ventana fija de `PRESION_CAL_DURACION_MS` (10 minutos —
-    de sobra frente al `τ` real conocido de este lazo, 60-120s),
-    logueando `PRESION_PID_TEST` con la misma cadencia de 5Hz que en el
-    paso 15. Si se pide antes de que `MODO=1` esté puesto o el motor
-    esté operando, se queda esperando (no es un error) — solo se puede
-    pedir viniendo de `CONTROL_HABILITADO=0`, no directo desde otro
-    modo de calibración. Al terminar (o si el motor se detiene o
-    `MODO` cambia a mitad del escalón) vuelve solo a
-    `CONTROL_HABILITADO=0` y restaura `PRESION_OBJETIVO` a su valor
+    repetir el paso 15 a mano. ⚠️ **A diferencia del paso 15 (que corre
+    con `MODO=1` real), `CALIB=10` exige `MODO=4` (CALIBRACIÓN) para
+    aceptarse -- agregado 2026-09-24, decisión explícita del usuario:
+    ningún `CALIB` corre con ningún otro `MODO`, sin
+    excepciones.** Después del paso 15, pasar `MODO` de `1` a `4`
+    antes de mandar `CALIB=10` -- el lazo de presión REAL sigue corriendo igual mientras tanto
+    (`main.c` trata `MODO=4`+`CALIB=10` idéntico a `MODO=1` real para todo
+    lo que importa: init del PID, rampa de llenado, falla de sensor,
+    supervisor). Con `MODO=4` y el motor operando, automatiza mandar un
+    escalón fijo de `PRESION_OBJETIVO_LOCAL` (+`PRESION_CAL_ESCALON_PSI`, 5
+    PSI) y lo deja correr una ventana fija de `PRESION_CAL_DURACION_MS`
+    (3 minutos, bajada de 10min el 2026-09-28 tras identificar el
+    modelo real con `pid_tuning.py identify-presion` sobre un log de
+    campo real: el escalón real se asienta en `L=11.4s` + ~4-5 veces
+    `tau_cl=3.2s` ≈ 25-30s, no los `60-120s` que se habían asumido
+    antes de tener ese dato -- 3min sigue dando ~6x de margen sobre
+    ese asentamiento real), logueando `PRESION_PID_TEST` con la misma cadencia de 5Hz
+    que en el paso 15. Si se pide antes de que `MODO=4` esté puesto o el
+    motor esté operando, se queda esperando (no es un error) — solo se
+    puede pedir viniendo de `CALIB=0`, no directo desde
+    otro modo de calibración. Al terminar (o si el motor se detiene o
+    `MODO` deja de ser `4` a mitad del escalón) vuelve solo a
+    `CALIB=0` y restaura `PRESION_OBJETIVO_LOCAL` a su valor
     anterior. Log: `PRESION_CAL,INICIO,...` / `ESCALON,objetivo_base=
     <psi>,objetivo_nuevo=<psi>,duracion_s=<s>` / `COMPLETO,duracion_s=
     <s>` / `ABORTADO,motivo=motor_se_detuvo|modo_cambio`. **Solo
     automatiza mandar el escalón y esperar** — el cálculo de
-    `PRESION_PID_KP/KI` a partir del `PRESION_PID_TEST` resultante
+    `PID_PSI_KP/KI` a partir del `PRESION_PID_TEST` resultante
     sigue siendo con `tools/pid_tuning/pid_tuning.py` (`auto --loop
-    presion`, opcionalmente con `--ganancia-log <log del paso 13>`,
+    presion`, opcionalmente con `--ganancia-log <log del paso 14>`,
     ver sección 9) y la decisión de aplicar esas ganancias sigue siendo
     del operador, no es un lazo de auto-tuning cerrado. Siguiente paso:
     correr `pid_tuning.py auto` sobre el log capturado y, si las
     ganancias sugeridas se ven razonables, volver al paso 15 para
     cargarlas y confirmar en campo.
-17. Si este nodo también va a operar en `MODO=2` (gobernado por un
+17. **`CALIB=11` (opcional, agregado 2026-09-25, ver sección 4.4/9) —
+    validación de ganancias reales del lazo de presión LOCAL.**
+    Equivalente de presión de `CALIB=7` (validación de ganancias reales
+    del lazo INTERNO, sección 9) -- requiere `CALIB=9` (paso 14) y
+    `CALIB=10` (paso 16) ya corridos, y `PID_PSI_KP/KI` ya cargados
+    (paso 15). A diferencia de `CALIB=10`, NO fuerza `PID_PSI_KI=0`
+    -- usa la ganancia YA cargada en flash, la recomendada por `auto`/
+    `sugerir-kp-presion` y confirmada por el operador. Mismo escalón
+    fijo de `PRESION_OBJETIVO_LOCAL` y mismo log `PRESION_PID_TEST` que
+    `CALIB=10`, pero con una ventana de 4 minutos (en vez de 3) y un
+    watchdog de oscilación sostenida en vivo (mismo criterio que su
+    equivalente del lazo interno) -- aborta de inmediato
+    (`SET_RPM=0.0`... `PRESION_OBJETIVO_LOCAL` restaurado) si detecta
+    oscilación sostenida. El log resultante se le pasa directo a
+    `pid_tuning.py compare --loop presion` (ver sección 9) para
+    confirmar en campo el % de parecido contra el modelo simulado, en
+    vez de "dejalo asentar 4 minutos y mirá cómo se ve" a mano. Al
+    terminar (o abortar) vuelve solo a `CALIB=0` y restaura
+    `PRESION_OBJETIVO_LOCAL` a su valor anterior, igual que `CALIB=10`.
+18. Si este nodo también va a operar en `MODO=2` (gobernado por un
     aspersor remoto), definir primero `PRESION_OBJETIVO_REMOTO` (ID 30
     -- ahora es el setpoint real del PID, no opcional) y calibrar ahí
-    mismo `PRESION_REMOTO_PID_KP`/`PRESION_REMOTO_PID_KI` (IDs 26/27)
-    de la misma forma, siempre con `CONTROL_HABILITADO=10`. Mismo
+    mismo `PID_ASP_KP`/`PID_ASP_KI` (IDs 26/27)
+    de la misma forma, siempre con `MODO=CALIBRACIÓN` +
+    `CALIB=0` (ver sección 4.4). Mismo
     criterio de sintonización que el paso 15 (empezar conservador,
     subir de a poco observando la respuesta real).
-18. **`CONTROL_HABILITADO=9` (opcional, agregado 2026-09-23, renumerado
-    en la segunda renumeración -- antes era el valor `8`) —
+19. **`CALIB=12` (opcional, agregado 2026-09-23, renumerado
+    en la segunda renumeración -- antes era el valor `8`, y de nuevo
+    2026-09-29, antes era el valor `9`) —
     auto-escalón del lazo REMOTO.** Mismo espíritu que el paso 16, pero
-    para el lazo remoto: se prueba en banco con `MODO=3`
-    (MANUAL_BANCO), no en `MODO=2`, porque para identificar la planta
+    para el lazo remoto: se prueba en banco con `MODO=4`
+    (CALIBRACIÓN), no en `MODO=2`, porque para identificar la planta
     hace falta mandar el escalón de RPM directo, sin pasar por el PID
-    de presión todavía sin calibrar. Con `MODO=3` ya puesto (o
+    de presión todavía sin calibrar. Con `MODO=4` ya puesto (o
     esperando si no) y el motor operando, automatiza mandar `SET_RPM`
     = `RPM_MIN` + `REMOTO_CAL_ESCALON_RPM` (200 RPM fijo) y loguea
     `REMOTO_PID_TEST` (evento-driven, una línea por cada reporte nuevo
-    de `PRESION` del aspersor remoto). Termina al acumular
+    de `PRESION_REMOTO` del aspersor remoto). Termina al acumular
     `REMOTO_CAL_REPORTES_OBJETIVO` (15) reportes nuevos tras el
     escalón, o al vencer `REMOTO_CAL_TIMEOUT_MS` (60 minutos) de
     seguridad, lo que ocurra primero -- no puede usar una ventana fija
     como el paso 16 porque el aspersor reporta de forma muy irregular
     (20s a 20-25min según su propio estado, sección 4.3). Al terminar
     (o abortar por motor detenido/cambio de `MODO`) vuelve solo a
-    `CONTROL_HABILITADO=0` y resetea `SET_RPM` a `0.0`. Log:
+    `CALIB=0` y resetea `SET_RPM` a `0.0`. Log:
     `REMOTO_CAL,INICIO,...` / `ESCALON,set_rpm_base=<rpm>,
     set_rpm_nuevo=<rpm>,reportes_objetivo=<n>,timeout_s=<s>` /
     `REPORTE,n=<n>,presion=<psi>` / `COMPLETO,motivo=
@@ -3188,15 +3840,15 @@ sintonización):
     de ganancias sigue siendo con `pid_tuning.py` (`auto --loop
     remoto`, usando `identify-remoto` para la identificación en lazo
     abierto, ver sección 9) y la aplicación sigue siendo manual/con
-    confirmación en campo. Siguiente paso: volver al paso 17 para
+    confirmación en campo. Siguiente paso: volver al paso 18 para
     cargar las ganancias sugeridas y confirmar.
 
 **Fase F — entrar a operación:**
-19. `CONTROL_HABILITADO=0` — cierra la sesión de sintonización,
-    bloquea de nuevo todas las ganancias (`PID_KP/KI/KD`,
-    `PRESION_PID_KP/KI`, `PRESION_REMOTO_PID_KP/KI`) contra
+20. `CALIB=0` — cierra la sesión de sintonización,
+    bloquea de nuevo todas las ganancias (`PID_RPM_KP/KI/KD`,
+    `PID_PSI_KP/KI`, `PID_ASP_KP/KI`) contra
     cambios accidentales en operación normal.
-20. `MODO` al valor que corresponda para este equipo en producción
+21. `MODO` al valor que corresponda para este equipo en producción
     (`1` si gobierna por su sensor local, `2` si lo gobierna el
     aspersor remoto). Desde acá el sistema queda operando solo, sin
     más intervención del operador.
@@ -3207,13 +3859,13 @@ Una vez hecha la puesta en marcha de arriba, este es el flujo que se
 repite en cada arranque normal -- la calibración de la sección 12 no
 se repite en cada operación, típicamente es anual o cuando haga falta
 recalibrar algo puntual (ver sección 4.4/9). Con
-`CONTROL_HABILITADO=0` siempre, **todas las ganancias quedan
+`CALIB=0` siempre, **todas las ganancias quedan
 bloqueadas** (`APPLY_ERROR` si se intenta cambiarlas) -- protegidas
 justamente para que nadie las toque sin querer en operación normal.
 El único parámetro que se toca día a día es `MODO`:
 
 ```
-CONTROL_HABILITADO = 0 siempre (modo de calibración, ni se toca)
+CALIB = 0 siempre (modo de calibración, ni se toca)
 
 MODO=0 (ralentí)   ──┬──► MODO=1 (presión local): lazo en cascada
   estado de reposo/   │    corriendo solo -- presion_pid.c calcula
@@ -3223,7 +3875,7 @@ MODO=0 (ralentí)   ──┬──► MODO=1 (presión local): lazo en cascada
                         ├──► MODO=2 (remoto/aspersor): PID en cascada
                         │    evento-driven ya calibrado corriendo solo,
                         │    con watchdog de TIMEOUT_SIN_COMANDO_S si
-                        │    deja de llegar PRESION fresca (sección 4.3).
+                        │    deja de llegar PRESION_REMOTO fresca (sección 4.3).
                         │
                         └──► MODO=3 (manual/banco): uso operativo
                              puntual, ej. trasladar manguera/aspersor
@@ -3231,20 +3883,48 @@ MODO=0 (ralentí)   ──┬──► MODO=1 (presión local): lazo en cascada
                              y después regresa a 0, 1 o 2.
 ```
 
+⚠️ **`MODO=4` (CALIBRACIÓN) queda A PROPÓSITO fuera de este diagrama** --
+no es parte del día a día, es exclusivo de la sección 12 (puesta en
+marcha/recalibración anual, con `CALIB != 0`). Un operador
+de campo nunca debería necesitar tocarlo en operación normal.
+
 El operador (o el switch físico selector, cuando exista -- sección 8)
-solo toca `MODO`, nunca `CONTROL_HABILITADO` ni ninguna ganancia. Es
-la separación de fondo entre los dos parámetros: `CONTROL_HABILITADO`
+solo toca `MODO`, nunca `CALIB` ni ninguna ganancia. Es
+la separación de fondo entre los dos parámetros: `CALIB`
 es el modo de banco/ingeniería (esta sección 12, uso esporádico);
 `MODO` es el selector operativo del día a día. ⚠️ Las reglas exactas
 de transición entre valores de `MODO` (ej. si hace falta pasar por `0`
 antes de saltar entre 1/2/3) todavía están pendientes de definir, ver
 sección 4.3/8 — hoy cualquier salto directo se acepta sin restricción.
 
+⚠️ **`MODO` se fuerza solo a `0` (RALENTÍ) cada vez que el motor se
+detiene** (agregado 2026-09-24, decisión explícita del usuario tras un
+caso real de campo: el motor se queda sin diésel con `MODO=1`/`2`
+puesto, tarda horas en reanudarse, y mientras tanto la tubería se
+vacía/entra aire). Antes de este cambio, `MODO` persistía en RAM
+mientras el TID no se reiniciara -- el control se retomaba solo al
+reencender el motor, sin importar cuánto hubiera durado la parada. El
+riesgo: la rampa de llenado (`TASA_LLENADO_PSI_S`) y `PresionPid_Init()`
+solo se rearman con un **flanco de `MODO`** (ver `presionLocalActivoAhora`/
+`Antes` en `main.c`), no con un flanco del motor -- si `MODO` nunca dejó
+de ser `1` durante la parada, al reencender el PID arranca "en caliente"
+contra una lectura de presión ya vieja/irreal y puede pedir RPM alta de
+golpe, el mismo riesgo de golpe de ariete que `CALIB=9` evita durante
+calibración, pero en operación normal y sin ninguna protección
+corriendo. Con este forzado, **cualquier apagado del motor** (sin
+diésel, fin de jornada, lo que sea) exige que el operador confirme
+`MODO=1`/`2` a mano de nuevo al reencender -- se prioriza la seguridad
+por sobre la comodidad de que el control se reanude solo. El switch
+físico selector (cuando exista) tendría que tener esto en cuenta: un
+selector que ya esté en la posición "1" no basta para rearmar el
+control después de un apagado, haría falta que el operador lo mueva
+(aunque sea a `0` y de vuelta a `1`) o un mecanismo equivalente.
+
 **`SERVO_PULSO_MAX` queda fuera de esta secuencia automática a
 propósito**: a diferencia del mínimo, no hay forma segura de detectar
 "llegó al tope mecánico y generó resistencia" solo mirando RPM — haría
 falta retroalimentación de corriente/torque del servo, que el hardware
-actual no tiene. Se sigue calibrando a mano (`CONTROL_HABILITADO=1`).
+actual no tiene. Se sigue calibrando a mano (`CALIB=1`).
 Si en el futuro se agrega sensado de corriente al servo, ahí sí valdría
 la pena automatizarlo.
 

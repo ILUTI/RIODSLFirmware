@@ -19,7 +19,7 @@
  * tools/pid_tuning/pid_tuning.py identify contra datos reales, no
  * asumir.
  *
- * Ganancias propias (PRESION_PID_KP/KI, independientes de PID_KP/KI del
+ * Ganancias propias (PID_PSI_KP/KI, independientes de PID_RPM_KP/KI del
  * lazo interno) -- ver calibracion_flash.h. Arrancan en 0/0 (sin
  * calibrar) hasta que se caracterice la relacion presion<->RPM real del
  * sistema hidraulico, mismo metodo que se uso para el mecanismo directo
@@ -56,7 +56,7 @@ void PresionPid_Init(void);
  * objetivo (error muy negativo), este lazo debe poder pedir "sin
  * comandar" y dejar que controlSolicitado caiga a ralenti natural.
  *
- * @param setpointPresionPsi  Presion objetivo, ej. CalibFlash_GetPresionObjetivo().
+ * @param setpointPresionPsi  Presion objetivo, ej. CalibFlash_GetPresionObjetivoLocal().
  * @param presionMedidaPsi    Presion real medida, ej. PresionV_GetPresionPsi().
  * @return Setpoint de RPM a pasarle al lazo interno (PID_CalcularSalidaUs).
  */

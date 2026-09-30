@@ -28,8 +28,8 @@ uint16_t PID_CalcularSalidaUs(float setpointRpm, float rpmMedida)
 
     float error = setpointRpm - rpmMedida;
 
-    float kp = CalibFlash_GetPidKp();
-    float ki = CalibFlash_GetPidKi();
+    float kp = CalibFlash_GetPidRpmKp();
+    float ki = CalibFlash_GetPidRpmKi();
 
     uint16_t minimo = CalibFlash_GetServoPulsoMinUs();
     uint16_t maximo = CalibFlash_GetServoPulsoMaxUs();

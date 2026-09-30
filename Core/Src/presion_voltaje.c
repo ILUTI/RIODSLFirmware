@@ -71,7 +71,7 @@ static void ProcesarTanda(void)
         }
 
         uint32_t ahora = HAL_GetTick();
-        if (!s_primeraTandaProcesada) {
+        if (!s_primeraTandaProcesada || !PRESIONV_FILTROS_ACTIVOS) {
             /* Primera tanda desde el arranque -- no hay referencia previa
              * contra la cual limitar, se acepta tal cual (mismo criterio
              * que PID_Init()/PresionPid_Init() con su primer dt). */

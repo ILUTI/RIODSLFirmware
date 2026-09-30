@@ -9,8 +9,8 @@
  *
  * Categorías de parámetros:
  *   - PERSISTENTES: se guardan en flash, sobreviven resets. Ej.
- *     SET_RATIO, RPM_MAX, PID_KP, etc.
- *   - NO PERSISTENTES (solo RAM): SET_RPM y PRESION -- llegan con
+ *     SET_RATIO, RPM_MAX, PID_RPM_KP, etc.
+ *   - NO PERSISTENTES (solo RAM): SET_RPM y PRESION_REMOTO -- llegan con
  *     frecuencia y no vale la pena desgastar flash con ellos.
  *   - COMANDOS: RESTAURAR_DEFAULTS, FORZAR_REPORTE, RESET_REMOTO --
  *     no son valores que se guardan, son acciones que se ejecutan al
@@ -64,8 +64,8 @@ extern "C" {
 #define CALIB_ID_SET_RPM                          3U
 #define CALIB_ID_RPM_MAX                          4U
 #define CALIB_ID_RPM_MIN                          5U
-#define CALIB_ID_PID_KP                           6U
-#define CALIB_ID_PID_KI                           7U
+#define CALIB_ID_PID_RPM_KP                       6U
+#define CALIB_ID_PID_RPM_KI                       7U
 /* ID 8 era PID_KD (termino derivativo del lazo interno RPM->servo) --
  * ELIMINADO 2026-09-23, decision explicita del usuario: confirmado en
  * campo que Kd=0 funciona bien (README seccion 9), sin indicio de que
@@ -76,14 +76,14 @@ extern "C" {
  * para no dejar un hueco bajo en la numeracion.
  *
  * TASA_LLENADO_PSI_S: tasa de subida (PSI/segundo) de la RAMPA DE
- * LLENADO de MODO=1. En vez de saltar directo a PRESION_OBJETIVO al
+ * LLENADO de MODO=1. En vez de saltar directo a PRESION_OBJETIVO_LOCAL al
  * entrar a MODO=1, el setpoint que recibe presion_pid.c sube
  * gradualmente desde la presion medida AL MOMENTO DE ENTRAR (no desde
  * un valor fijo asumido -- si la tuberia ya estaba parcialmente llena
  * de una sesion anterior, tarda menos sola, sin logica especial) hasta
- * PRESION_OBJETIVO, a esta tasa. Pensada para no forzar la
+ * PRESION_OBJETIVO_LOCAL, a esta tasa. Pensada para no forzar la
  * tuberia/purgar aire de golpe. No hace falta una bandera de "fase"
- * separada: el setpoint rampa es min(PRESION_OBJETIVO, presion_inicio +
+ * separada: el setpoint rampa es min(PRESION_OBJETIVO_LOCAL, presion_inicio +
  * tasa*segundos) -- en cuanto la rampa alcanza el objetivo final, se
  * queda pegada ahi sola (el min() la recorta), asi que "en rampa" vs
  * "estable" es implicito, no un estado explicito. Default 0.0f = "sin
@@ -95,17 +95,17 @@ extern "C" {
 #define CALIB_ID_SERVO_PULSO_MAX                  10U
 #define CALIB_ID_TIMEOUT_SIN_COMANDO_S             11U
 #define CALIB_ID_TASA_MAX_CAMBIO_RPM_S             12U
-#define CALIB_ID_CONTROL_HABILITADO                13U
+#define CALIB_ID_CALIB                             13U
 #define CALIB_ID_INTERVALO_ENVIO_OPERATIVO_S       14U
 #define CALIB_ID_INTERVALO_ENVIO_STANDBY_S         15U
 #define CALIB_ID_MODO                              16U
-#define CALIB_ID_PRESION                           17U
+#define CALIB_ID_PRESION_REMOTO                    17U
 #define CALIB_ID_NODE_ID                           18U
 #define CALIB_ID_RESTAURAR_DEFAULTS                19U
 #define CALIB_ID_FORZAR_REPORTE                    20U
 #define CALIB_ID_HISTERESIS_MODO_S                 21U
 #define CALIB_ID_RESET_REMOTO                      22U
-#define CALIB_ID_PRESION_OBJETIVO                  23U
+#define CALIB_ID_PRESION_OBJETIVO_LOCAL            23U
 #define CALIB_ID_TASA_MAX_CAMBIO_RPM_LLENADO_S     24U
 #define CALIB_ID_SET_RATIO_AUTO                   25U
 /* IDs 26-29 quedaron libres al quitar la correccion geometrica del
@@ -129,20 +129,20 @@ extern "C" {
  * falta coordinar migracion con nodos en campo -- pero si esto cambia,
  * verificar que ningun nodo en campo siga mandando 26/27 con el
  * significado viejo (GANANCIA_RPM/OFFSET_RPM) antes de reflashear. */
-#define CALIB_ID_PRESION_REMOTO_PID_KP              26U
-#define CALIB_ID_PRESION_REMOTO_PID_KI              27U
-#define CALIB_ID_PRESION_PID_KP                    28U
-#define CALIB_ID_PRESION_PID_KI                    29U
+#define CALIB_ID_PID_ASP_KP                         26U
+#define CALIB_ID_PID_ASP_KI                         27U
+#define CALIB_ID_PID_PSI_KP                        28U
+#define CALIB_ID_PID_PSI_KI                        29U
 
 /* ID 30 quedo libre por la misma razon que 26-29 arriba (antes tambien
  * fue "presion", significado distinto, ver nota de arriba) -- reasignado
  * 2026-09-23 a PRESION_OBJETIVO_REMOTO: el valor de presion que SE
  * ESPERA que reporte el aspersor remoto en MODO=2, configurado en ESTE
- * TID (no confundir con PRESION, ID 17, que es la lectura real que
+ * TID (no confundir con PRESION_REMOTO, ID 17, que es la lectura real que
  * manda el aspersor por downlink).
  *
  * ⚠️ CAMBIO DE ROL 2026-09-23 (mismo dia que el PID en cascada de
- * MODO_REMOTO, ver nota de CALIB_ID_PRESION_REMOTO_PID_KP arriba):
+ * MODO_REMOTO, ver nota de CALIB_ID_PID_ASP_KP arriba):
  * hasta ese cambio, este valor SOLO alimentaba el supervisor de "MODO=2
  * no alcanza el objetivo". Ahora TAMBIEN es el setpoint real que recibe
  * PresionPidRemoto_CalcularSetpointRpm() -- dejo de ser un dato
@@ -155,9 +155,60 @@ extern "C" {
  * MODO=2 pasa a ser mas importante que antes. */
 #define CALIB_ID_PRESION_OBJETIVO_REMOTO            30U
 
-/* ID 31 quedo libre -- TASA_LLENADO_PSI_S se movio a ID 8 (arriba,
- * ocupando el hueco que dejo PID_KD al eliminarse) para no dejar un
- * hueco bajo en la numeracion. Disponible para un futuro parametro. */
+/* ID 31 -- SET_PRESION, agregado 2026-09-25. Equivalente de SET_RPM
+ * (ID 3) pero para el lazo de presion: un valor de PROCESO (no
+ * persistente, se puede mandar con el motor operando), exclusivo de
+ * MODO=3 (MANUAL_BANCO) -- le da al operador la opcion de, estando en
+ * modo banco, elegir entre mandar SET_RPM (RPM directa) o SET_PRESION
+ * (que el sistema sostenga esa presion solo, vía la misma cascada de
+ * presion_pid.c que ya usa MODO=1, sin necesitar cambiar de MODO). A
+ * diferencia de PRESION_OBJETIVO_LOCAL (exclusivo de MODO=1, pensado como el
+ * objetivo de campo ya comisionado, no algo que se anda cambiando de
+ * un downlink a otro), SET_PRESION es un valor crudo del operador,
+ * igual de "de un solo uso" que SET_RPM -- sin rampa de llenado (el
+ * operador es responsable directo del valor, ver main.c), pero SI
+ * hereda la caida a ralenti si el sensor de presion esta en falla
+ * (proteccion de hardware, no depende de que valor eligio el
+ * operador). Mutuamente excluyente con SET_RPM: mandar uno limpia el
+ * otro a 0 -- gana el ultimo que llega. Se limpia a 0 tambien al
+ * ENTRAR a MODO=3 (ver calibracion_flash.c, case CALIB_ID_MODO), para
+ * que no quede activando la cascada con un valor de una sesion
+ * anterior sin que el operador lo haya vuelto a pedir. */
+#define CALIB_ID_SET_PRESION                        31U
+
+/* ID 32 -- RPM_MAX_CARGA, agregado 2026-09-28. Techo de RPM CON CARGA
+ * (hidraulico), especifico de cada instalacion -- distinto de RPM_MAX
+ * (ID 4), que es el techo MECANICO del motor/motobomba, fijo por
+ * modelo, sin relacion con la tuberia/bomba de una instalacion en
+ * particular. Categoria CONFIGURACION (motor detenido para cambiar,
+ * ademas de exigir MODO=CALIBRACION, mismo candado que RPM_MAX/MIN).
+ * SIEMPRE <= RPM_MAX -- rechazado si se intenta poner mas alto (ver
+ * CalibFlash_SetRpmMaxCarga()). Usado por CALIB=9 (el barrido de
+ * ganancia de presion, que SIEMPRE corre con la bomba cargada) en vez
+ * de RPM_MAX -- ver main.c y seccion 4.4 del README. */
+#define CALIB_ID_RPM_MAX_CARGA                      32U
+
+/* ID 33 -- TIEMPO_LLENADO_S, agregado 2026-09-28. Conveniencia sobre
+ * TASA_LLENADO_PSI_S (ID 8, PSI/s -- dificil de que el operador calcule
+ * a mano): el operador manda cuantos SEGUNDOS quiere que dure el
+ * llenado completo (mas facil que pedirle una velocidad), el firmware
+ * lee la presion actual en vivo (PresionV_GetPresionPsi()) y calcula +
+ * aplica la TASA_LLENADO_PSI_S correspondiente -- mismo patron exacto
+ * que SET_RATIO_AUTO (ID 25) ya usa para RPM->SET_RATIO. Categoria
+ * PROCESO (misma que TASA_LLENADO_PSI_S, no exige MODO=CALIBRACION).
+ * No tiene almacenamiento propio -- el resultado queda guardado en
+ * TASA_LLENADO_PSI_S, que es lo que realmente lee presion_pid.c. */
+#define CALIB_ID_TIEMPO_LLENADO_S                    33U
+
+/* ID 34 -- PRESION_MAX, agregado 2026-09-29. Guarda dura de presion,
+ * hermana de RPM_MAX: si la presion LOCAL medida supera este valor, el
+ * setpoint de RPM se fuerza a "sin comandar" (ralenti) sin importar el
+ * modo, con histeresis (se libera al bajar a 90% del valor) y alerta
+ * ALERTA_PRESION_MAX_EXCEDIDA. Aplica en TODOS los modos EXCEPTO
+ * MODO=0 (RALENTI, donde no hay control activo de todas formas).
+ * Categoria CONFIGURACION (motor detenido) y exige MODO=CALIBRACION,
+ * mismo candado que RPM_MAX/RPM_MAX_CARGA. Escala x10 (PSI). */
+#define CALIB_ID_PRESION_MAX                         34U
 
 /* Byte de confirmación requerido para ejecutar los comandos críticos
  * (RESTAURAR_DEFAULTS, RESET_REMOTO). Cambiar aquí si se requiere
@@ -169,7 +220,7 @@ extern "C" {
  *   CALIBRACION    -- siempre permitido, incluso operando (SET_RATIO,
  *                      ALPHA -- se necesitan ajustar en caliente para
  *                      calibrar contra un tacómetro externo real; y
- *                      PID_KP/KI -- la sintonización en lazo cerrado,
+ *                      PID_RPM_KP/KI -- la sintonización en lazo cerrado,
  *                      README sección 9, exige subir Kp de a poco CON
  *                      el motor operando, observando la respuesta real).
  *   CONFIGURACION  -- solo permitido con el motor detenido (límites de
@@ -177,7 +228,7 @@ extern "C" {
  *                      en caliente podría causar un comportamiento
  *                      impredecible del lazo de control.
  *   PROCESO        -- siempre permitido, es su función normal (SET_RPM,
- *                      PRESION llegan constantemente mientras opera).
+ *                      PRESION_REMOTO llegan constantemente mientras opera).
  *   COMANDO        -- casos especiales (RESTAURAR_DEFAULTS, etc.), se
  *                      evalúan aparte, no bloqueados por esta regla.
  */
@@ -210,20 +261,35 @@ typedef enum {
  * presión local en cuanto se actualice el firmware. Verificar/reasignar
  * MODO explícitamente en cada unidad antes de reflashear en el futuro. */
 typedef enum {
-    CALIB_MODO_RALENTI       = 0,  /* sin control activo, sin importar SET_RPM/PRESION/presión local */
+    CALIB_MODO_RALENTI       = 0,  /* sin control activo, sin importar SET_RPM/PRESION_REMOTO/presión local */
     CALIB_MODO_PRESION_LOCAL = 1,  /* setpoint = salida de PresionPid_CalcularSetpointRpm() contra
-                                     * PRESION_OBJETIVO, usando el sensor de presión propio del TID
+                                     * PRESION_OBJETIVO_LOCAL, usando el sensor de presión propio del TID
                                      * (hoy PresionV_GetPresionPsi(), temporal -- ver presion_voltaje.h).
                                      * Llena la tubería/gobierna presión de salida de la motobomba. */
     CALIB_MODO_REMOTO        = 2,  /* setpoint = salida de PresionPidRemoto_CalcularSetpointRpm() contra
-                                     * PRESION_OBJETIVO_REMOTO, con PRESION recibida por downlink de un
+                                     * PRESION_OBJETIVO_REMOTO, con PRESION_REMOTO recibida por downlink de un
                                      * nodo aspersor remoto (no del sensor local -- ver
-                                     * CalibFlash_SetPresion()). PID en cascada evento-driven, agregado
+                                     * CalibFlash_SetPresionRemoto()). PID en cascada evento-driven, agregado
                                      * 2026-09-23 en reemplazo de la formula lineal abierta que tenia
                                      * antes (ver presion_pid_remoto.h). */
-    CALIB_MODO_MANUAL_BANCO  = 3   /* setpoint = SET_RPM (downlink/serial directo) -- uso de banco:
-                                     * sintonización del PID interno, pruebas sin presión de bombeo
-                                     * real (antes era el valor 1, ver nota de renumeración arriba). */
+    CALIB_MODO_MANUAL_BANCO  = 3,  /* setpoint = SET_RPM (downlink/serial directo) -- uso OPERATIVO
+                                     * de campo puntual (ej. trasladar manguera/aspersor), CON el
+                                     * equipo ya comisionado. Distinto de CALIB_MODO_CALIBRACION (4,
+                                     * abajo) -- antes era el valor 1, ver nota de renumeración arriba. */
+    CALIB_MODO_CALIBRACION   = 4   /* agregado 2026-09-24, decisión explícita del usuario: modo
+                                     * EXCLUSIVO de banco/ingeniería, separado de MANUAL_BANCO a
+                                     * propósito -- MANUAL_BANCO es "SET_RPM directo en campo" (un
+                                     * operador real puede estar en ese modo trasladando una
+                                     * manguera), así que no servía como candado confiable para
+                                     * saber "¿estamos calibrando de verdad, o es uso operativo
+                                     * normal?". setpointRpmCrudo se calcula igual que en
+                                     * MANUAL_BANCO (= SET_RPM directo, ver main.c) -- la diferencia
+                                     * es de GATING, no de comportamiento del lazo: es el único MODO
+                                     * (junto con MANUAL_BANCO para el caso puntual de CALIB=8, ver
+                                     * calibracion_flash.c) desde el que se acepta un
+                                     * CALIB != 0 -- salvo CALIB=10, que necesita el lazo de
+                                     * presión LOCAL corriendo DE VERDAD (MODO=1) para poder meterle
+                                     * un escalón, no un modo de banco placeholder. */
 } CalibFlash_Modo_t;
 
 /* Códigos de STATUS del protocolo Quick-Set (ver Tabla 2 acordada con
@@ -326,6 +392,14 @@ void CalibFlash_Init(void);
  *                           desacoplado de tacometro.h). Solo la usa
  *                           CALIB_ID_SET_RATIO_AUTO -- cualquier otro
  *                           parámetro la ignora.
+ * @param presionActual      Presion local actual (PSI), tal cual la
+ *                           reporta PresionV_GetPresionPsi() (agregado
+ *                           2026-09-28). Se pasa desde el llamador por
+ *                           la misma razón que frecuenciaHzActual
+ *                           (mantener este módulo desacoplado de
+ *                           presion_voltaje.h). Solo la usa
+ *                           CALIB_ID_TIEMPO_LLENADO_S -- cualquier otro
+ *                           parámetro la ignora.
  * @param valorAplicadoRaw   [salida] valor vigente, codificado en 2 bytes.
  * @return El STATUS correspondiente.
  */
@@ -334,6 +408,7 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id,
                                                                      uint8_t longitudDatos,
                                                                      bool motorOperando,
                                                                      float frecuenciaHzActual,
+                                                                     float presionActual,
                                                                      uint16_t *valorAplicadoRaw);
 
 /**
@@ -351,69 +426,72 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id,
  * @param datos          Puntero a los bytes del valor (big-endian).
  * @param longitudDatos  Cantidad de bytes disponibles en 'datos'.
  * @param frecuenciaHzActual Ver CalibFlash_ProcesarParametroConEstado().
+ * @param presionActual      Ver CalibFlash_ProcesarParametroConEstado().
  * @return true si el ID fue reconocido Y el valor se aplicó
  *         correctamente (rango válido, o comando con confirmación
  *         correcta). false si el ID no existe, el valor está fuera de
  *         rango, o un comando llegó sin la confirmación esperada.
  */
-bool CalibFlash_ProcesarParametro(uint8_t id, const uint8_t *datos, uint8_t longitudDatos, bool motorOperando, float frecuenciaHzActual);
+bool CalibFlash_ProcesarParametro(uint8_t id, const uint8_t *datos, uint8_t longitudDatos, bool motorOperando, float frecuenciaHzActual, float presionActual);
 
 /* ==================== GETTERS DE PARÁMETROS PERSISTENTES ==================== */
 
 float    CalibFlash_GetPulsosPorRevolucion(void);
 float    CalibFlash_GetAlphaFiltro(void);
 float    CalibFlash_GetRpmMax(void);
+float    CalibFlash_GetRpmMaxCarga(void);
+float    CalibFlash_GetPresionMax(void);
+uint16_t CalibFlash_GetTiempoLlenadoS(void); /* crudo en segundos del ultimo TIEMPO_LLENADO_S -- ver calibracion_flash.c */
 float    CalibFlash_GetRpmMin(void);
-float    CalibFlash_GetPidKp(void);
-float    CalibFlash_GetPidKi(void);
+float    CalibFlash_GetPidRpmKp(void);
+float    CalibFlash_GetPidRpmKi(void);
 uint16_t CalibFlash_GetServoPulsoMinUs(void);
 uint16_t CalibFlash_GetServoPulsoMaxUs(void);
 uint32_t CalibFlash_GetTimeoutSinComandoS(void);
 float    CalibFlash_GetTasaMaxCambioRpmS(void);
-/** ⚠️ RENUMERADO 2026-09-23, SEGUNDA PASADA (ver README sección 12,
- * decisión explícita del usuario para que el número siga el orden real
- * de uso -- 4ta vez que se renumera este parámetro, ver historial en
- * README sección 8): 0=desactivado, 1=modo calibración manual (el
- * servo se mantiene quieto salvo que llegue un downlink nuevo de
+/** ⚠️ RENUMERADO 2026-09-29 (ver README sección 4.4, decisión explícita
+ * del usuario para que el número siga el orden real de comisionamiento
+ * en campo -- ver historial de renumeraciones previas en README
+ * sección 8): 0=desactivado, 1=modo calibración manual (el servo se
+ * mantiene quieto salvo que llegue un downlink nuevo de
  * SERVO_PULSO_MIN/MAX, en cuyo caso se mueve directo a ese valor),
  * 2=modo calibración con barrido automático MIN<->MAX, 3=auto-
  * calibración de ALPHA (mide el ruido real de RPM y calcula el
  * filtro), 4=auto-calibración de SERVO_PULSO_MIN (zona muerta del
- * acelerador -- antes era 5), 5=mapeo de curva de ganancia (pulso vs
- * RPM en lazo abierto, solo mide/loguea, no aplica corrección todavía
- * -- antes era 6), 6=auto-escalón del lazo INTERNO (PID#1) --
- * automatiza mandar un escalón de SET_RPM en MODO=3 y esperar un
- * tiempo fijo, logueando PID_TEST igual que en modo 10 (ver main.c,
- * INTERNO_CAL_*), 7=auto-calibración de ralentí (RPM_MIN -- antes era
- * 4, movido después de zona-muerta/ganancia/PID#1 porque en campo se
- * confirmó que el ralentí SÍ cambia con carga real conectada, a
- * diferencia de zona muerta/ganancia/PID#1 que dan igual con o sin
- * carga), 8=auto-escalón del lazo de presión LOCAL (MODO=1, antes era
- * 7) -- automatiza solo mandar un escalón de PRESION_OBJETIVO y
- * esperar un tiempo fijo, logueando PRESION_PID_TEST igual que en modo
- * 10 (ver main.c, PRESION_CAL_*); el cálculo de ganancias sigue siendo
- * con tools/pid_tuning/pid_tuning.py, esto no aplica nada solo,
- * 9=auto-escalón del lazo REMOTO (MODO=2, antes era 8) -- mismo
- * espíritu que 6/8 pero con SET_RPM en MODO=3 y REMOTO_PID_TEST,
- * terminando por reportes recibidos o timeout (ver main.c,
- * REMOTO_CAL_*), 10=modo sintonización de PID (antes era 9 -- el servo
- * se maneja igual que en modo 0 -- PID normal si corresponde -- pero a
- * diferencia de 1/2 el motor SÍ puede seguir operando sin que se
- * fuerce de vuelta a 0; único modo en el que PID_KP/PID_KI se aceptan,
- * y activa el log de alta frecuencia "PID_TEST,..." en main.c),
- * 11=barrido de ganancia de PRESIÓN (PID#2, agregado 2026-09-24) --
- * equivalente de 5 pero para el lazo de presión, ver
- * PRESION_GANANCIA_CAL_* en main.c. 3 a 9 y 11 solo se pueden pedir
- * viniendo de modo 0, y se auto-revierten a 0 solos al terminar (6/8/9/11
- * también se auto-revierten si el motor se detiene o si MODO cambia a
- * mitad de prueba). Ver README sección 4.4/9/12. */
-uint8_t  CalibFlash_GetControlHabilitado(void);
+ * acelerador), 5=mapeo de curva de ganancia (pulso vs RPM en lazo
+ * abierto, solo mide/loguea, no aplica corrección todavía), 6=auto-
+ * escalón del lazo INTERNO (PID#1) -- automatiza mandar un escalón de
+ * SET_RPM en MODO=3 y esperar un tiempo fijo, con PID_RPM_KP=1/PID_RPM_KI=0
+ * fijo, logueando PID_TEST (ver main.c, INTERNO_CAL_*), 7=validación
+ * del lazo INTERNO con las ganancias REALES ya cargadas (sin forzar
+ * Kp=1/Ki=0, ventana de 4min con vigía de oscilación -- antes era 12),
+ * 8=auto-calibración de ralentí (RPM_MIN -- antes era 7, movido
+ * después de zona-muerta/ganancia/PID#1 porque en campo se confirmó
+ * que el ralentí SÍ cambia con carga real conectada, a diferencia de
+ * zona muerta/ganancia/PID#1 que dan igual con o sin carga), 9=barrido
+ * de ganancia de PRESIÓN local (PID#2, lazo abierto, pace por PSI real
+ * medido -- antes era 11), ver PRESION_GANANCIA_CAL_* en main.c,
+ * 10=auto-escalón del lazo de presión LOCAL (MODO=1, lazo cerrado --
+ * antes era 8) -- automatiza solo mandar un escalón de
+ * PRESION_OBJETIVO_LOCAL y esperar un tiempo fijo, logueando
+ * PRESION_PID_TEST (ver main.c, PRESION_CAL_*); el cálculo de
+ * ganancias sigue siendo con tools/pid_tuning/pid_tuning.py, esto no
+ * aplica nada solo, 11=validación del lazo de presión LOCAL con las
+ * ganancias REALES ya cargadas (mismo espíritu que 7, ventana de 4min
+ * con vigía de oscilación -- antes era 13), 12=auto-escalón del lazo
+ * REMOTO (MODO=2 -- antes era 9) -- mismo espíritu que 6/10 pero con
+ * SET_RPM en MODO=3 y REMOTO_PID_TEST, terminando por reportes
+ * recibidos o timeout (ver main.c, REMOTO_CAL_*). 3 a 12 solo se
+ * pueden pedir viniendo de modo 0, y se auto-revierten a 0 solos al
+ * terminar (6/9/10/12 también se auto-revierten si el motor se detiene
+ * o si MODO cambia a mitad de prueba). Ver README sección 4.4/9/12. */
+uint8_t  CalibFlash_GetCalib(void);
 uint16_t CalibFlash_GetIntervaloEnvioOperativoS(void);
 uint16_t CalibFlash_GetIntervaloEnvioStandbyS(void);
 CalibFlash_Modo_t CalibFlash_GetModo(void);
 uint8_t  CalibFlash_GetNodeId(void);
 uint16_t CalibFlash_GetHisteresisModoS(void);
-float    CalibFlash_GetPresionObjetivo(void);
+float    CalibFlash_GetPresionObjetivoLocal(void);
 float    CalibFlash_GetTasaMaxCambioRpmLlenadoS(void);
 
 /** Presion que SE ESPERA que reporte el aspersor remoto en MODO=2 --
@@ -425,44 +503,44 @@ float    CalibFlash_GetPresionObjetivoRemoto(void);
 
 /** Tasa de subida (PSI/segundo) de la rampa de llenado de MODO=1 -- ver
  * CALIB_ID_TASA_LLENADO_PSI_S arriba. 0.0f = sin rampa, setpoint
- * directo a PRESION_OBJETIVO (comportamiento por default). */
+ * directo a PRESION_OBJETIVO_LOCAL (comportamiento por default). */
 float    CalibFlash_GetTasaLlenadoPsiS(void);
 
 /** Ganancias del lazo EXTERNO de presión REMOTA (cascada, MODO=2 /
  * CALIB_MODO_REMOTO, ver presion_pid_remoto.h) -- independientes de
- * PID_KP/KI (lazo interno RPM->servo) y de PRESION_PID_KP/KI (lazo
+ * PID_RPM_KP/KI (lazo interno RPM->servo) y de PID_PSI_KP/KI (lazo
  * externo de presión LOCAL, MODO=1, un mecanismo distinto). Reemplazan
  * desde 2026-09-23 a la fórmula lineal abierta que tenía antes MODO=2
- * (PRESION_OFFSET_RPM + PRESION_GANANCIA_RPM * PRESION) -- un PID no
+ * (PRESION_OFFSET_RPM + PRESION_GANANCIA_RPM * PRESION_REMOTO) -- un PID no
  * necesita conocer de antemano la relación presión->RPM de cada
  * instalación, se autoajusta al error real. Solo P+I (sin derivativo),
  * mismo criterio que los otros dos lazos. Se calibran EN CAMPO -- solo
- * se aceptan con CONTROL_HABILITADO=10 (ver calibracion_flash.c). */
-float CalibFlash_GetPresionRemotoPidKp(void);
-float CalibFlash_GetPresionRemotoPidKi(void);
+ * se aceptan con MODO=CALIBRACION + CALIB=0 (ver calibracion_flash.c). */
+float CalibFlash_GetPidAspKp(void);
+float CalibFlash_GetPidAspKi(void);
 
 /** Ganancias del lazo EXTERNO de presión local (cascada, MODO=1 /
  * CALIB_MODO_PRESION_LOCAL, ver presion_pid.h) -- independientes de
- * PID_KP/KI (lazo interno RPM->servo) y de PRESION_REMOTO_PID_KP/KI
+ * PID_RPM_KP/KI (lazo interno RPM->servo) y de PID_ASP_KP/KI
  * (fórmula/PID de MODO_REMOTO, un mecanismo distinto). Solo P+I (sin
  * derivativo), mismo criterio que el lazo interno. Se calibran EN
  * CAMPO igual que las demás ganancias -- solo se aceptan con
- * CONTROL_HABILITADO=10 (ver calibracion_flash.c). */
-float CalibFlash_GetPresionPidKp(void);
-float CalibFlash_GetPresionPidKi(void);
+ * MODO=CALIBRACION + CALIB=0 (ver calibracion_flash.c). */
+float CalibFlash_GetPidPsiKp(void);
+float CalibFlash_GetPidPsiKi(void);
 
-/** HAL_GetTick() del último downlink de PRESION válido (o del arranque,
- * si nunca llegó ninguno) -- usado por el watchdog de
+/** HAL_GetTick() del último downlink de PRESION_REMOTO válido (o del
+ * arranque, si nunca llegó ninguno) -- usado por el watchdog de
  * TIMEOUT_SIN_COMANDO_S en MODO_REMOTO (ver main.c): si pasa más de ese
- * tiempo sin una PRESION fresca, el motor cae a ralentí en vez de seguir
- * el último valor indefinidamente. */
-uint32_t CalibFlash_GetPresionUltimoTickMs(void);
+ * tiempo sin una PRESION_REMOTO fresca, el motor cae a ralentí en vez de
+ * seguir el último valor indefinidamente. */
+uint32_t CalibFlash_GetPresionRemotoUltimoTickMs(void);
 
 /** Ultima hora UTC (epoch unix) confirmada por la red, persistida en
  * flash -- 0 si nunca se sincronizo todavia. Se usa como mejor
  * estimacion inicial del RTC en el arranque (ver
  * Reloj_CargarHoraAproximada() en rtc_reloj.h), mientras se espera la
- * resincronizacion real via DeviceTimeReq. Distinto de SET_RPM/PRESION:
+ * resincronizacion real via DeviceTimeReq. Distinto de SET_RPM/PRESION_REMOTO:
  * este campo SI se persiste (no llega por downlink de parametro, lo
  * escribe main.c directo tras cada sincronizacion exitosa). */
 uint32_t CalibFlash_GetUltimaHoraUtcConocida(void);
@@ -489,27 +567,29 @@ bool  CalibFlash_SetUltimaPosicionConocida(float latitud, float longitud);
 bool CalibFlash_SetPulsosPorRevolucion(float nuevoValor);
 bool CalibFlash_SetAlphaFiltro(float nuevoValor);
 bool CalibFlash_SetRpmMax(float nuevoValor);
+bool CalibFlash_SetRpmMaxCarga(float nuevoValor);
+bool CalibFlash_SetPresionMax(float nuevoValor);
 bool CalibFlash_SetRpmMin(float nuevoValor);
-bool CalibFlash_SetPidKp(float nuevoValor);
-bool CalibFlash_SetPidKi(float nuevoValor);
+bool CalibFlash_SetPidRpmKp(float nuevoValor);
+bool CalibFlash_SetPidRpmKi(float nuevoValor);
 bool CalibFlash_SetServoPulsoMinUs(uint16_t nuevoValor);
 bool CalibFlash_SetServoPulsoMaxUs(uint16_t nuevoValor);
 bool CalibFlash_SetTimeoutSinComandoS(uint32_t nuevoValor);
 bool CalibFlash_SetTasaMaxCambioRpmS(float nuevoValor);
-bool CalibFlash_SetControlHabilitado(uint8_t modo); /* válido: 0-11 -- ver getter */
+bool CalibFlash_SetCalib(uint8_t modo); /* válido: 0-12 -- ver getter */
 bool CalibFlash_SetIntervaloEnvioOperativoS(uint16_t nuevoValor);
 bool CalibFlash_SetIntervaloEnvioStandbyS(uint16_t nuevoValor);
 bool CalibFlash_SetModo(CalibFlash_Modo_t nuevoModo);
 bool CalibFlash_SetNodeId(uint8_t nuevoValor);
 bool CalibFlash_SetHisteresisModoS(uint16_t nuevoValor);
-bool CalibFlash_SetPresionObjetivo(float nuevoValor);
+bool CalibFlash_SetPresionObjetivoLocal(float nuevoValor);
 bool CalibFlash_SetPresionObjetivoRemoto(float nuevoValor);
 bool CalibFlash_SetTasaLlenadoPsiS(float nuevoValor);
 bool CalibFlash_SetTasaMaxCambioRpmLlenadoS(float nuevoValor);
-bool CalibFlash_SetPresionRemotoPidKp(float nuevoValor);
-bool CalibFlash_SetPresionRemotoPidKi(float nuevoValor);
-bool CalibFlash_SetPresionPidKp(float nuevoValor);
-bool CalibFlash_SetPresionPidKi(float nuevoValor);
+bool CalibFlash_SetPidAspKp(float nuevoValor);
+bool CalibFlash_SetPidAspKi(float nuevoValor);
+bool CalibFlash_SetPidPsiKp(float nuevoValor);
+bool CalibFlash_SetPidPsiKi(float nuevoValor);
 
 /* ==================== PARÁMETROS NO PERSISTENTES (solo RAM) ==================== */
 
@@ -518,8 +598,13 @@ void  CalibFlash_SetSetRpm(float nuevoValor); /* sin validación de rango propia
                                                  * el módulo de control debe recortarla
                                                  * contra RPM_MIN/RPM_MAX antes de usarla */
 
-float CalibFlash_GetPresion(void);
-void  CalibFlash_SetPresion(float nuevoValor);
+float CalibFlash_GetSetPresion(void);
+void  CalibFlash_SetSetPresion(float nuevoValor); /* sin validación de rango propia,
+                                                     * igual que SetSetRpm -- 0.0f = sin
+                                                     * comandar (ver CALIB_ID_SET_PRESION) */
+
+float CalibFlash_GetPresionRemoto(void);
+void  CalibFlash_SetPresionRemoto(float nuevoValor);
 
 /* ==================== COMANDOS ==================== */
 
@@ -535,7 +620,7 @@ void CalibFlash_LimpiarReporteForzado(void);
  * Arma internamente la misma bandera que un FORZAR_REPORTE por
  * downlink -- para que main.c pueda pedir un uplink inmediato como
  * "ACK" de una acción propia del firmware (ej. al completar la
- * auto-calibración de ralentí, CONTROL_HABILITADO=7) sin duplicar la
+ * auto-calibración de ralentí, CALIB=8) sin duplicar la
  * lógica de armado del uplink que ya vive en el loop principal.
  */
 void CalibFlash_ForzarReporte(void);
@@ -551,7 +636,7 @@ bool CalibFlash_HayResetPendiente(void);
 
 /**
  * Objetivo pendiente para el modo manual de calibración del servo
- * (CONTROL_HABILITADO=1, ver README 4.4/2.4). Se marca cuando un
+ * (CALIB=1, ver README 4.4/2.4). Se marca cuando un
  * downlink de SERVO_PULSO_MIN o SERVO_PULSO_MAX se aplica con éxito
  * estando en ese modo -- por bandera, no por comparar contra el valor
  * anterior, para que un downlink que repite el valor ya guardado (ej.

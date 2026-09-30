@@ -15,7 +15,7 @@
  * máquina de estados Modo 0/1/2 (ver README sección 4.3) según la
  * presión, sin que este módulo tenga que cambiar.
  *
- * Ganancias (PID_KP/KI) vienen de calibracion_flash.h -- mientras
+ * Ganancias (PID_RPM_KP/KI) vienen de calibracion_flash.h -- mientras
  * no se sintonicen en el motor real (ver README sección 9, método de
  * ganancia última / Ziegler-Nichols en lazo cerrado), quedan en sus
  * valores default (Kp=1.0, Ki=0), suficientes para validar que

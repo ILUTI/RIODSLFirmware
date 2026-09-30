@@ -83,6 +83,16 @@ extern "C" {
 #define PRESIONV_FALLA_BAJA_V         0.2f
 #define PRESIONV_FALLA_ALTA_V         3.0f
 
+/* Interruptor de los filtros de ruido posteriores al promedio recortado
+ * (limitador de velocidad + EMA, definidos mas abajo). DESACTIVADOS
+ * (2026-09-29, a pedido del usuario): se pusieron cuando la lectura no
+ * era fiel (GND mal ubicado del sensor, ya corregido), y juntos limitan
+ * el cambio maximo a 0.4 PSI/s (ver README seccion 5). Con 0 la salida
+ * es directamente el resultado del promedio recortado. Poner en 1 si
+ * vuelve a aparecer ruido significativo en PresionV. El promedio
+ * recortado de 21 muestras NO se desactiva. */
+#define PRESIONV_FILTROS_ACTIVOS      0
+
 /* Mismo criterio de suavizado que presion.c/tacometro.c -- se aplica
  * DESPUES del promedio recortado de abajo, no sobre la muestra cruda.
  *
@@ -122,11 +132,11 @@ extern "C" {
  * lado dentro de UNA tanda, pero si una rafaga de ruido (encontrado en
  * campo: transmisiones/reintentos de join del RAK3172, que ya se sabe
  * que meten ruido electrico -- ver el comentario sobre
- * CONTROL_HABILITADO=7 saltando RAK3172_Update()/GPS_Update() en
+ * CALIB=8 saltando RAK3172_Update()/GPS_Update() en
  * main.c) contamina MAS de 4 de las 21 muestras de una tanda, el
  * promedio recortado igual se corre. En banco esto solo se vio con
- * CONTROL_HABILITADO=7 (que ya evita el RAK3172), pero en operacion
- * real (MODO=1, CONTROL_HABILITADO=0) el RAK3172 SI transmite uplinks
+ * CALIB=8 (que ya evita el RAK3172), pero en operacion
+ * real (MODO=1, CALIB=0) el RAK3172 SI transmite uplinks
  * normalmente mientras el PID de presion esta activo -- este piso evita
  * que un salto de ese tipo (ej. +1.4 PSI de un instante a otro, muy por
  * encima de lo que la dinamica hidraulica real permite, tau~60-120s)

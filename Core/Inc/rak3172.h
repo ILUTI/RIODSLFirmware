@@ -97,6 +97,16 @@ typedef enum {
 bool RAK3172_EstaUnido(void);
 
 /**
+ * true si el propio módulo pidió no transmitir por ahora (línea
+ * "Restricted_Wait_<ms>_ms", ver rak3172.c) -- backoff de join que
+ * exige la especificación LoRaWAN tras fallos prolongados de join. El
+ * llamador debe evitar pedir join o mandar uplinks mientras esto sea
+ * true (reintentar de todas formas no logra nada y puede extender la
+ * restricción).
+ */
+bool RAK3172_EstaRestringido(void);
+
+/**
  * Inicia el proceso de join a la red LoRaWAN, usando el comando
  * recomendado por RAK (join=1, auto=0, intervalo=10s, 8 intentos).
  * No bloquea -- el resultado se refleja después en RAK3172_EstaUnido().

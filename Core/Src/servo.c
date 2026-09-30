@@ -27,7 +27,7 @@
  * como si fuera el interruptor de "reverse" de un servo de RC -- se
  * espeja sobre el rango FIJO de fabrica del servo (500-2500us), NO sobre
  * SERVO_PULSO_MIN/MAX. A proposito: esos dos son justamente los
- * valores que se estan calibrando a mano en CONTROL_HABILITADO=2 en el
+ * valores que se estan calibrando a mano en CALIB=2 en el
  * mecanismo nuevo -- si el espejo se hiciera sobre ellos, el pulso que
  * el operador manda a mano durante ESA calibracion dependeria de un
  * SERVO_PULSO_MIN/MAX todavia sin terminar de calibrar (circular). Con
@@ -38,7 +38,7 @@
  * fisicamente el pulso que antes correspondia a SERVO_PULSO_MAX y
  * viceversa (siempre que ambos esten dentro de 500-2500), que es
  * exactamente el intercambio de sentido esperado. El resto del
- * firmware (PID, cada modo de CONTROL_HABILITADO, el barrido de
+ * firmware (PID, cada modo de CALIB, el barrido de
  * calibracion) sigue usando la misma convencion logica
  * (SERVO_PULSO_MIN=menos combustible, SERVO_PULSO_MAX=mas combustible)
  * sin cambios. Volver a 0 si se regresa al montaje biela-manivela, o

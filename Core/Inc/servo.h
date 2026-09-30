@@ -58,7 +58,7 @@ extern "C" {
 #define SERVO_VELOCIDAD_MAX_US_S    1250U
 
 /* Pausa en cada extremo del barrido de calibración (main.c,
- * CONTROL_HABILITADO=1), en ms. El pulso PWM comandado llega exacto a
+ * CALIB=2), en ms. El pulso PWM comandado llega exacto a
  * SERVO_PULSO_MIN/MAX apenas se cumple el límite de velocidad de
  * arriba, pero el servo físico tiene su propio tiempo de asentamiento
  * (no es instantáneo) -- sin esta pausa, el firmware invierte la

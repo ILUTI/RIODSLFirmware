@@ -6,6 +6,8 @@
 #include "comando_serial.h"
 #include "calibracion_flash.h"
 #include "tacometro.h"
+#include "presion_voltaje.h"
+#include "rak3172.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -39,30 +41,34 @@ static const ComandoSerial_Descriptor_t TABLA[] = {
     {"SET_RPM",                         CALIB_ID_SET_RPM,                         TIPO_X10},
     {"RPM_MAX",                         CALIB_ID_RPM_MAX,                         TIPO_X10},
     {"RPM_MIN",                         CALIB_ID_RPM_MIN,                         TIPO_X10},
-    {"PID_KP",                          CALIB_ID_PID_KP,                          TIPO_S16_X100},
-    {"PID_KI",                          CALIB_ID_PID_KI,                          TIPO_S16_X1000},
+    {"PID_RPM_KP",                      CALIB_ID_PID_RPM_KP,                      TIPO_S16_X1000},
+    {"PID_RPM_KI",                      CALIB_ID_PID_RPM_KI,                      TIPO_S16_X1000},
     {"TASA_LLENADO_PSI_S",              CALIB_ID_TASA_LLENADO_PSI_S,              TIPO_X100},
     {"SERVO_PULSO_MIN",                 CALIB_ID_SERVO_PULSO_MIN,                 TIPO_U16_RAW},
     {"SERVO_PULSO_MAX",                 CALIB_ID_SERVO_PULSO_MAX,                 TIPO_U16_RAW},
     {"TIMEOUT_SIN_COMANDO_S",           CALIB_ID_TIMEOUT_SIN_COMANDO_S,           TIPO_U16_RAW},
     {"TASA_MAX_CAMBIO_RPM_S",           CALIB_ID_TASA_MAX_CAMBIO_RPM_S,           TIPO_X10},
-    {"CONTROL_HABILITADO",              CALIB_ID_CONTROL_HABILITADO,              TIPO_U16_RAW},
+    {"CALIB",                           CALIB_ID_CALIB,                           TIPO_U16_RAW},
     {"INTERVALO_ENVIO_OPERATIVO_S",     CALIB_ID_INTERVALO_ENVIO_OPERATIVO_S,     TIPO_U16_RAW},
     {"INTERVALO_ENVIO_STANDBY_S",       CALIB_ID_INTERVALO_ENVIO_STANDBY_S,       TIPO_U16_RAW},
     {"MODO",                            CALIB_ID_MODO,                            TIPO_U16_RAW},
-    {"PRESION",                         CALIB_ID_PRESION,                         TIPO_X10},
+    {"PRESION_REMOTO",                  CALIB_ID_PRESION_REMOTO,                  TIPO_X10},
     {"NODE_ID",                         CALIB_ID_NODE_ID,                         TIPO_U16_RAW},
     {"RESTAURAR_DEFAULTS",              CALIB_ID_RESTAURAR_DEFAULTS,              TIPO_COMANDO},
     {"FORZAR_REPORTE",                  CALIB_ID_FORZAR_REPORTE,                  TIPO_COMANDO},
     {"HISTERESIS_MODO_S",               CALIB_ID_HISTERESIS_MODO_S,               TIPO_U16_RAW},
     {"RESET_REMOTO",                    CALIB_ID_RESET_REMOTO,                    TIPO_COMANDO},
-    {"PRESION_OBJETIVO",                CALIB_ID_PRESION_OBJETIVO,                TIPO_X10},
+    {"PRESION_OBJETIVO_LOCAL",          CALIB_ID_PRESION_OBJETIVO_LOCAL,          TIPO_X10},
     {"TASA_MAX_CAMBIO_RPM_LLENADO_S",   CALIB_ID_TASA_MAX_CAMBIO_RPM_LLENADO_S,   TIPO_X10},
-    {"PRESION_REMOTO_PID_KP",           CALIB_ID_PRESION_REMOTO_PID_KP,           TIPO_S16_X100},
-    {"PRESION_REMOTO_PID_KI",           CALIB_ID_PRESION_REMOTO_PID_KI,           TIPO_S16_X1000},
-    {"PRESION_PID_KP",                  CALIB_ID_PRESION_PID_KP,                  TIPO_S16_X100},
-    {"PRESION_PID_KI",                  CALIB_ID_PRESION_PID_KI,                  TIPO_S16_X1000},
+    {"PID_ASP_KP",                      CALIB_ID_PID_ASP_KP,                      TIPO_S16_X1000},
+    {"PID_ASP_KI",                      CALIB_ID_PID_ASP_KI,                      TIPO_S16_X1000},
+    {"PID_PSI_KP",                      CALIB_ID_PID_PSI_KP,                      TIPO_S16_X1000},
+    {"PID_PSI_KI",                      CALIB_ID_PID_PSI_KI,                      TIPO_S16_X1000},
     {"PRESION_OBJETIVO_REMOTO",         CALIB_ID_PRESION_OBJETIVO_REMOTO,         TIPO_X10},
+    {"SET_PRESION",                     CALIB_ID_SET_PRESION,                     TIPO_X10},
+    {"RPM_MAX_CARGA",                   CALIB_ID_RPM_MAX_CARGA,                   TIPO_X10},
+    {"TIEMPO_LLENADO_S",                CALIB_ID_TIEMPO_LLENADO_S,                TIPO_U16_RAW},
+    {"PRESION_MAX",                     CALIB_ID_PRESION_MAX,                     TIPO_X10},
 };
 #define TABLA_CANTIDAD (sizeof(TABLA) / sizeof(TABLA[0]))
 
@@ -146,8 +152,58 @@ static const char *EstadoTexto(CalibFlash_ProtocoloStatus_t status)
     }
 }
 
+/* Pass-through permanente hacia el RAK3172: consultas "AT+XXX=?" (leer
+ * APPKEY/DEVEUI/VER/etc.) mas una lista corta de escrituras de
+ * provisionamiento (ver AT_ESCRITURAS_PERMITIDAS y ATZ). Cualquier otro
+ * comando AT se rechaza. Comparte el canal AT con los uplinks (ocupa
+ * hasta PASSTHROUGH_TIMEOUT_MS). */
+#define PASSTHROUGH_TIMEOUT_MS  3000U
+static char              s_atPendiente[COMANDO_SERIAL_LINEA_MAX];
+static volatile bool     s_atPorEnviar;
+static bool              s_atEsperando;
+static uint32_t          s_atTickInicio;
+
+/* Escrituras permitidas (prefijo hasta el '='); ATZ (reset del RAK) va
+ * aparte por no llevar '='. Todo lo demas que no sea consulta "=?" se
+ * rechaza -- en particular AT+FACTORY, AT+NWM, AT+BOOT, AT+JOIN, etc. */
+static const char *const AT_ESCRITURAS_PERMITIDAS[] = {
+    "AT+NJM=", "AT+BAND=", "AT+MASK=", "AT+CLASS=",
+};
+
+static bool EsComandoATPermitido(const char *linea)
+{
+    size_t n = strlen(linea);
+    if (n > 5U && strncmp(linea, "AT+", 3U) == 0 &&
+        linea[n - 2U] == '=' && linea[n - 1U] == '?') {
+        return true; /* consulta */
+    }
+    if (strcmp(linea, "ATZ") == 0) {
+        return true;
+    }
+    for (size_t i = 0; i < sizeof(AT_ESCRITURAS_PERMITIDAS) / sizeof(AT_ESCRITURAS_PERMITIDAS[0]); i++) {
+        size_t p = strlen(AT_ESCRITURAS_PERMITIDAS[i]);
+        if (n > p && strncmp(linea, AT_ESCRITURAS_PERMITIDAS[i], p) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void ProcesarLinea(char *linea)
 {
+    if (strncmp(linea, "AT", 2U) == 0) {
+        if (!EsComandoATPermitido(linea)) {
+            printf("[AT] no permitido -- solo consultas 'AT+XXX=?', AT+NJM/BAND/MASK/CLASS=<v> y ATZ\r\n");
+        } else if (s_atPorEnviar || s_atEsperando) {
+            printf("[AT] ocupado, espera la respuesta anterior\r\n");
+        } else {
+            strncpy(s_atPendiente, linea, sizeof(s_atPendiente) - 1U);
+            s_atPendiente[sizeof(s_atPendiente) - 1U] = '\0';
+            s_atPorEnviar = true; /* se transmite desde ComandoSerial_Update(), fuera de la ISR */
+        }
+        return;
+    }
+
     /* strtok en vez de sscanf("%s %f") -- RESTAURAR_DEFAULTS/FORZAR_REPORTE/
      * RESET_REMOTO no llevan VALOR, y sscanf con %f de menos fallaría
      * la conversión completa en vez de solo dejar valor en 0. */
@@ -174,15 +230,20 @@ static void ProcesarLinea(char *linea)
     bool motorOperando = !Tacometro_EstaDetenido();
     uint16_t valorAplicadoRaw = 0U;
     CalibFlash_ProtocoloStatus_t status = CalibFlash_ProcesarParametroConEstado(
-        desc->id, datosValor, 2U, motorOperando, Tacometro_GetFrecuenciaHz(), &valorAplicadoRaw);
+        desc->id, datosValor, 2U, motorOperando, Tacometro_GetFrecuenciaHz(),
+        PresionV_GetPresionPsi(), &valorAplicadoRaw);
 
-    /* SET_RATIO_AUTO es la única entrada de la tabla donde el tipo de
-     * VALOR recibido (RPM de referencia, x10) no coincide con el tipo
-     * del valor vigente devuelto (el ratio resultante, x100 -- misma
-     * escala que SET_RATIO) -- decodificar el "vigente" siempre como
-     * x100 para este ID en particular, no con desc->tipo. */
+    /* SET_RATIO_AUTO y TIEMPO_LLENADO_S son las entradas de la tabla
+     * donde el tipo de VALOR recibido no coincide con el tipo del valor
+     * vigente devuelto -- SET_RATIO_AUTO recibe RPM (x10) pero devuelve
+     * el ratio resultante (x100, misma escala que SET_RATIO);
+     * TIEMPO_LLENADO_S recibe segundos (raw) pero devuelve la tasa
+     * resultante (x100, misma escala que TASA_LLENADO_PSI_S, agregado
+     * 2026-09-28) -- decodificar el "vigente" con el tipo correcto para
+     * cada uno, no con desc->tipo. */
     ComandoSerial_Tipo_t tipoValorVigente =
-        (desc->id == CALIB_ID_SET_RATIO_AUTO) ? TIPO_X100 : desc->tipo;
+        (desc->id == CALIB_ID_SET_RATIO_AUTO || desc->id == CALIB_ID_TIEMPO_LLENADO_S)
+            ? TIPO_X100 : desc->tipo;
 
     printf("[CMD] %s(ID=%u) <- %.3f -> STATUS=%s, valor vigente=%.3f (raw=0x%04X)\r\n",
            desc->nombre, desc->id, valor, EstadoTexto(status),
@@ -198,7 +259,31 @@ void ComandoSerial_Init(UART_HandleTypeDef *huart)
 
 void ComandoSerial_Update(void)
 {
-    /* Sin trabajo propio -- ver ComandoSerial_RxCpltCallback(). */
+    /* Recepcion de la consola: ver ComandoSerial_RxCpltCallback().
+     * Aqui solo el pass-through temporal de consultas AT al RAK3172. */
+    if (s_atPorEnviar && RAK3172_ComandoListo()) {
+        if (RAK3172_EnviarComandoAT(s_atPendiente)) {
+            s_atEsperando = true;
+            s_atTickInicio = HAL_GetTick();
+        } else {
+            printf("[AT] no se pudo enviar\r\n");
+        }
+        s_atPorEnviar = false;
+    }
+
+    if (s_atEsperando) {
+        char respuesta[64];
+        if (RAK3172_GetUltimaRespuesta(respuesta, sizeof(respuesta))) {
+            printf("[AT] %s\r\n", respuesta);
+        }
+        if (RAK3172_ComandoListo()) {
+            printf("[AT] resultado=%d (0=OK,1=ERROR,2=TIMEOUT,3=BUSY)\r\n",
+                   RAK3172_GetUltimoResultado());
+            s_atEsperando = false;
+        } else if ((HAL_GetTick() - s_atTickInicio) > PASSTHROUGH_TIMEOUT_MS) {
+            s_atEsperando = false;
+        }
+    }
 }
 
 void ComandoSerial_RxCpltCallback(UART_HandleTypeDef *huart)
