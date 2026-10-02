@@ -59,6 +59,14 @@ void PID_Init(void);
  */
 uint16_t PID_CalcularSalidaUs(float setpointRpm, float rpmMedida);
 
+/**
+ * Ganancias TEMPORALES (solo RAM, no tocan flash) que pisan a
+ * PID_RPM_KP/KI mientras esten activas -- uso exclusivo de la autosintonia
+ * (autotune_rpm.c, CALIB=13). Limpiar siempre al terminar/abortar.
+ */
+void PID_SetGananciasTemporales(float kp, float ki);
+void PID_LimpiarGananciasTemporales(void);
+
 #ifdef __cplusplus
 }
 #endif

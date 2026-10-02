@@ -23,6 +23,7 @@
  */
 
 #include "gps.h"
+#include "numero_texto.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,7 +51,6 @@ static volatile uint8_t s_colaCount = 0;
 static volatile bool  s_tieneFix = false;
 static float           s_latitud = 0.0f;
 static float           s_longitud = 0.0f;
-static volatile uint32_t s_ultimoFixTickMs = 0;
 
 /* Fecha/hora UTC del último fix (campos "fecha ddmmyy"/"hora hhmmss.s"
  * de "+CGPSINFO:", ver GPS_ProcesarCGPSInfo()). s_fechaHoraValida se
@@ -78,6 +78,16 @@ static void GPS_ProcesarCGPSInfo(char *linea);
 static uint8_t GPS_DividirCampos(char *sentencia, char *campos[], uint8_t maxCampos);
 static float GPS_NmeaACoordenadaDecimal(const char *campo, uint8_t digitosGrados);
 
+/* Hasta 'n' digitos decimales desde 's' (reemplaza atoi() sobre un buffer
+ * de n caracteres -- mismo resultado: se detiene en el primer no-digito y
+ * da 0 si no hay ninguno). */
+static uint32_t GPS_LeerDigitos(const char *s, uint8_t n)
+{
+    uint32_t valor;
+    (void)NumeroTexto_LeerUint(&s, n, &valor);
+    return valor;
+}
+
 /* ==================== API PÚBLICA ==================== */
 
 void GPS_Init(UART_HandleTypeDef *huart)
@@ -95,7 +105,6 @@ void GPS_Init(UART_HandleTypeDef *huart)
     s_tieneFix = false;
     s_latitud = 0.0f;
     s_longitud = 0.0f;
-    s_ultimoFixTickMs = 0;
     s_reportesVaciosSeguidos = 0;
     s_fechaHoraValida = false;
 
@@ -253,11 +262,6 @@ float GPS_GetLongitud(void)
     return s_longitud;
 }
 
-uint32_t GPS_GetUltimoFixTickMs(void)
-{
-    return s_ultimoFixTickMs;
-}
-
 bool GPS_GetFechaHoraUtc(uint16_t *anio, uint8_t *mes, uint8_t *dia,
                           uint8_t *hora, uint8_t *minuto, uint8_t *segundo)
 {
@@ -376,7 +380,6 @@ static void GPS_ProcesarCGPSInfo(char *linea)
     s_longitud = lon;
     s_tieneFix = true;
     s_reportesVaciosSeguidos = 0;
-    s_ultimoFixTickMs = HAL_GetTick();
 
     /* campos[4]="fecha ddmmyy", campos[5]="hora hhmmss.s" (UTC, del
      * propio receptor GNSS) -- se descarta la parte fraccionaria de
@@ -384,21 +387,13 @@ static void GPS_ProcesarCGPSInfo(char *linea)
      * venir vacíos en teoría, aunque no debería pasar con fix válido,
      * de ahí el chequeo de longitud). */
     if (n >= 6 && strlen(campos[4]) >= 6 && strlen(campos[5]) >= 6) {
-        char buf[3] = { 0 };
+        s_fhDia     = (uint8_t)GPS_LeerDigitos(campos[4], 2);
+        s_fhMes     = (uint8_t)GPS_LeerDigitos(campos[4] + 2, 2);
+        s_fhAnio    = (uint16_t)(2000U + GPS_LeerDigitos(campos[4] + 4, 2));
 
-        memcpy(buf, campos[4], 2); buf[2] = '\0';
-        s_fhDia = (uint8_t)atoi(buf);
-        memcpy(buf, campos[4] + 2, 2); buf[2] = '\0';
-        s_fhMes = (uint8_t)atoi(buf);
-        memcpy(buf, campos[4] + 4, 2); buf[2] = '\0';
-        s_fhAnio = (uint16_t)(2000 + atoi(buf));
-
-        memcpy(buf, campos[5], 2); buf[2] = '\0';
-        s_fhHora = (uint8_t)atoi(buf);
-        memcpy(buf, campos[5] + 2, 2); buf[2] = '\0';
-        s_fhMinuto = (uint8_t)atoi(buf);
-        memcpy(buf, campos[5] + 4, 2); buf[2] = '\0';
-        s_fhSegundo = (uint8_t)atoi(buf);
+        s_fhHora    = (uint8_t)GPS_LeerDigitos(campos[5], 2);
+        s_fhMinuto  = (uint8_t)GPS_LeerDigitos(campos[5] + 2, 2);
+        s_fhSegundo = (uint8_t)GPS_LeerDigitos(campos[5] + 4, 2);
 
         s_fechaHoraValida = true;
     } else {
@@ -438,12 +433,11 @@ static float GPS_NmeaACoordenadaDecimal(const char *campo, uint8_t digitosGrados
     /* Formato NMEA: los primeros 'digitosGrados' caracteres son los
      * grados (2 para latitud, 3 para longitud), el resto son minutos
      * decimales (mm.mmmm). */
-    char gradosBuf[4] = { 0 };
-    strncpy(gradosBuf, campo, digitosGrados);
-    gradosBuf[digitosGrados] = '\0';
-
-    int grados = atoi(gradosBuf);
-    float minutos = (float)atof(campo + digitosGrados);
+    uint32_t grados = GPS_LeerDigitos(campo, digitosGrados);
+    /* NumeroTexto_LeerDecimal() en vez de atof(): ahorra ~6-7 KB de flash
+     * (ver numero_texto.h). atof() ya se truncaba a float aca, asi que la
+     * precision final es la misma (~1e-5 minutos, centimetros). */
+    float minutos = NumeroTexto_LeerDecimal(campo + digitosGrados, NULL);
 
     return (float)grados + (minutos / 60.0f);
 }

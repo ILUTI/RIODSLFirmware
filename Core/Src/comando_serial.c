@@ -8,6 +8,7 @@
 #include "tacometro.h"
 #include "presion_voltaje.h"
 #include "rak3172.h"
+#include "numero_texto.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -43,23 +44,17 @@ static const ComandoSerial_Descriptor_t TABLA[] = {
     {"RPM_MIN",                         CALIB_ID_RPM_MIN,                         TIPO_X10},
     {"PID_RPM_KP",                      CALIB_ID_PID_RPM_KP,                      TIPO_S16_X1000},
     {"PID_RPM_KI",                      CALIB_ID_PID_RPM_KI,                      TIPO_S16_X1000},
-    {"TASA_LLENADO_PSI_S",              CALIB_ID_TASA_LLENADO_PSI_S,              TIPO_X100},
     {"SERVO_PULSO_MIN",                 CALIB_ID_SERVO_PULSO_MIN,                 TIPO_U16_RAW},
     {"SERVO_PULSO_MAX",                 CALIB_ID_SERVO_PULSO_MAX,                 TIPO_U16_RAW},
-    {"TIMEOUT_SIN_COMANDO_S",           CALIB_ID_TIMEOUT_SIN_COMANDO_S,           TIPO_U16_RAW},
-    {"TASA_MAX_CAMBIO_RPM_S",           CALIB_ID_TASA_MAX_CAMBIO_RPM_S,           TIPO_X10},
     {"CALIB",                           CALIB_ID_CALIB,                           TIPO_U16_RAW},
     {"INTERVALO_ENVIO_OPERATIVO_S",     CALIB_ID_INTERVALO_ENVIO_OPERATIVO_S,     TIPO_U16_RAW},
     {"INTERVALO_ENVIO_STANDBY_S",       CALIB_ID_INTERVALO_ENVIO_STANDBY_S,       TIPO_U16_RAW},
     {"MODO",                            CALIB_ID_MODO,                            TIPO_U16_RAW},
     {"PRESION_REMOTO",                  CALIB_ID_PRESION_REMOTO,                  TIPO_X10},
-    {"NODE_ID",                         CALIB_ID_NODE_ID,                         TIPO_U16_RAW},
-    {"RESTAURAR_DEFAULTS",              CALIB_ID_RESTAURAR_DEFAULTS,              TIPO_COMANDO},
+    {"REPORTAR_PARAMETROS",             CALIB_ID_REPORTAR_PARAMETROS,             TIPO_COMANDO},
     {"FORZAR_REPORTE",                  CALIB_ID_FORZAR_REPORTE,                  TIPO_COMANDO},
-    {"HISTERESIS_MODO_S",               CALIB_ID_HISTERESIS_MODO_S,               TIPO_U16_RAW},
     {"RESET_REMOTO",                    CALIB_ID_RESET_REMOTO,                    TIPO_COMANDO},
     {"PRESION_OBJETIVO_LOCAL",          CALIB_ID_PRESION_OBJETIVO_LOCAL,          TIPO_X10},
-    {"TASA_MAX_CAMBIO_RPM_LLENADO_S",   CALIB_ID_TASA_MAX_CAMBIO_RPM_LLENADO_S,   TIPO_X10},
     {"PID_ASP_KP",                      CALIB_ID_PID_ASP_KP,                      TIPO_S16_X1000},
     {"PID_ASP_KI",                      CALIB_ID_PID_ASP_KI,                      TIPO_S16_X1000},
     {"PID_PSI_KP",                      CALIB_ID_PID_PSI_KP,                      TIPO_S16_X1000},
@@ -170,6 +165,27 @@ static const char *const AT_ESCRITURAS_PERMITIDAS[] = {
     "AT+NJM=", "AT+BAND=", "AT+MASK=", "AT+CLASS=",
 };
 
+/* Escrituras de PROVISIONAMIENTO de identidad LoRaWAN (DevEUI/JoinEUI/
+ * AppKey), agregado 2026-09-30. Solo se aceptan con MODO=CALIBRACION (4)
+ * Y el motor detenido -- mismo espiritu que el candado de RPM_MAX/MIN. Se
+ * guardan en la memoria NO volatil del propio RAK3172, NO en la flash del
+ * STM32 (este modulo solo reenvia el comando), asi que sobreviven a
+ * cualquier cambio del magic de calibracion (CALx) y a RESTAURAR_DEFAULTS. */
+static const char *const AT_ESCRITURAS_SOLO_CALIBRACION[] = {
+    "AT+DEVEUI=", "AT+APPEUI=", "AT+APPKEY=",
+};
+
+static bool EsEscrituraSoloCalibracion(const char *linea)
+{
+    for (size_t i = 0; i < sizeof(AT_ESCRITURAS_SOLO_CALIBRACION) / sizeof(AT_ESCRITURAS_SOLO_CALIBRACION[0]); i++) {
+        size_t p = strlen(AT_ESCRITURAS_SOLO_CALIBRACION[i]);
+        if (strlen(linea) > p && strncmp(linea, AT_ESCRITURAS_SOLO_CALIBRACION[i], p) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool EsComandoATPermitido(const char *linea)
 {
     size_t n = strlen(linea);
@@ -186,6 +202,11 @@ static bool EsComandoATPermitido(const char *linea)
             return true;
         }
     }
+    /* DEVEUI/APPEUI/APPKEY: permitido solo si se cumplen las condiciones
+     * (MODO=4 + motor detenido); si no, ProcesarLinea() da el motivo. */
+    if (EsEscrituraSoloCalibracion(linea)) {
+        return CalibFlash_GetModo() == CALIB_MODO_CALIBRACION && Tacometro_EstaDetenido();
+    }
     return false;
 }
 
@@ -193,7 +214,11 @@ static void ProcesarLinea(char *linea)
 {
     if (strncmp(linea, "AT", 2U) == 0) {
         if (!EsComandoATPermitido(linea)) {
-            printf("[AT] no permitido -- solo consultas 'AT+XXX=?', AT+NJM/BAND/MASK/CLASS=<v> y ATZ\r\n");
+            if (EsEscrituraSoloCalibracion(linea)) {
+                printf("[AT] DEVEUI/APPEUI/APPKEY solo con MODO=4 (CALIBRACION) y el motor detenido\r\n");
+                return;
+            }
+            printf("[AT] no permitido -- solo consultas 'AT+XXX=?', AT+NJM/BAND/MASK/CLASS=<v>, AT+DEVEUI/APPEUI/APPKEY=<v> (MODO=4, motor detenido) y ATZ\r\n");
         } else if (s_atPorEnviar || s_atEsperando) {
             printf("[AT] ocupado, espera la respuesta anterior\r\n");
         } else {
@@ -212,7 +237,10 @@ static void ProcesarLinea(char *linea)
         return; /* línea vacía (solo Enter) */
     }
     char *valorTexto = strtok(NULL, " \t");
-    float valor = (valorTexto != NULL) ? strtof(valorTexto, NULL) : 0.0f;
+    /* NumeroTexto_LeerDecimal() en vez de strtof(): ahorra ~6-7 KB de flash
+     * (ver numero_texto.h). Mismo resultado para "[signo]digitos[.digitos]";
+     * no acepta notacion cientifica (1e3), que nunca se usa aca. */
+    float valor = (valorTexto != NULL) ? NumeroTexto_LeerDecimal(valorTexto, NULL) : 0.0f;
 
     const ComandoSerial_Descriptor_t *desc = BuscarDescriptor(nombre);
     if (desc == NULL) {
@@ -231,19 +259,13 @@ static void ProcesarLinea(char *linea)
     uint16_t valorAplicadoRaw = 0U;
     CalibFlash_ProtocoloStatus_t status = CalibFlash_ProcesarParametroConEstado(
         desc->id, datosValor, 2U, motorOperando, Tacometro_GetFrecuenciaHz(),
-        PresionV_GetPresionPsi(), &valorAplicadoRaw);
+        &valorAplicadoRaw);
 
-    /* SET_RATIO_AUTO y TIEMPO_LLENADO_S son las entradas de la tabla
-     * donde el tipo de VALOR recibido no coincide con el tipo del valor
-     * vigente devuelto -- SET_RATIO_AUTO recibe RPM (x10) pero devuelve
-     * el ratio resultante (x100, misma escala que SET_RATIO);
-     * TIEMPO_LLENADO_S recibe segundos (raw) pero devuelve la tasa
-     * resultante (x100, misma escala que TASA_LLENADO_PSI_S, agregado
-     * 2026-09-28) -- decodificar el "vigente" con el tipo correcto para
-     * cada uno, no con desc->tipo. */
+    /* SET_RATIO_AUTO es la única entrada donde el VALOR recibido no
+     * coincide con el valor vigente devuelto: recibe RPM (x10) pero
+     * devuelve el ratio resultante (x100, misma escala que SET_RATIO). */
     ComandoSerial_Tipo_t tipoValorVigente =
-        (desc->id == CALIB_ID_SET_RATIO_AUTO || desc->id == CALIB_ID_TIEMPO_LLENADO_S)
-            ? TIPO_X100 : desc->tipo;
+        (desc->id == CALIB_ID_SET_RATIO_AUTO) ? TIPO_X100 : desc->tipo;
 
     printf("[CMD] %s(ID=%u) <- %.3f -> STATUS=%s, valor vigente=%.3f (raw=0x%04X)\r\n",
            desc->nombre, desc->id, valor, EstadoTexto(status),

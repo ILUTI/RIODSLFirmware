@@ -56,6 +56,27 @@ pip install -r requirements.txt
    serial (`comando_serial.c/h`, ver README sección 2.7) y **validar
    siempre en el motor real** repitiendo el escalón del paso 1.
 
+## Revisar en la PC lo que hizo el autotune de la placa (2026-10-01)
+
+Desde 2026-10-01 las calibraciones `CALIB` 5-11 son etapas de los autotunes
+del firmware (README del repo, sección 9) y el escalón del lazo interno ya
+no es cerrado con Kp=1 sino **en lazo abierto** (escalón del pulso):
+
+- **PID#1, log de `CALIB=6` o `13`** — mismo método que la placa (dos
+  puntos 28 %/63 %, cruces interpolados porque `PID_TEST` va cada 200 ms),
+  misma receta SIMC, y compara contra lo que imprimió la placa. Se ancla a
+  la línea `AUTOTUNE_PID1,ESCALON_ABIERTO`; la K peor caso la toma de la
+  curva del mismo log, de la línea `CURVA_REUSADA` o de `--ganancia-log`:
+  ```
+  python pid_tuning.py identify-abierto --log captura_calib6.log
+  ```
+- **PID#2, log de `CALIB=10` o `14`** — el escalón sigue siendo cerrado
+  (+5 PSI con Ki=0), con la Kp de prueba que calculó `CALIB=9` (aparece en
+  la línea `AUTOTUNE_PID2,CURVA,...,kp_prueba=`):
+  ```
+  python pid_tuning.py identify-presion --log captura_calib10.log --kp <kp_prueba>
+  ```
+
 ## Limitaciones conocidas
 
 - El modelo identificado (paso 2) es una aproximación lineal FOPDT

@@ -77,7 +77,7 @@ extern "C" {
 #define PRESION_CORRIENTE_FALLA_ALTA_MA   20.5f
 
 /* Coeficiente del filtro EMA aplicado a la lectura de presion, mismo
- * proposito que TACOMETRO_ALPHA_FILTRO -- suaviza el ruido del ADC sin
+ * proposito que el ALPHA de la RPM (DEFAULT_ALPHA_FILTRO) -- suaviza el ruido del ADC sin
  * agregar lag perceptible frente a la dinamica lenta de una bomba. */
 #define PRESION_ALPHA_FILTRO          0.2f
 

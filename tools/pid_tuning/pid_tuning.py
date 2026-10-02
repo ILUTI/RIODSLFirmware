@@ -9,7 +9,10 @@ formulas usadas aqui. Resumen del flujo:
   2. identify  -- a partir de UN escalon real de SET_RPM (en lazo cerrado,
                   con Kp conocido) calcula el modelo de planta FOPDT
                   (K, tau, L) del motor+servo real.
-  3. tune      -- sobre ESE MODELO SIMULADO (no el motor real), busca la
+     identify-abierto -- lo mismo pero del escalon del PULSO en lazo
+                  abierto que hace la autosintonia (log de CALIB=6/13);
+                  compara contra lo que calculo la placa.
+  3. tune     -- sobre ESE MODELO SIMULADO (no el motor real), busca la
                   ganancia ultima (Ku/Tu, metodo Ziegler-Nichols en lazo
                   cerrado) y da las ganancias P/PI/PID sugeridas.
   4. simulate  -- previsualiza la respuesta de una combinacion de
@@ -757,6 +760,232 @@ def cmd_identify_remoto(args):
           f"--tau {resultado.plant.tau:.3f} --L {resultado.plant.L:.3f}")
 
 
+# ----------------------------------------------------------------------------
+# identify-abierto: escalon del PULSO en lazo abierto de la autosintonia PID#1
+# (CALIB=6 o 13, autotune_rpm.c). Replica la identificacion de la placa para
+# poder revisarla en la PC con el mismo log.
+# ----------------------------------------------------------------------------
+
+AUTOTUNE1_ESCALON_PREFIX = "AUTOTUNE_PID1,ESCALON_ABIERTO,"
+AUTOTUNE1_ID_PREFIX = "AUTOTUNE_PID1,ID,"
+AUTOTUNE1_ID_COMPLETO_PREFIX = "AUTOTUNE_PID1,ID_COMPLETO,"
+AUTOTUNE1_CANDIDATA_PREFIX = "AUTOTUNE_PID1,CANDIDATA,"
+AUTOTUNE1_CURVA_REUSADA_PREFIX = "AUTOTUNE_PID1,CURVA_REUSADA,"
+
+# Mismas constantes que autotune_rpm.c -- si cambian alla, cambiarlas aca.
+AUTOTUNE1_L_MIN_S = 0.15
+AUTOTUNE1_TAU_C_FACTOR_L = 2.0
+AUTOTUNE1_TAU_C_FACTOR_TAU = 3.0
+AUTOTUNE1_TAU_C_MIN_S = 0.30
+
+
+def _campos_clave_valor(linea, desde):
+    campos = {}
+    for parte in linea.split(",")[desde:]:
+        clave, sep, valor = parte.partition("=")
+        if sep:
+            campos[clave] = valor
+    return campos
+
+
+def parse_escalon_abierto_autotune(path):
+    """Lee el log de una corrida de CALIB=6/13 y devuelve las muestras
+    PID_TEST, el indice de la primera muestra DESPUES de la ultima linea
+    'AUTOTUNE_PID1,ESCALON_ABIERTO,...' (el escalon no se autodetecta: en
+    el mismo log estan la curva y las vueltas a la base), los campos de esa
+    linea y lo que imprimio la placa despues (ID / candidata)."""
+    t_ms, rpm, pulso = [], [], []
+    marca = None
+    placa = {}
+    k_peor_reusada = None  # CALIB=6 usa la curva de CALIB=5 y solo imprime su K peor caso
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for linea in f:
+            linea = linea.strip()
+            if linea.startswith(PID_TEST_PREFIX):
+                partes = linea.split(",")
+                if len(partes) != 5:
+                    continue
+                try:
+                    t_ms.append(int(partes[1]))
+                    rpm.append(float(partes[3]))
+                    pulso.append(float(partes[4]))
+                except ValueError:
+                    continue
+            elif linea.startswith(AUTOTUNE1_CURVA_REUSADA_PREFIX):
+                k_peor_reusada = _fnum(_campos_clave_valor(linea, 2), "k_peor")
+            elif linea.startswith(AUTOTUNE1_ESCALON_PREFIX):
+                marca = {"indice": len(t_ms), "campos": _campos_clave_valor(linea, 2)}
+                placa = {}  # nos quedamos con la ULTIMA corrida del log
+            elif marca is not None and linea.startswith(AUTOTUNE1_ID_PREFIX):
+                placa["id"] = _campos_clave_valor(linea, 2)
+            elif marca is not None and (linea.startswith(AUTOTUNE1_ID_COMPLETO_PREFIX)
+                                        or linea.startswith(AUTOTUNE1_CANDIDATA_PREFIX)):
+                placa.setdefault("candidata", _campos_clave_valor(linea, 2))
+
+    if marca is None:
+        raise ValueError(
+            f"No se encontro la linea '{AUTOTUNE1_ESCALON_PREFIX}...' en {path} -- este "
+            "comando es para logs de CALIB=6 o CALIB=13 (escalon en lazo abierto del autotune).")
+    if marca["indice"] >= len(t_ms):
+        raise ValueError("No hay lineas PID_TEST despues del escalon -- ¿el log se corto?")
+    t_arr = np.asarray(t_ms, dtype=float)
+    return {
+        "t_s": (t_arr - t_arr[0]) / 1000.0,
+        "rpm": np.asarray(rpm, dtype=float),
+        "pulso_us": np.asarray(pulso, dtype=float),
+        "i_escalon": marca["indice"],
+        "marca": marca["campos"],
+        "placa": placa,
+        "k_peor_reusada": k_peor_reusada,
+    }
+
+
+def identify_escalon_abierto(t_s, rpm, i_escalon, delta_pulso, duracion_s,
+                             pre_window_s=2.0, ventana_final_s=5.0, metodo="dos-puntos",
+                             umbral_movimiento_rpm=5.0, umbral_movimiento_frac=0.2,
+                             suavizado_s=0.0):
+    """Mismo calculo que Autotune_IdentificarLazoAbierto() (autotune.c):
+    K = delta_RPM_ss / delta_pulso; tau/L por dos puntos (28.3%/63.2%, Smith,
+    lo que usa la placa para PID#1) o por umbral (como identify-remoto)."""
+    t0 = float(t_s[i_escalon])
+    pre = (t_s >= t0 - pre_window_s) & (t_s < t0)
+    if not np.any(pre):
+        raise ValueError("No hay muestras PID_TEST antes del escalon para la base.")
+    post = (t_s >= t0) & (t_s <= t0 + duracion_s)
+    tt = t_s[post] - t0
+    y = rpm[post]
+    if len(y) < 10:
+        raise ValueError("Muy pocas muestras despues del escalon.")
+    y0 = float(np.mean(rpm[pre]))
+
+    fin = tt >= tt[-1] - ventana_final_s
+    ant = (tt >= tt[-1] - 2 * ventana_final_s) & ~fin
+    yf = float(np.mean(y[fin]))
+    aviso = None
+    if np.any(ant):
+        deriva = abs(yf - float(np.mean(y[ant])))
+        tol = max(0.10 * abs(yf - y0), 2.5 * umbral_movimiento_rpm)
+        if deriva > tol:
+            aviso = (f"la RPM seguia moviendose al final ({deriva:.1f} RPM entre las dos ultimas "
+                     f"ventanas de {ventana_final_s:.0f} s; la placa lo rechazaria como no_asento)")
+
+    delta_ss = yf - y0
+    K = delta_ss / delta_pulso
+    if not K > 0:
+        raise ValueError(f"K={K:.4f} no es positiva -- la RPM no subio con el pulso.")
+
+    ys = _suavizar(y, tt, suavizado_s) if suavizado_s > 0.0 else y
+    sube = delta_ss > 0
+
+    def primer_cruce(objetivo, desde=0.0):
+        # Interpolado entre la muestra anterior y la que cruza: PID_TEST va
+        # cada 200 ms y tau de este lazo es ~0.4 s, sin interpolar tau sale
+        # cuantizado a multiplos de 0.2 s.
+        m = (tt >= desde) & ((ys >= objetivo) if sube else (ys <= objetivo))
+        if not np.any(m):
+            return None
+        i = int(np.argmax(m))
+        if i == 0 or ys[i] == ys[i - 1]:
+            return float(tt[i])
+        frac = (objetivo - ys[i - 1]) / (ys[i] - ys[i - 1])
+        return float(tt[i - 1] + frac * (tt[i] - tt[i - 1]))
+
+    t63 = primer_cruce(y0 + 0.632 * delta_ss)
+    if t63 is None:
+        raise ValueError("La respuesta nunca llego al 63.2% del cambio total.")
+    if metodo == "dos-puntos":
+        t28 = primer_cruce(y0 + 0.283 * delta_ss)
+        tau = max(1.5 * (t63 - t28), 1e-3)
+        L = max(t63 - tau, 0.0)
+    else:
+        umbral = max(umbral_movimiento_rpm, umbral_movimiento_frac * abs(delta_ss))
+        movio = np.abs(ys - y0) > umbral
+        if not np.any(movio):
+            raise ValueError("La respuesta nunca supero el umbral de movimiento.")
+        t_movio = float(tt[movio][0])
+        L = t_movio
+        t63 = primer_cruce(y0 + 0.632 * delta_ss, desde=t_movio)
+        tau = max(t63 - t_movio, 1e-3)
+
+    return {"plant": PlantModel(K=K, tau=tau, L=L), "y0": y0, "yf": yf,
+            "delta_ss": delta_ss, "n": int(len(y)), "aviso": aviso}
+
+
+def _fnum(d, clave):
+    try:
+        return float(d[clave])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def cmd_identify_abierto(args):
+    datos = parse_escalon_abierto_autotune(args.log)
+    marca = datos["marca"]
+    pulso_min = _fnum(marca, "pulso_min")
+    pulso_esc = _fnum(marca, "pulso_escalon")
+    if pulso_min is None or pulso_esc is None or pulso_esc <= pulso_min:
+        raise ValueError(f"Linea ESCALON_ABIERTO sin pulso_min/pulso_escalon validos: {marca}")
+    duracion_s = _fnum(marca, "duracion_s") or 30.0
+    delta_pulso = pulso_esc - pulso_min  # el mismo delta que usa la placa (comando, no el pulso rampeado)
+
+    r = identify_escalon_abierto(datos["t_s"], datos["rpm"], datos["i_escalon"], delta_pulso, duracion_s,
+                                 metodo=args.metodo, umbral_movimiento_rpm=args.umbral_movimiento_rpm,
+                                 umbral_movimiento_frac=args.umbral_movimiento_frac,
+                                 suavizado_s=args.suavizado_s)
+    p = r["plant"]
+    print(f"Escalon del pulso: {pulso_min:.0f} -> {pulso_esc:.0f} us (delta {delta_pulso:.0f} us), "
+          f"{r['n']} muestras PID_TEST en {duracion_s:.0f} s")
+    print(f"  RPM: {r['y0']:.1f} -> {r['yf']:.1f} (delta_ss={r['delta_ss']:.1f})")
+    if r["aviso"]:
+        print(f"  ⚠️ {r['aviso']}")
+    print()
+    print(f"Modelo (lazo abierto, metodo {args.metodo}):")
+    print(f"  K   = {p.K:.6f}  RPM por us")
+    print(f"  tau = {p.tau:.3f} s")
+    print(f"  L   = {p.L:.3f} s")
+
+    # K peor caso de la curva: del mismo log (CALIB=6/13 la imprime) o de --ganancia-log.
+    k_usada = p.K
+    ruta_curva = args.ganancia_log or args.log
+    try:
+        pulso_c, rpm_c = parse_ganancia_cal_log(ruta_curva)
+        peor = peor_caso_K_ganancia_cal(pulso_c, rpm_c)
+        k_usada = max(p.K, peor["k_worst"])
+        print(f"  K peor caso de la curva = {peor['k_worst']:.6f} ({peor['n_pasos']} pasos) "
+              f"-> K usada = {k_usada:.6f}")
+    except ValueError:
+        if datos["k_peor_reusada"]:
+            k_usada = max(p.K, datos["k_peor_reusada"])
+            print(f"  K peor caso de la curva de CALIB=5 (linea CURVA_REUSADA) = {datos['k_peor_reusada']:.6f} "
+                  f"-> K usada = {k_usada:.6f}")
+        else:
+            print("  (sin curva en el log: se usa la K del escalon; pasar --ganancia-log con el log de CALIB=5)")
+
+    L_usada = max(p.L, AUTOTUNE1_L_MIN_S)
+    tau_c = max(AUTOTUNE1_TAU_C_FACTOR_L * L_usada, AUTOTUNE1_TAU_C_FACTOR_TAU * p.tau, AUTOTUNE1_TAU_C_MIN_S)
+    kp, ki = simc_pi_gains(k_usada, p.tau, L_usada, tau_c)
+    print()
+    print(f"Candidata con la receta de la placa (L piso {AUTOTUNE1_L_MIN_S} s -> L={L_usada:.3f}, "
+          f"tau_c = max(2L, 3*tau) = {tau_c:.3f} s):")
+    print(f"  Kp = {kp:.4f}   Ki = {ki:.4f}")
+
+    placa = datos["placa"]
+    if placa:
+        print()
+        print("Lo que calculo la placa en esa corrida:")
+        idp = placa.get("id", {})
+        if idp:
+            print(f"  K_escalon={idp.get('K_escalon')}  K_usada={idp.get('K_usada')}  "
+                  f"tau={idp.get('tau')}  L={idp.get('L')}")
+        cand = placa.get("candidata", {})
+        if cand:
+            print(f"  Kp={cand.get('kp')}  Ki={cand.get('ki')}")
+        print("  (diferencias chicas son normales: la placa muestrea cada 50 ms, el log PID_TEST cada 200 ms)")
+    print()
+    print("Para ver otras filas SIMC o simular:")
+    print(f"  python pid_tuning.py simc --K {k_usada:.6f} --tau {p.tau:.3f} --L {L_usada:.3f}")
+
+
 # ============================================================================
 # 3. Replica exacta de PID_CalcularSalidaUs() (pid.c) -- si pid.c cambia,
 #    actualizar esto tambien para que la simulacion siga siendo fiel.
@@ -1446,6 +1675,21 @@ def build_parser():
                          help="Instante del escalon en segundos relativos al log (autodetectado si se omite)")
     p_id_p.set_defaults(func=cmd_identify_presion)
 
+    p_id_a = sub.add_parser("identify-abierto",
+                             help="Identificar (K, tau, L) del lazo INTERNO a partir del escalon del pulso EN LAZO ABIERTO de la autosintonia (log de CALIB=6 o CALIB=13), y comparar con lo que calculo la placa.")
+    p_id_a.add_argument("--log", required=True, help="Log capturado de una corrida de CALIB=6 o 13 (debe tener la linea AUTOTUNE_PID1,ESCALON_ABIERTO)")
+    p_id_a.add_argument("--ganancia-log", default=None,
+                         help="Log con la curva GANANCIA_CAL (default: el mismo --log, que ya la trae)")
+    p_id_a.add_argument("--metodo", default="dos-puntos", choices=["dos-puntos", "umbral"],
+                         help="dos-puntos = el de la placa (28%%/63%%, sin sesgo en tau); umbral = el de identify/identify-remoto")
+    p_id_a.add_argument("--suavizado-s", type=float, default=0.0,
+                         help="Promedio movil (segundos) antes de buscar los cruces -- default 0")
+    p_id_a.add_argument("--umbral-movimiento-frac", type=float, default=0.2,
+                         help="Solo --metodo umbral: fraccion del cambio total para 'se movio'")
+    p_id_a.add_argument("--umbral-movimiento-rpm", type=float, default=5.0,
+                         help="Piso absoluto (RPM) del umbral de movimiento, y del chequeo de 'ya asento'")
+    p_id_a.set_defaults(func=cmd_identify_abierto)
+
     p_id_r = sub.add_parser("identify-remoto",
                              help="Identificar el modelo de planta (K, tau, L) del lazo REMOTO (MODO=2) EN LAZO ABIERTO, a partir de un escalon real de SET_RPM en MODO=3.")
     p_id_r.add_argument("--log", required=True, help="Archivo de log capturado (o su recorte)")
@@ -1508,7 +1752,7 @@ def build_parser():
                          help="Cual de los 3 lazos: 'interno' (RPM->servo, PID_TEST), 'presion' (MODO=1, PRESION_PID_TEST), 'remoto' (MODO=2, REMOTO_PID_TEST, lazo abierto).")
     p_auto.add_argument("--log", required=True, help="Archivo de log capturado")
     p_auto.add_argument("--kp", type=float, default=None,
-                         help="Kp usada durante la prueba (lazo cerrado). Para --loop interno, default 1.0 si se omite -- CALIB=6 siempre se hace con PID_RPM_KP=1/PID_RPM_KI=0 fijo (README seccion 9). REQUERIDO para --loop presion (varia segun la instalacion). Se ignora para --loop remoto, lazo abierto.")
+                         help="Kp usada durante la prueba (lazo cerrado). Para --loop interno, default 1.0 si se omite (escalon cerrado viejo con Kp=1/Ki=0; para logs de CALIB=6 desde 2026-10-01, lazo abierto, usar identify-abierto). REQUERIDO para --loop presion (varia segun la instalacion). Se ignora para --loop remoto, lazo abierto.")
     p_auto.add_argument("--ganancia-log", default=None,
                          help="Para --loop interno o --loop presion (no aplica a remoto): archivo con el barrido en lazo abierto correspondiente -- CALIB=5 ('GANANCIA_CAL,PASO,...') para interno, CALIB=9 ('PRESION_GANANCIA_CAL,PASO,...') para presion. Si se da, se usa el PEOR CASO de K de ese barrido en vez de la K del escalon cerrado -- mas robusto si la ganancia varia con el punto de operacion (ver README seccion 9).")
     p_auto.add_argument("--fila", default="medio", choices=["agresivo", "medio", "conservador"],

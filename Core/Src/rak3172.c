@@ -22,6 +22,7 @@
 #include "calibracion_flash.h"
 #include "tacometro.h"
 #include "presion_voltaje.h"
+#include "numero_texto.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,7 +82,7 @@ static uint32_t          s_ackTickInicio = 0;
 static void RAK3172_EncolarLinea(const char *linea, uint16_t len);
 static void RAK3172_ProcesarLinea(const char *linea);
 static void RAK3172_ProcesarEventoDownlink(const char *linea);
-static bool RAK3172_HexAAlBytes(const char *hex, uint8_t *bytesSalida, uint8_t maxBytes, uint8_t *cantidadBytes);
+static bool RAK3172_HexAAlBytes(const char *hex, uint8_t longitudHex, uint8_t *bytesSalida, uint8_t maxBytes, uint8_t *cantidadBytes);
 static bool RAK3172_EnviarAckInterno(uint8_t id, uint8_t status, uint16_t valorRaw);
 
 /* ==================== API PÚBLICA ==================== */
@@ -319,6 +320,11 @@ static bool RAK3172_EnviarAckInterno(uint8_t id, uint8_t status, uint16_t valorR
     return RAK3172_EnviarComandoAT(comando);
 }
 
+bool RAK3172_HayAckPendiente(void)
+{
+    return s_ackPendiente;
+}
+
 bool RAK3172_EnviarAck(uint8_t id, uint8_t status, uint16_t valorRaw)
 {
     if (RAK3172_ComandoListo() && RAK3172_EnviarAckInterno(id, status, valorRaw)) {
@@ -338,28 +344,6 @@ bool RAK3172_EnviarAck(uint8_t id, uint8_t status, uint16_t valorRaw)
     s_ackTickInicio = HAL_GetTick();
 
     return false;
-}
-
-bool RAK3172_EnviarRPM(float rpm)
-{
-    /* Codificación simple: RPM x10 como entero de 16 bits sin signo,
-     * en hexadecimal de 4 dígitos. Ej: 2783.2 RPM -> 27832 -> "6CB8".
-     * ⚠️ SUPERADO por RAK3172_EnviarUplinkLive() -- se mantiene solo
-     * por compatibilidad/pruebas de banco, main.c ya no lo llama. */
-    if (rpm < 0.0f) {
-        rpm = 0.0f;
-    }
-    if (rpm > 6553.5f) {
-        rpm = 6553.5f; /* techo del rango representable en 16 bits x10 */
-    }
-
-    uint16_t valorEscalado = (uint16_t)(rpm * 10.0f + 0.5f);
-
-    char comando[RAK3172_TX_BUFFER_SIZE];
-    snprintf(comando, sizeof(comando), "AT+SEND=%u:%04X",
-              (unsigned int)RAK3172_FPORT_UPLINK_RPM, valorEscalado);
-
-    return RAK3172_EnviarComandoAT(comando);
 }
 
 bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
@@ -423,15 +407,19 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
     payload[26] = (uint8_t)((uint32_t)lonRaw & 0xFFU);
     payload[27] = codigoAlerta;
 
-    char payloadHex[28 * 2 + 1];
-    for (uint8_t i = 0; i < 28U; i++) {
-        snprintf(&payloadHex[i * 2], 3, "%02X", payload[i]);
+    return RAK3172_EnviarUplink(RAK3172_FPORT_UPLINK_RPM, payload, sizeof(payload));
+}
+
+bool RAK3172_EnviarUplink(uint8_t fport, const uint8_t *datos, uint8_t len)
+{
+    if (len > RAK3172_UPLINK_MAX_BYTES) {
+        return false;
     }
-
     char comando[RAK3172_TX_BUFFER_SIZE];
-    snprintf(comando, sizeof(comando), "AT+SEND=%u:%s",
-              (unsigned int)RAK3172_FPORT_UPLINK_RPM, payloadHex);
-
+    int n = snprintf(comando, sizeof(comando), "AT+SEND=%u:", (unsigned int)fport);
+    for (uint8_t i = 0; i < len; i++) {
+        n += snprintf(&comando[n], sizeof(comando) - (uint32_t)n, "%02X", datos[i]);
+    }
     return RAK3172_EnviarComandoAT(comando);
 }
 
@@ -534,12 +522,13 @@ static void RAK3172_ProcesarLinea(const char *linea)
          * join/uplink cada 2 min de todas formas -- cada intento
          * durante la restriccion es, en el mejor caso, inutil, y en el
          * peor vuelve a resetear/extender el propio backoff. */
-        unsigned long esperaMs = 0;
-        if (sscanf(linea, "Restricted_Wait_%lu_ms", &esperaMs) == 1) {
+        const char *cursor = linea + 16; /* tras "Restricted_Wait_" */
+        uint32_t esperaMs = 0;
+        if (NumeroTexto_LeerUint(&cursor, 10U, &esperaMs)) {
             s_restringidoHastaTickMs = HAL_GetTick() + (uint32_t)esperaMs;
             printf("RAK3172: modulo restringido por backoff de join/duty-cycle -- %lu ms (~%.1fh). "
                    "Pausando reintentos de join/uplink hasta que pase.\r\n",
-                   esperaMs, (double)esperaMs / 3600000.0);
+                   (unsigned long)esperaMs, (double)esperaMs / 3600000.0);
         }
         if (s_comandoEnCurso) {
             s_comandoEnCurso = false;
@@ -610,21 +599,38 @@ static void RAK3172_ProcesarEventoDownlink(const char *linea)
      * el PRIMER byte es el ID del parámetro (ver calibracion_flash.h,
      * CALIB_ID_*), y los bytes restantes son el valor de ese parámetro
      * en el formato/escala que le corresponda. Toda esa lógica vive
-     * en CalibFlash_ProcesarParametro(), este módulo solo separa los
+     * en CalibFlash_ProcesarParametroConEstado(), este módulo solo separa los
      * bytes y se los pasa.
      */
-    char ventanaRx[16];
-    int rssi;
-    int snr;
-    char tipo[16];
-    unsigned int fport = 0;
-    char payloadHex[RAK3172_RX_BUFFER_SIZE];
-
-    int camposLeidos = sscanf(linea, "+EVT:%15[^:]:%d:%d:%15[^:]:%u:%63s",
-                               ventanaRx, &rssi, &snr, tipo, &fport, payloadHex);
-
-    if (camposLeidos != 6) {
-        return; /* no es una línea de downlink con payload, se ignora */
+    /* Lector a mano en vez de sscanf("+EVT:%15[^:]:%d:%d:%15[^:]:%u:%63s")
+     * (2026-10-01, ahorra el lector de la libreria de C). Mismas reglas:
+     * 6 campos separados por ':', ventana y tipo no vacios (<= 15
+     * caracteres), RSSI/SNR enteros con signo, FPort entero, y payload sin
+     * espacios (<= 63). Solo se usan el FPort y el payload. */
+    const char *p = linea + 5; /* tras "+EVT:" */
+    const char *payloadHex = NULL;
+    uint8_t largoPayload = 0U;
+    uint32_t fport = 0U;
+    for (uint8_t campo = 0U; campo < 6U; campo++) {
+        const char *inicio = p;
+        if (campo == 1U || campo == 2U) {          /* RSSI, SNR */
+            uint32_t ignorado;
+            if (*p == '-' || *p == '+') p++;
+            if (!NumeroTexto_LeerUint(&p, 6U, &ignorado)) return;
+        } else if (campo == 4U) {                  /* FPort */
+            if (!NumeroTexto_LeerUint(&p, 3U, &fport)) return;
+        } else if (campo == 5U) {                  /* payload hex */
+            while (*p != '\0' && *p != ' ' && *p != '\r' && *p != '\n') p++;
+            if (p == inicio || p - inicio > 63) return;
+            payloadHex = inicio;
+            largoPayload = (uint8_t)(p - inicio);
+            break;
+        } else {                                   /* ventana, tipo */
+            while (*p != '\0' && *p != ':') p++;
+            if (p == inicio || p - inicio > 15) return;
+        }
+        if (*p != ':') return; /* no es una línea de downlink con payload, se ignora */
+        p++;
     }
 
     if (fport != RAK3172_FPORT_PARAMETRO) {
@@ -634,7 +640,7 @@ static void RAK3172_ProcesarEventoDownlink(const char *linea)
     uint8_t bytesPayload[16];
     uint8_t cantidadBytes = 0;
 
-    if (!RAK3172_HexAAlBytes(payloadHex, bytesPayload, sizeof(bytesPayload), &cantidadBytes)) {
+    if (!RAK3172_HexAAlBytes(payloadHex, largoPayload, bytesPayload, sizeof(bytesPayload), &cantidadBytes)) {
         return; /* payload no era hexadecimal válido */
     }
 
@@ -655,7 +661,7 @@ static void RAK3172_ProcesarEventoDownlink(const char *linea)
     uint16_t valorAplicadoRaw = 0U;
     CalibFlash_ProtocoloStatus_t status = CalibFlash_ProcesarParametroConEstado(
         idParametro, datosValor, longitudValor, motorOperando,
-        Tacometro_GetFrecuenciaHz(), PresionV_GetPresionPsi(), &valorAplicadoRaw);
+        Tacometro_GetFrecuenciaHz(), &valorAplicadoRaw);
 
     printf("Downlink ID=%u (%u bytes de valor) -> STATUS=%d, valor vigente=0x%04X\r\n",
            idParametro, longitudValor, (int)status, valorAplicadoRaw);
@@ -666,10 +672,8 @@ static void RAK3172_ProcesarEventoDownlink(const char *linea)
     RAK3172_EnviarAck(idParametro, (uint8_t)status, valorAplicadoRaw);
 }
 
-static bool RAK3172_HexAAlBytes(const char *hex, uint8_t *bytesSalida, uint8_t maxBytes, uint8_t *cantidadBytes)
+static bool RAK3172_HexAAlBytes(const char *hex, uint8_t longitudHex, uint8_t *bytesSalida, uint8_t maxBytes, uint8_t *cantidadBytes)
 {
-    size_t longitudHex = strlen(hex);
-
     /* Se espera un número par de caracteres hex (2 por byte). Si el
      * payload real trae longitud impar (poco común, pero posible si
      * el servidor no rellena con cero a la izquierda), se rechaza en
@@ -684,13 +688,12 @@ static bool RAK3172_HexAAlBytes(const char *hex, uint8_t *bytesSalida, uint8_t m
     }
 
     for (uint8_t i = 0; i < cantidad; i++) {
-        char parBytes[3] = { hex[i * 2], hex[i * 2 + 1], '\0' };
-        char *fin = NULL;
-        unsigned long valor = strtoul(parBytes, &fin, 16);
-        if (fin != parBytes + 2) {
+        int alto = NumeroTexto_HexDigito(hex[i * 2]);
+        int bajo = NumeroTexto_HexDigito(hex[i * 2 + 1]);
+        if (alto < 0 || bajo < 0) {
             return false; /* carácter no hexadecimal encontrado */
         }
-        bytesSalida[i] = (uint8_t)valor;
+        bytesSalida[i] = (uint8_t)((alto << 4) | bajo);
     }
 
     *cantidadBytes = cantidad;

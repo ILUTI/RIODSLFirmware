@@ -13,7 +13,25 @@
 static float s_integral = 0.0f;
 static uint32_t s_ultimoCalculoMs = 0;
 
+/* Ganancias temporales (solo RAM) para la autosintonia (autotune_psi.c):
+ * mismo patron y motivo que en pid.c -- probar candidatas sin escribir flash. */
+static bool  s_gananciasTemporalesActivas = false;
+static float s_kpTemporal = 0.0f;
+static float s_kiTemporal = 0.0f;
+
 /* ==================== API PÚBLICA ==================== */
+
+void PresionPid_SetGananciasTemporales(float kp, float ki)
+{
+    s_kpTemporal = kp;
+    s_kiTemporal = ki;
+    s_gananciasTemporalesActivas = true;
+}
+
+void PresionPid_LimpiarGananciasTemporales(void)
+{
+    s_gananciasTemporalesActivas = false;
+}
 
 void PresionPid_Init(void)
 {
@@ -29,8 +47,8 @@ float PresionPid_CalcularSetpointRpm(float setpointPresionPsi, float presionMedi
 
     float error = setpointPresionPsi - presionMedidaPsi;
 
-    float kp = CalibFlash_GetPidPsiKp();
-    float ki = CalibFlash_GetPidPsiKi();
+    float kp = s_gananciasTemporalesActivas ? s_kpTemporal : CalibFlash_GetPidPsiKp();
+    float ki = s_gananciasTemporalesActivas ? s_kiTemporal : CalibFlash_GetPidPsiKi();
 
     float maximo = CalibFlash_GetRpmMax();
 

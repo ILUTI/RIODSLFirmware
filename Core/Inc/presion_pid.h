@@ -62,6 +62,14 @@ void PresionPid_Init(void);
  */
 float PresionPid_CalcularSetpointRpm(float setpointPresionPsi, float presionMedidaPsi);
 
+/**
+ * Ganancias TEMPORALES (solo RAM, no tocan flash) que pisan a
+ * PID_PSI_KP/KI mientras esten activas -- uso exclusivo de la autosintonia
+ * (autotune_psi.c, CALIB=14). Limpiar siempre al terminar/abortar.
+ */
+void PresionPid_SetGananciasTemporales(float kp, float ki);
+void PresionPid_LimpiarGananciasTemporales(void);
+
 #ifdef __cplusplus
 }
 #endif

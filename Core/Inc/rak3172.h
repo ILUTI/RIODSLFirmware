@@ -181,19 +181,6 @@ RAK3172_Resultado_t RAK3172_GetUltimoResultado(void);
  */
 bool RAK3172_GetUltimaRespuesta(char *destino, uint32_t tamDestino);
 
-/**
- * Arma y envía el uplink de RPM actual usando AT+SEND, en el FPort
- * definido por RAK3172_FPORT_UPLINK_RPM. Codifica la RPM como entero
- * sin signo de 16 bits escalado x10 (ej. 2783.2 RPM -> 27832 -> hex
- * "6CB8"), para evitar la complejidad de mandar floats en hex.
- *
- * ⚠️ SUPERADO por RAK3172_EnviarUplinkLive() -- se mantiene solo por
- * compatibilidad/pruebas de banco, main.c ya no lo llama.
- *
- * @param rpm   RPM a enviar (típicamente Tacometro_GetRPMFiltrada()).
- * @return true si se pudo encolar el comando AT+SEND correspondiente.
- */
-bool RAK3172_EnviarRPM(float rpm);
 
 /**
  * Arma y envía el uplink LIVE extendido (28 bytes) del nodo motor:
@@ -254,6 +241,21 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
  *         encolado para reintento (no es necesariamente un error).
  */
 bool RAK3172_EnviarAck(uint8_t id, uint8_t status, uint16_t valorRaw);
+
+/**
+ * Manda un uplink con 'len' bytes crudos por 'fport' (AT+SEND, no
+ * bloqueante, mismo canal AT que el resto). Lo usan el uplink LIVE y el
+ * reporte REPORTAR_PARAMETROS (FPort 3, grupos de 4 bytes como el ACK).
+ * Máximo RAK3172_UPLINK_MAX_BYTES (= tamaño del LIVE, que ya se sabe que
+ * pasa con el data rate actual).
+ */
+#define RAK3172_UPLINK_MAX_BYTES  28U
+bool RAK3172_EnviarUplink(uint8_t fport, const uint8_t *datos, uint8_t len);
+
+/** true mientras un Application ACK espera canal para salir (ver
+ *  RAK3172_EnviarAck). Lo usa RESET_REMOTO para no reiniciar antes de
+ *  confirmar. */
+bool RAK3172_HayAckPendiente(void);
 
 /**
  * Pide la hora UTC a la red LoRaWAN (DeviceTimeReq de la especificación

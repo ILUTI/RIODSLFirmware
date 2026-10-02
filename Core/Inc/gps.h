@@ -135,13 +135,6 @@ float GPS_GetLatitud(void);
 /** Última longitud válida conocida (grados decimales, + = Este). 0.0f si nunca hubo fix. */
 float GPS_GetLongitud(void);
 
-/**
- * HAL_GetTick() del momento del último fix válido recibido. 0 si nunca
- * hubo fix -- el llamador puede compararlo contra HAL_GetTick() actual
- * para decidir si la posición ya es demasiado vieja y usar un
- * fallback (ver LATITUD_FIJA/LONGITUD_FIJA en main.c).
- */
-uint32_t GPS_GetUltimoFixTickMs(void);
 
 /**
  * Fecha/hora UTC (NO local) del último "+CGPSINFO:" con fix válido,

@@ -99,9 +99,7 @@ void Tacometro_Update(void)
         s_hayPeriodoNuevo = false;
         __enable_irq();
 
-        /* Antes se usaban directamente los #define. Ahora se consultan
-         * en tiempo de ejecución para permitir calibración remota vía
-         * downlink LoRaWAN (ver calibracion_flash.h / rak3172.c). */
+        /* Valores calibrados en flash (downlink SET_RATIO/ALPHA o CALIB=3). */
         float pulsosPorRevolucion = CalibFlash_GetPulsosPorRevolucion();
         float alphaFiltro = CalibFlash_GetAlphaFiltro();
 
@@ -149,24 +147,4 @@ bool Tacometro_EstaDetenido(void)
 uint32_t Tacometro_GetContadorRuidoFiltrado(void)
 {
     return s_contadorRuido;
-}
-
-bool Tacometro_SetPulsosPorRevolucion(float nuevoValor)
-{
-    return CalibFlash_SetPulsosPorRevolucion(nuevoValor);
-}
-
-float Tacometro_GetPulsosPorRevolucion(void)
-{
-    return CalibFlash_GetPulsosPorRevolucion();
-}
-
-bool Tacometro_SetAlphaFiltro(float nuevoValor)
-{
-    return CalibFlash_SetAlphaFiltro(nuevoValor);
-}
-
-float Tacometro_GetAlphaFiltro(void)
-{
-    return CalibFlash_GetAlphaFiltro();
 }

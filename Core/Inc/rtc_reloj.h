@@ -36,31 +36,13 @@ extern "C" {
 /** Debe llamarse una sola vez en main(), después de MX_RTC_Init(). */
 void Reloj_Init(RTC_HandleTypeDef *hrtc);
 
-/** Setea el RTC a partir de un epoch UNIX en UTC (ej. el valor que
- * entrega AT+LTIME=? de la red LoRaWAN vía DeviceTimeReq). Marca el
- * reloj como sincronizado -- ver Reloj_EstaSincronizado(). */
-void Reloj_SetUnixTimeUtc(uint32_t epochUtc);
-
 /** Setea el RTC directo desde campos de calendario UTC (hora/fecha ya
- * separados) -- usar esta en vez de Reloj_SetUnixTimeUtc() cuando la
- * fuente de la hora entrega el dato ya legible en vez de un epoch.
- * Ej. real de AT+LTIME=? en RUI3: "AT+LTIME=15h08m55s on 08/17/2026"
+ * separados). Ej. real de AT+LTIME=? en RUI3: "AT+LTIME=15h08m55s on 08/17/2026"
  * (formato MM/DD/YYYY, confirmado en campo 2026-08-17) -- parsear eso
  * en el llamador y pasar los campos sueltos aca. Marca el reloj como
- * sincronizado igual que Reloj_SetUnixTimeUtc(). */
+ * sincronizado -- ver Reloj_EstaSincronizado(). */
 void Reloj_SetHoraUtc(uint16_t anio, uint8_t mes, uint8_t dia,
                        uint8_t hora, uint8_t minuto, uint8_t segundo);
-
-/** Setea el RTC con una estimacion (ej. la ultima hora conocida
- * persistida en flash, ver CalibFlash_GetUltimaHoraUtcConocida()) --
- * a diferencia de Reloj_SetUnixTimeUtc()/Reloj_SetHoraUtc(), esta
- * funcion NO marca Reloj_EstaSincronizado() como true, porque el dato
- * es una aproximacion (puede tener horas/dias de atraso si el equipo
- * estuvo apagado), no una confirmacion fresca de la red en este
- * arranque. Util para que el uplink LIVE arranque con una fecha
- * razonable en vez del default de MX_RTC_Init() (2000), mientras se
- * espera la resincronizacion real. */
-void Reloj_CargarHoraAproximada(uint32_t epochUtc);
 
 /** true si el RTC ya fue seteado al menos una vez desde el arranque
  * actual (por DeviceTimeReq). false significa que la hora que devuelve

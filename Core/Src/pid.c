@@ -12,7 +12,27 @@
 static float s_integral = 0.0f;
 static uint32_t s_ultimoCalculoMs = 0;
 
+/* Ganancias temporales (solo RAM) -- usadas por la autosintonia
+ * (autotune_rpm.c) para probar candidatas SIN escribir flash: un corte de
+ * energia a mitad del ensayo no deja una Kp de prueba pegada, y no se gasta
+ * flash en cada intento. Si estan activas, pisan a las de CalibFlash. */
+static bool  s_gananciasTemporalesActivas = false;
+static float s_kpTemporal = 0.0f;
+static float s_kiTemporal = 0.0f;
+
 /* ==================== API PÚBLICA ==================== */
+
+void PID_SetGananciasTemporales(float kp, float ki)
+{
+    s_kpTemporal = kp;
+    s_kiTemporal = ki;
+    s_gananciasTemporalesActivas = true;
+}
+
+void PID_LimpiarGananciasTemporales(void)
+{
+    s_gananciasTemporalesActivas = false;
+}
 
 void PID_Init(void)
 {
@@ -28,8 +48,8 @@ uint16_t PID_CalcularSalidaUs(float setpointRpm, float rpmMedida)
 
     float error = setpointRpm - rpmMedida;
 
-    float kp = CalibFlash_GetPidRpmKp();
-    float ki = CalibFlash_GetPidRpmKi();
+    float kp = s_gananciasTemporalesActivas ? s_kpTemporal : CalibFlash_GetPidRpmKp();
+    float ki = s_gananciasTemporalesActivas ? s_kiTemporal : CalibFlash_GetPidRpmKi();
 
     uint16_t minimo = CalibFlash_GetServoPulsoMinUs();
     uint16_t maximo = CalibFlash_GetServoPulsoMaxUs();
