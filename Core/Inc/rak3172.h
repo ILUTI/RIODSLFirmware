@@ -1,20 +1,22 @@
 /**
  * @file    rak3172.h
  * @brief   Módulo de comunicación con el módulo RAK3172 (LoRaWAN) vía
- *          comandos AT, sobre LPUART1 (PA2=TX, PA3=RX).
+ *          comandos AT, sobre USART1 (PA9=TX, PA10=RX). (LPUART1 es la
+ *          consola de debug, no el RAK3172.)
  *
  * Responsabilidades:
  *   - Enviar comandos AT y esperar su respuesta ("OK", "ERROR", o el
  *     valor consultado) de forma no bloqueante, integrada al loop
- *     principal (Tacometro_Update()/Modbus_Update()).
+ *     principal.
  *   - Recibir y parsear eventos asíncronos "+EVT:" que el módulo manda
  *     por su cuenta (ej. downlink recibido, hora de red disponible),
  *     sin que el host los haya solicitado.
- *   - Exponer funciones para mandar el uplink LIVE del nodo motor y
- *     para sincronizar la hora contra la red (DeviceTimeReq).
+ *   - Exponer funciones para mandar el uplink LIVE, el ACK y el reporte
+ *     de parámetros, y para sincronizar la hora contra la red
+ *     (DeviceTimeReq).
  *
  * Uso típico en main.c:
- *   RAK3172_Init(&hlpuart1);
+ *   RAK3172_Init(&huart1);
  *   ...
  *   while (1) {
  *       RAK3172_Update();
@@ -23,13 +25,12 @@
  *       }
  *   }
  *
- * Y en el callback global de HAL (en main.c, USER CODE):
+ * Y en los callbacks globales de HAL (en main.c, USER CODE):
  *   void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
+ *       if (huart->Instance == USART1) RAK3172_RxEventCallback(huart, Size);
  *       ...
- *       else if (huart->Instance == LPUART1) {
- *           RAK3172_RxEventCallback(huart, Size);
- *       }
  *   }
+ *   (y lo mismo con HAL_UART_ErrorCallback -> RAK3172_ErrorCallback)
  */
 
 #ifndef RAK3172_H
@@ -45,9 +46,8 @@ extern "C" {
 
 /* ==================== CONFIGURACIÓN AJUSTABLE ==================== */
 
-/* Tamaño del buffer circular de recepción por DMA (debe coincidir con
- * el tamaño de bufferRAKRx que se pasa a HAL_UARTEx_ReceiveToIdle_DMA
- * en main.c). */
+/* Tamaño del buffer de recepción por DMA (vive en rak3172.c) y de cada
+ * línea de la cola de recepción. */
 #define RAK3172_RX_BUFFER_SIZE        128U
 
 /* Tamaño máximo de un comando AT a transmitir (incluye "AT+...\r\n").
@@ -56,9 +56,9 @@ extern "C" {
  * se agregan más campos al payload en el futuro, revisar este tamaño. */
 #define RAK3172_TX_BUFFER_SIZE        96U
 
-/* Timeout por defecto esperando respuesta "OK"/"ERROR" a un comando AT
- * enviado (ms). Comandos de join a la red pueden tardar más -- se
- * puede pasar un timeout distinto por comando si se requiere. */
+/* Timeout esperando respuesta "OK"/"ERROR" a un comando AT (ms), igual
+ * para todos los comandos. AT+JOIN contesta "OK" enseguida; el resultado
+ * real llega despues como "+EVT:JOINED". */
 #define RAK3172_TIMEOUT_DEFAULT_MS    2000U
 
 /* FPort usado para el uplink LIVE del motor (RPM + presión + estado +
@@ -114,11 +114,10 @@ bool RAK3172_EstaRestringido(void);
 bool RAK3172_Join(void);
 
 /**
- * Inicializa el módulo. Llamar una vez en main(), después de que
- * MX_LPUART1_UART_Init() ya corrió y de haber arrancado la recepción
- * con HAL_UARTEx_ReceiveToIdle_DMA(&hlpuart1, bufferRAKRx, ...).
+ * Inicializa el módulo y arranca la recepción por DMA. Llamar una vez en
+ * main(), después de MX_USART1_UART_Init() y MX_DMA_Init().
  *
- * @param huart   Puntero al handle de LPUART1 (&hlpuart1 en main.c).
+ * @param huart   Puntero al handle de USART1 (&huart1 en main.c).
  */
 void RAK3172_Init(UART_HandleTypeDef *huart);
 
@@ -130,8 +129,7 @@ void RAK3172_Update(void);
 
 /**
  * Debe llamarse desde el callback global HAL_UARTEx_RxEventCallback()
- * en main.c, cuando el evento provenga de LPUART1. Es seguro llamarlo
- * solo cuando huart->Instance == LPUART1 (ver ejemplo de uso arriba).
+ * en main.c (ver ejemplo de uso arriba). Ignora eventos de otras UART.
  */
 void RAK3172_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size);
 
@@ -153,8 +151,8 @@ void RAK3172_ErrorCallback(UART_HandleTypeDef *huart);
  * Envía un comando AT crudo (sin "\r\n", se agrega internamente) y
  * regresa inmediatamente -- no bloquea esperando la respuesta.
  * La respuesta se procesa de forma asíncrona; usar
- * RAK3172_HayRespuestaPendiente()/RAK3172_GetUltimoResultado() si se
- * necesita conocer el resultado desde el loop principal.
+ * RAK3172_ComandoListo()/RAK3172_GetUltimoResultado() si se necesita
+ * conocer el resultado desde el loop principal.
  *
  * @param comando   Comando AT sin terminador, ej. "AT+VER=?".
  * @return true si se pudo encolar/transmitir, false si ya hay un
@@ -183,17 +181,18 @@ bool RAK3172_GetUltimaRespuesta(char *destino, uint32_t tamDestino);
 
 
 /**
- * Arma y envía el uplink LIVE extendido (28 bytes) del nodo motor:
+ * Arma y envía el uplink LIVE extendido (32 bytes) del nodo motor:
  * motorIdNumeric + RPM + presión + estado + fecha/hora + inicio de
- * operación + segundos transcurridos + lat/lon + codigoAlerta. Ver
+ * operación + segundos transcurridos + lat/lon + codigoAlerta + batería +
+ * horómetro (los dos últimos agregados 2026-10-02, bytes 28-31). Ver
  * decoder.py del lado AWS (_decodificar_live()) para el layout exacto
  * de offsets -- cualquier cambio acá debe reflejarse allá.
  *
  * @param motorIdNumeric           Numérico del nodo (ej. 1 -> "DSL-0001").
  * @param rpm                      RPM actual.
  * @param presion                  Presión de salida de la motobomba, en
- *                                 PSI (ver presion.c,
- *                                 Presion_GetPresionPsi()).
+ *                                 PSI (hoy PresionV_GetPresionPsi(), canal
+ *                                 de voltaje temporal; el final es presion.c).
  * @param estado                   1=ACTIVO, 2=APAGADO, 3=ENCENDIDO (ver
  *                                 ESTADO_* en main.c).
  * @param fechaHoraLocal           Epoch unix, YA con el offset de
@@ -201,8 +200,8 @@ bool RAK3172_GetUltimaRespuesta(char *destino, uint32_t tamDestino);
  * @param inicioOperacionLocal     Epoch unix local de cuándo empezó el
  *                                 estado actual.
  * @param segundosTranscurridos    Segundos desde inicioOperacionLocal.
- * @param latitud                  Latitud fija del sitio (sin GPS aún).
- * @param longitud                 Longitud fija del sitio (sin GPS aún).
+ * @param latitud                  Latitud del GPS (0 sin fix: "Sin posición").
+ * @param longitud                 Longitud del GPS (0 sin fix).
  * @param codigoAlerta             Snapshot de la alerta vigente en el
  *                                 momento del envío (0=sin alerta, ver
  *                                 ALERTA_* en main.c). En uplinks
@@ -210,6 +209,10 @@ bool RAK3172_GetUltimaRespuesta(char *destino, uint32_t tamDestino);
  *                                 usar CalibFlash_ForzarReporte() para
  *                                 que el timestamp del uplink coincida
  *                                 con el momento del evento.
+ * @param bateriaPct               % de la batería propia del nodo (0-100);
+ *                                 0xFF = sin medición (hoy no hay hardware).
+ * @param horometroDecimas         Horómetro en décimas de hora (3 bytes,
+ *                                 se topa en 0xFFFFFF = 1 677 721.5 h).
  * @return true si se pudo encolar el comando AT+SEND correspondiente.
  */
 bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
@@ -217,7 +220,8 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
                                uint32_t inicioOperacionLocal,
                                uint32_t segundosTranscurridos,
                                float latitud, float longitud,
-                               uint8_t codigoAlerta);
+                               uint8_t codigoAlerta, uint8_t bateriaPct,
+                               uint32_t horometroDecimas);
 
 /**
  * Arma y envía el Application ACK del protocolo Quick-Set (4 bytes:
@@ -246,10 +250,11 @@ bool RAK3172_EnviarAck(uint8_t id, uint8_t status, uint16_t valorRaw);
  * Manda un uplink con 'len' bytes crudos por 'fport' (AT+SEND, no
  * bloqueante, mismo canal AT que el resto). Lo usan el uplink LIVE y el
  * reporte REPORTAR_PARAMETROS (FPort 3, grupos de 4 bytes como el ACK).
- * Máximo RAK3172_UPLINK_MAX_BYTES (= tamaño del LIVE, que ya se sabe que
- * pasa con el data rate actual).
+ * Máximo RAK3172_UPLINK_MAX_BYTES (= tamaño del LIVE). Con AT+DR=5 (AU915,
+ * SF7) caben ~222 bytes; ojo si ADR baja el DR: con DR2 + dwell time solo
+ * entran 11.
  */
-#define RAK3172_UPLINK_MAX_BYTES  28U
+#define RAK3172_UPLINK_MAX_BYTES  32U
 bool RAK3172_EnviarUplink(uint8_t fport, const uint8_t *datos, uint8_t len);
 
 /** true mientras un Application ACK espera canal para salir (ver
@@ -280,10 +285,10 @@ bool RAK3172_HoraDeRedDisponible(void);
 
 /**
  * Consulta el valor de hora ya recibido de la red ("AT+LTIME=?"). La
- * respuesta llega por el mecanismo genérico RAK3172_GetUltimaRespuesta()
- * -- leer ese buffer después de que este comando termine
- * (RAK3172_ComandoListo() vuelva a true) y parsear el epoch (ver nota
- * en rak3172.c sobre el formato de respuesta aún sin confirmar en campo).
+ * respuesta ("AT+LTIME=15h08m55s on 08/17/2026", confirmada en campo)
+ * llega por el mecanismo genérico RAK3172_GetUltimaRespuesta() -- leer
+ * ese buffer después de que este comando termine (RAK3172_ComandoListo()
+ * vuelva a true). main.c la convierte a fecha/hora.
  *
  * @return true si se pudo encolar el comando AT+LTIME=?.
  */

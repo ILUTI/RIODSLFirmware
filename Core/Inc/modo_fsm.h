@@ -24,12 +24,15 @@
  *   - MODO 0, 3, 4: siempre aceptados (3 y 4 tambien con motor apagado).
  *   - MODO 1 y 2: rechazados con motor detenido.
  *   - MODO 1: desde cualquier modo (decision 2026-10-01, no se restringe).
- *   - MODO 2: requiere PRESION_OBJETIVO_REMOTO > 0 y venir de MODO 1 (o ya
- *     estar en 2). */
+ *   - MODO 2: requiere PRESION_OBJETIVO_REMOTO > 0, venir de MODO 1 (o ya
+ *     estar en 2) y 'remotoDisponible' (enlace LoRa unido Y un PRESION_REMOTO
+ *     recibido en los ultimos TIMEOUT_SIN_COMANDO_S). Vale igual si se pide
+ *     por downlink o por la consola serial (decision 2026-10-02). */
 CalibFlash_ProtocoloStatus_t Modo_ValidarEntrada(CalibFlash_Modo_t actual,
                                                  uint8_t solicitado,
                                                  bool motorOperando,
-                                                 float presionObjetivoRemoto);
+                                                 float presionObjetivoRemoto,
+                                                 bool remotoDisponible);
 
 /** Nota 1 de la hoja: SET_RPM inicial al ENTRAR a MODO 3. Viniendo de MODO 1
  * o 2 conserva el RPM actual (para no bajar a ralenti con la tuberia con

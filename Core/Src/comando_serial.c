@@ -1,17 +1,16 @@
 /**
  * @file    comando_serial.c
- * @brief   Implementación del mando manual por serial (ver comando_serial.h).
+ * @brief   Consola de parámetros y pass-through AT por el puerto de debug
+ *          (ver comando_serial.h).
  */
 
 #include "comando_serial.h"
 #include "calibracion_flash.h"
 #include "tacometro.h"
-#include "presion_voltaje.h"
 #include "rak3172.h"
 #include "numero_texto.h"
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 #include <stdbool.h>
 
 #define COMANDO_SERIAL_LINEA_MAX   48U
@@ -21,8 +20,7 @@ typedef enum {
     TIPO_X10,
     TIPO_X100,
     TIPO_X1000,
-    TIPO_S16_X100,    /* con signo -- ganancias PID */
-    TIPO_S16_X1000,
+    TIPO_S16_X1000,   /* con signo -- ganancias PID */
     TIPO_COMANDO      /* no lleva VALOR -- siempre manda el byte de confirmación */
 } ComandoSerial_Tipo_t;
 
@@ -32,9 +30,10 @@ typedef struct {
     ComandoSerial_Tipo_t tipo;
 } ComandoSerial_Descriptor_t;
 
-/* Espejo EXACTO de la tabla de parámetros del TID (README sección 3) y
- * de PARAMETER_TABLE en send_downlink.py -- si el firmware agrega o
- * cambia un parámetro en calibracion_flash.c, actualizar aquí también. */
+/* Espejo de la tabla de parámetros del TID (README "Tabla completa de
+ * parámetros", k_params[] de calibracion_flash.c) y de PARAM_TABLE de la
+ * Lambda RIODSLSendDownlink -- si se agrega o cambia un parámetro,
+ * actualizar aquí también. */
 static const ComandoSerial_Descriptor_t TABLA[] = {
     {"SET_RATIO",                       CALIB_ID_SET_RATIO,                       TIPO_X100},
     {"SET_RATIO_AUTO",                  CALIB_ID_SET_RATIO_AUTO,                  TIPO_X10},
@@ -64,13 +63,21 @@ static const ComandoSerial_Descriptor_t TABLA[] = {
     {"RPM_MAX_CARGA",                   CALIB_ID_RPM_MAX_CARGA,                   TIPO_X10},
     {"TIEMPO_LLENADO_S",                CALIB_ID_TIEMPO_LLENADO_S,                TIPO_U16_RAW},
     {"PRESION_MAX",                     CALIB_ID_PRESION_MAX,                     TIPO_X10},
+    {"HOROMETRO_H",                     CALIB_ID_HOROMETRO_H,                     TIPO_U16_RAW},
 };
 #define TABLA_CANTIDAD (sizeof(TABLA) / sizeof(TABLA[0]))
 
 static UART_HandleTypeDef *s_huart;
-static char     s_linea[COMANDO_SERIAL_LINEA_MAX];
+static char     s_linea[COMANDO_SERIAL_LINEA_MAX];   /* se arma en la ISR */
 static uint8_t  s_indice;
 static uint8_t  s_rxByte;
+
+/* Línea completa esperando ser procesada en ComandoSerial_Update() (fuera
+ * de la ISR, ver ComandoSerial_RxCpltCallback). Una sola a la vez: si llega
+ * otra antes de procesar la anterior, se descarta y se avisa. */
+static char          s_lineaPendiente[COMANDO_SERIAL_LINEA_MAX];
+static volatile bool s_hayLineaPendiente = false;
+static volatile bool s_lineaDescartada = false;
 
 static const ComandoSerial_Descriptor_t *BuscarDescriptor(const char *nombre)
 {
@@ -100,7 +107,6 @@ static void CodificarValor(ComandoSerial_Tipo_t tipo, float valor, uint8_t datos
             case TIPO_X10:        escala = 10.0f;   break;
             case TIPO_X100:       escala = 100.0f;  break;
             case TIPO_X1000:      escala = 1000.0f; break;
-            case TIPO_S16_X100:   escala = 100.0f;  minimo = -32768.0f; maximo = 32767.0f; break;
             case TIPO_S16_X1000:  escala = 1000.0f; minimo = -32768.0f; maximo = 32767.0f; break;
             case TIPO_U16_RAW:
             default:              escala = 1.0f;    break;
@@ -123,7 +129,6 @@ static float DecodificarValor(ComandoSerial_Tipo_t tipo, uint16_t raw)
         case TIPO_X10:       return raw / 10.0f;
         case TIPO_X100:      return raw / 100.0f;
         case TIPO_X1000:     return raw / 1000.0f;
-        case TIPO_S16_X100:  return (float)(int16_t)raw / 100.0f;
         case TIPO_S16_X1000: return (float)(int16_t)raw / 1000.0f;
         case TIPO_U16_RAW:
         case TIPO_COMANDO:
@@ -147,7 +152,7 @@ static const char *EstadoTexto(CalibFlash_ProtocoloStatus_t status)
     }
 }
 
-/* Pass-through permanente hacia el RAK3172: consultas "AT+XXX=?" (leer
+/* Pass-through hacia el RAK3172: consultas "AT+XXX=?" (leer
  * APPKEY/DEVEUI/VER/etc.) mas una lista corta de escrituras de
  * provisionamiento (ver AT_ESCRITURAS_PERMITIDAS y ATZ). Cualquier otro
  * comando AT se rechaza. Comparte el canal AT con los uplinks (ocupa
@@ -170,7 +175,7 @@ static const char *const AT_ESCRITURAS_PERMITIDAS[] = {
  * Y el motor detenido -- mismo espiritu que el candado de RPM_MAX/MIN. Se
  * guardan en la memoria NO volatil del propio RAK3172, NO en la flash del
  * STM32 (este modulo solo reenvia el comando), asi que sobreviven a
- * cualquier cambio del magic de calibracion (CALx) y a RESTAURAR_DEFAULTS. */
+ * cualquier cambio del magic de calibracion (CALx). */
 static const char *const AT_ESCRITURAS_SOLO_CALIBRACION[] = {
     "AT+DEVEUI=", "AT+APPEUI=", "AT+APPKEY=",
 };
@@ -210,6 +215,8 @@ static bool EsComandoATPermitido(const char *linea)
     return false;
 }
 
+/* Corre en ComandoSerial_Update() (contexto normal del loop), NUNCA en la
+ * ISR: puede escribir flash y hace printf bloqueante. */
 static void ProcesarLinea(char *linea)
 {
     if (strncmp(linea, "AT", 2U) == 0) {
@@ -224,14 +231,13 @@ static void ProcesarLinea(char *linea)
         } else {
             strncpy(s_atPendiente, linea, sizeof(s_atPendiente) - 1U);
             s_atPendiente[sizeof(s_atPendiente) - 1U] = '\0';
-            s_atPorEnviar = true; /* se transmite desde ComandoSerial_Update(), fuera de la ISR */
+            s_atPorEnviar = true; /* se transmite en la misma ComandoSerial_Update() */
         }
         return;
     }
 
-    /* strtok en vez de sscanf("%s %f") -- RESTAURAR_DEFAULTS/FORZAR_REPORTE/
-     * RESET_REMOTO no llevan VALOR, y sscanf con %f de menos fallaría
-     * la conversión completa en vez de solo dejar valor en 0. */
+    /* strtok: los comandos (REPORTAR_PARAMETROS, FORZAR_REPORTE,
+     * RESET_REMOTO) no llevan VALOR -- sin valor queda en 0. */
     char *nombre = strtok(linea, " \t");
     if (nombre == NULL) {
         return; /* línea vacía (solo Enter) */
@@ -244,7 +250,7 @@ static void ProcesarLinea(char *linea)
 
     const ComandoSerial_Descriptor_t *desc = BuscarDescriptor(nombre);
     if (desc == NULL) {
-        printf("[CMD] \"%s\" no reconocido -- nombres validos: ver tabla de parametros, README seccion 3\r\n", nombre);
+        printf("[CMD] \"%s\" no reconocido -- nombres validos: ver la tabla de parametros del README\r\n", nombre);
         return;
     }
 
@@ -281,8 +287,25 @@ void ComandoSerial_Init(UART_HandleTypeDef *huart)
 
 void ComandoSerial_Update(void)
 {
-    /* Recepcion de la consola: ver ComandoSerial_RxCpltCallback().
-     * Aqui solo el pass-through temporal de consultas AT al RAK3172. */
+    /* 1) Línea de la consola recibida por la ISR (2026-10-02, hallazgo B16):
+     *    se procesa AQUÍ y no en la ISR -- procesarla dentro de la
+     *    interrupción podía escribir flash (decenas de ms sin atender el
+     *    tacómetro, que tiene la misma prioridad), mezclar printf con los del
+     *    loop, y pisar una escritura de flash que el loop tuviera a medias. */
+    if (s_lineaDescartada) {
+        s_lineaDescartada = false;
+        printf("[CMD] linea descartada: llego otra antes de procesar la anterior\r\n");
+    }
+    if (s_hayLineaPendiente) {
+        char linea[COMANDO_SERIAL_LINEA_MAX];
+        __disable_irq();
+        memcpy(linea, s_lineaPendiente, sizeof(linea));
+        s_hayLineaPendiente = false;
+        __enable_irq();
+        ProcesarLinea(linea);
+    }
+
+    /* 2) Pass-through de comandos AT al RAK3172. */
     if (s_atPorEnviar && RAK3172_ComandoListo()) {
         if (RAK3172_EnviarComandoAT(s_atPendiente)) {
             s_atEsperando = true;
@@ -313,16 +336,24 @@ void ComandoSerial_RxCpltCallback(UART_HandleTypeDef *huart)
     char c = (char)s_rxByte;
 
     if (c == '\r' || c == '\n') {
-        printf("\r\n");
+        static const uint8_t finLinea[2] = { '\r', '\n' };
+        HAL_UART_Transmit(s_huart, (uint8_t *)finLinea, 2U, 0U); /* eco, no bloqueante */
         if (s_indice > 0U) {
             s_linea[s_indice] = '\0';
-            ProcesarLinea(s_linea);
+            /* Solo se entrega la línea: la procesa ComandoSerial_Update(). */
+            if (s_hayLineaPendiente) {
+                s_lineaDescartada = true;
+            } else {
+                memcpy(s_lineaPendiente, s_linea, (size_t)s_indice + 1U);
+                s_hayLineaPendiente = true;
+            }
             s_indice = 0U;
         }
     } else if (c == '\b' || c == 0x7F) {
         if (s_indice > 0U) {
+            static const uint8_t borrar[3] = { '\b', ' ', '\b' };
             s_indice--;
-            printf("\b \b");
+            HAL_UART_Transmit(s_huart, (uint8_t *)borrar, 3U, 0U); /* eco, no bloqueante */
         }
     } else if (s_indice < (COMANDO_SERIAL_LINEA_MAX - 1U)) {
         s_linea[s_indice++] = c;

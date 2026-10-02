@@ -54,6 +54,9 @@ static uint32_t s_canal = 0;
 static uint16_t s_pulsoActualUs = 0;
 static uint16_t s_pulsoFisicoActualUs = 0;
 static uint32_t s_ultimoMovimientoMs = 0;
+/* Avance permitido acumulado y todavia no aplicado, en milesimas de µs --
+ * guarda los decimales que la division entera tiraba en cada vuelta. */
+static uint32_t s_avanceMilesimasUs = 0;
 
 /* ==================== API PÚBLICA ==================== */
 
@@ -63,6 +66,7 @@ void Servo_Init(TIM_HandleTypeDef *htim, uint32_t canal)
     s_canal = canal;
     s_pulsoActualUs = 0;
     s_ultimoMovimientoMs = HAL_GetTick();
+    s_avanceMilesimasUs = 0U;
 }
 
 uint16_t Servo_SetPulsoUs(uint16_t microsegundos)
@@ -102,16 +106,30 @@ uint16_t Servo_MoverHacia(uint16_t destinoUs)
     uint32_t transcurridoMs = ahora - s_ultimoMovimientoMs;
     s_ultimoMovimientoMs = ahora;
 
-    int32_t pasoMaximo = (int32_t)((SERVO_VELOCIDAD_MAX_US_S * transcurridoMs) / 1000U);
+    /* Velocidad EXACTA (2026-10-02, hallazgo B19): antes el paso se calculaba
+     * como VEL * ms / 1000 en enteros y se perdian los decimales en cada
+     * vuelta -- con vueltas de 1-3 ms el servo iba a ~1000 µs/s y con 4 ms a
+     * 1250, es decir, la velocidad dependia de lo ocupado que estuviera el
+     * loop. Ahora el sobrante se acumula para la vuelta siguiente. */
+    if (transcurridoMs > 60000U) {
+        transcurridoMs = 60000U; /* tope anti-desborde; de sobra para ir de MIN a MAX */
+    }
+    s_avanceMilesimasUs += SERVO_VELOCIDAD_MAX_US_S * transcurridoMs;
+    int32_t pasoMaximo = (int32_t)(s_avanceMilesimasUs / 1000U);
     int32_t diferencia = (int32_t)destinoUs - (int32_t)s_pulsoActualUs;
 
     int32_t siguiente;
     if (diferencia > pasoMaximo) {
         siguiente = (int32_t)s_pulsoActualUs + pasoMaximo;
+        s_avanceMilesimasUs -= (uint32_t)pasoMaximo * 1000U;
     } else if (diferencia < -pasoMaximo) {
         siguiente = (int32_t)s_pulsoActualUs - pasoMaximo;
+        s_avanceMilesimasUs -= (uint32_t)pasoMaximo * 1000U;
     } else {
+        /* Llego (o ya estaba): no se guarda avance para despues, si no el
+         * proximo movimiento arrancaria con un salto acumulado. */
         siguiente = destinoUs;
+        s_avanceMilesimasUs = 0U;
     }
 
     return Servo_SetPulsoUs((uint16_t)siguiente);

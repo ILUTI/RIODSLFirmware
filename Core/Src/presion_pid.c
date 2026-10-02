@@ -1,93 +1,57 @@
 /**
  * @file    presion_pid.c
- * @brief   Implementacion del lazo externo (cascada) presion -> setpoint de RPM.
+ * @brief   Lazo externo (cascada) presion -> setpoint de RPM (PID#2).
+ *          Usa el nucleo P+I compartido de pid.c (Pi_Calcular).
  */
 
 #include "presion_pid.h"
+#include "pid.h"
 #include "calibracion_flash.h"
-#include "stm32g4xx_hal.h"
-#include <stdbool.h>
 
-/* ==================== ESTADO INTERNO ==================== */
-
-static float s_integral = 0.0f;
-static uint32_t s_ultimoCalculoMs = 0;
-
-/* Ganancias temporales (solo RAM) para la autosintonia (autotune_psi.c):
- * mismo patron y motivo que en pid.c -- probar candidatas sin escribir flash. */
-static bool  s_gananciasTemporalesActivas = false;
-static float s_kpTemporal = 0.0f;
-static float s_kiTemporal = 0.0f;
-
-/* ==================== API PÚBLICA ==================== */
+static Pi_t s_pid2;
 
 void PresionPid_SetGananciasTemporales(float kp, float ki)
 {
-    s_kpTemporal = kp;
-    s_kiTemporal = ki;
-    s_gananciasTemporalesActivas = true;
+    Pi_SetGananciasTemporales(&s_pid2, kp, ki);
 }
 
 void PresionPid_LimpiarGananciasTemporales(void)
 {
-    s_gananciasTemporalesActivas = false;
+    Pi_LimpiarGananciasTemporales(&s_pid2);
 }
 
 void PresionPid_Init(void)
 {
-    s_integral = 0.0f;
-    s_ultimoCalculoMs = HAL_GetTick();
+    Pi_Init(&s_pid2);
 }
 
 float PresionPid_CalcularSetpointRpm(float setpointPresionPsi, float presionMedidaPsi)
 {
-    uint32_t ahora = HAL_GetTick();
-    float dtS = (ahora - s_ultimoCalculoMs) / 1000.0f;
-    s_ultimoCalculoMs = ahora;
-
-    float error = setpointPresionPsi - presionMedidaPsi;
-
-    float kp = s_gananciasTemporalesActivas ? s_kpTemporal : CalibFlash_GetPidPsiKp();
-    float ki = s_gananciasTemporalesActivas ? s_kiTemporal : CalibFlash_GetPidPsiKi();
-
-    float maximo = CalibFlash_GetRpmMax();
-
     /* Piso de arranque (feedforward) = RPM_MIN, mismo patron que pid.c
-     * (SERVO_PULSO_MIN + correccion). Encontrado en campo 2026-09-21:
-     * sin esto, para sostener una presion objetivo real (que
-     * tipicamente requiere un RPM bien por encima de RPM_MIN) el
-     * termino integral tiene que reconstruir SOLO todo ese RPM desde
-     * cero -- con el motor ya en ralenti (setpoint < RPM_MIN,
-     * controlSolicitado=false) eso tarda varios minutos en cruzar el
-     * umbral y se veia como si el lazo "no reaccionara". Con RPM_MIN
-     * de piso, el termino P+I solo tiene que corregir la diferencia
-     * entre RPM_MIN y el RPM real necesario -- igual de valido, mucho
-     * mas rapido. */
+     * (SERVO_PULSO_MIN + correccion). Encontrado en campo 2026-09-21: sin
+     * esto, el integral tenia que reconstruir SOLO todo el RPM necesario
+     * desde cero y tardaba minutos en cruzar RPM_MIN -- parecia que el lazo
+     * "no reaccionaba". Con el piso, P+I solo corrige la diferencia. */
     float base = CalibFlash_GetRpmMin();
 
-    if (ki > 0.0f) {
-        /* Mismo anti-windup por integracion condicional que pid.c: solo
-         * se acumula si la salida tentativa no esta ya empujando mas
-         * alla del limite saturado. */
-        float integralTentativa = s_integral + error * dtS;
-        float salidaTentativa = base + kp * error + ki * integralTentativa;
-        bool saturaAlto = salidaTentativa > maximo;
-        bool saturaBajo = salidaTentativa < 0.0f;
-        if (!(saturaAlto && error > 0.0f) && !(saturaBajo && error < 0.0f)) {
-            s_integral = integralTentativa;
-        }
-    } else {
-        /* KI=0 -- no acumular en silencio mientras esta ganancia esta
-         * apagada (mismo motivo que pid.c: evita un salto al activarla). */
-        s_integral = 0.0f;
-    }
+    /* Techo = RPM_MAX_CARGA, no RPM_MAX (2026-10-02): este lazo siempre corre
+     * con la bomba embragada y main.c recorta su salida a RPM_MAX_CARGA.
+     * Antes el anti-windup usaba RPM_MAX: con RPM_MAX_CARGA < RPM_MAX el
+     * integral seguia acumulando entre los dos techos mientras el motor ya
+     * no podia dar mas, y al alcanzar la presion se pasaba del objetivo. */
+    float maximo = CalibFlash_GetRpmMaxCarga();
 
-    float salida = base + kp * error + ki * s_integral;
-    if (salida > maximo) {
-        salida = maximo;
-    } else if (salida < 0.0f) {
-        salida = 0.0f;
-    }
+    /* Anti-windup hacia ABAJO en RPM_MIN (corrección 0), no en 0 RPM
+     * (2026-10-02): con la presion por encima del objetivo, el integral se
+     * vaciaba hasta pedir 0 RPM -- ~RPM_MIN por debajo del ralenti, que en
+     * la practica es lo mismo -- y al volver a bajar la presion tenia que
+     * rellenar esos RPM "de mentira" antes de acelerar (reaccion lenta).
+     * La SALIDA si puede seguir bajando hasta 0 (corrección -base): con la
+     * presion muy alta el termino P aun pide "sin comandar" y deja que
+     * controlSolicitado caiga a ralenti natural. ⚠️ Validar en campo. */
+    float correccion = Pi_Calcular(&s_pid2, setpointPresionPsi - presionMedidaPsi,
+                                   CalibFlash_GetPidPsiKp(), CalibFlash_GetPidPsiKi(),
+                                   0.0f, maximo - base, -base, maximo - base);
 
-    return salida;
+    return base + correccion;
 }

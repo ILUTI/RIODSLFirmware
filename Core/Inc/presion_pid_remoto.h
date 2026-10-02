@@ -30,7 +30,8 @@
  * reporte nuevo, con el tiempo REAL transcurrido para el integral.
  *
  * El objetivo local que realmente se aplica al PID#2 cambia a ritmo
- * limitado (TASA_LLENADO_PSI_S), en las dos direcciones -- regla de la
+ * limitado (PRESION_OBJETIVO_LOCAL / TIEMPO_LLENADO_S, ver
+ * CalibFlash_GetTasaLlenadoPsiS()), en las dos direcciones -- regla de la
  * tuberia del usuario: la presion nunca cambia mas rapido que el ritmo de
  * llenado que valido el operador (ver PresionPidRemoto_ObjetivoAplicado()).
  */

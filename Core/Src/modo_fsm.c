@@ -10,7 +10,8 @@
 CalibFlash_ProtocoloStatus_t Modo_ValidarEntrada(CalibFlash_Modo_t actual,
                                                  uint8_t solicitado,
                                                  bool motorOperando,
-                                                 float presionObjetivoRemoto)
+                                                 float presionObjetivoRemoto,
+                                                 bool remotoDisponible)
 {
     /* MODO 1/2 no se arman con el motor detenido (decision 2026-09-22): si el
      * PID de presion entrara a controlar desde el primer instante que el motor
@@ -31,6 +32,12 @@ CalibFlash_ProtocoloStatus_t Modo_ValidarEntrada(CalibFlash_Modo_t actual,
         /* MODO 2 solo desde MODO 1 (o ya en 2): su base es la
          * PRESION_OBJETIVO_LOCAL que MODO 1 dejo sostenida (decision 2026-09-30). */
         if (actual != CALIB_MODO_PRESION_LOCAL && actual != CALIB_MODO_REMOTO) {
+            return CALIB_STATUS_APPLY_ERROR;
+        }
+        /* MODO 2 desde downlink O consola, pero solo con enlace LoRa y el
+         * aspersor reportando (decision 2026-10-02): sin eso el watchdog de
+         * main.c lo degradaria a MODO 1 en la vuelta siguiente. */
+        if (!remotoDisponible) {
             return CALIB_STATUS_APPLY_ERROR;
         }
     }

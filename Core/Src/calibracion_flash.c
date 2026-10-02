@@ -18,6 +18,8 @@
 #include "main.h"
 #include "modo_fsm.h"
 #include "tacometro.h"
+#include "rak3172.h"
+#include "horometro.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -77,9 +79,9 @@ typedef struct {
     float    rpmMin;                   /* RPM_MIN */
     float    pidRpmKp;                 /* PID_RPM_KP */
     float    pidRpmKi;                 /* PID_RPM_KI */
-    uint32_t reservado4;               /* antes tasaMaxCambioRpmS (ID 12, eliminado 2026-10-01) */
+    uint32_t reservado4;               /* antes tasaMaxCambioRpmS (eliminado 2026-10-01) */
     float    presionObjetivoLocal;     /* PRESION_OBJETIVO_LOCAL */
-    uint32_t reservado5;               /* antes tasaMaxCambioRpmLlenadoS (ID 24, ahora fijo 2026-10-01) */
+    uint32_t reservado5;               /* antes tasaMaxCambioRpmLlenadoS (ahora fijo 2026-10-01) */
     uint32_t reservado1;               /* antes ultimaLatitudConocida (eliminada 2026-10-01) */
     uint32_t reservado2;               /* antes ultimaLongitudConocida (eliminada 2026-10-01) */
     float    pidAspKp;                 /* PID_ASP_KP -- lazo de presion remota (MODO=2) */
@@ -90,14 +92,14 @@ typedef struct {
     uint32_t reservado8;               /* antes tasaLlenadoPsiS (2026-10-01: se calcula al leerla
                                         * desde TIEMPO_LLENADO_S, ver CalibFlash_GetTasaLlenadoPsiS) */
 
-    uint32_t reservado6;               /* antes timeoutSinComandoS (ID 11, ahora fijo 2026-10-01) */
+    uint32_t reservado6;               /* antes timeoutSinComandoS (ahora fijo 2026-10-01) */
     uint32_t reservado0;               /* antes ultimaHoraUtcConocida (eliminada 2026-10-01) */
 
     uint16_t servoPulsoMinUs;          /* SERVO_PULSO_MIN */
     uint16_t servoPulsoMaxUs;          /* SERVO_PULSO_MAX */
     uint16_t intervaloOperativoS;      /* INTERVALO_ENVIO_OPERATIVO_S */
     uint16_t intervaloStandbyS;        /* INTERVALO_ENVIO_STANDBY_S */
-    uint16_t reservado7;               /* antes histeresisModoS (ID 21, ahora fijo 2026-10-01) */
+    uint16_t reservado7;               /* antes histeresisModoS (ahora fijo 2026-10-01) */
     uint16_t tiempoLlenadoS;           /* TIEMPO_LLENADO_S: segundos para llenar de 0 PSI a
                                          * PRESION_OBJETIVO_LOCAL. 0 = sin rampa. Lo usan la rampa
                                          * de MODO=1/2 y CALIB=9/14 */
@@ -126,6 +128,10 @@ static float s_presionRemoto = 0.0f;
  * tick del boot para que el watchdog de TIMEOUT_SIN_COMANDO_S cuente desde
  * el arranque si nunca llega ninguna. */
 static uint32_t s_presionRemotoUltimoTickMs = 0U;
+/* true desde el primer PRESION_REMOTO real (s_presionRemotoUltimoTickMs arranca
+ * en el tick del boot para el watchdog, asi que solo no prueba que el
+ * aspersor haya reportado alguna vez). */
+static bool s_huboPresionRemota = false;
 /* Downlinks MODO aceptados (solo del operador, no los cambios automáticos
  * de main.c) -- ver CalibFlash_GetModoDownlinkCount(). */
 static uint32_t s_modoDownlinkCount = 0U;
@@ -161,7 +167,8 @@ typedef enum {
     T_F_U16,        /* float, viaja como uint16 x escala */
     T_F_S16,        /* float, viaja como int16 con signo x escala (ganancias PID) */
     T_U16,          /* uint16 directo */
-    T_U8            /* uint8 directo (CALIB, MODO) */
+    T_U8,           /* uint8 directo (CALIB, MODO) */
+    T_HOROMETRO     /* no vive en s_datos: horas enteras de horometro.c */
 } TipoParam_t;
 
 /* Condición extra (además de la categoría) para aceptar el cambio. */
@@ -189,35 +196,37 @@ typedef struct {
 #define CAT_CMD   CALIB_CATEGORIA_COMANDO
 
 static const Param_t k_params[] = {
+    /* En orden de ID (2026-10-02), que es también el orden del reporte.
+     * MODO, CALIB, SET_RATIO_AUTO, los de RAM y los comandos tienen lógica
+     * propia (switch del dispatcher): su campo/escala es solo lo que se
+     * devuelve en el ACK y en el reporte. */
     /* id                                     categoria tipo       candado            campo                        reporte escala */
-    { CALIB_ID_SET_RATIO,                     CAT_CAL,  T_F_U16,   C_MODO_CAL,        CAMPO(pulsosPorRevolucion),  1,  100.0f },
-    { CALIB_ID_ALPHA,                         CAT_CAL,  T_F_U16,   C_NINGUNO,         CAMPO(alphaFiltro),          1, 1000.0f },
-    { CALIB_ID_RPM_MAX,                       CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMax),               1,   10.0f },
+    { CALIB_ID_MODO,                          CAT_CAL,  T_U8,      C_NINGUNO,         CAMPO(modo),                 1,    1.0f },
+    { CALIB_ID_CALIB,                         CAT_CAL,  T_U8,      C_NINGUNO,         CAMPO(calib),                1,    1.0f },
+    { CALIB_ID_SET_RPM,                       CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
+    { CALIB_ID_SET_PRESION,                   CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
+    { CALIB_ID_PRESION_OBJETIVO_LOCAL,        CAT_PROC, T_F_U16,   C_NINGUNO,         CAMPO(presionObjetivoLocal), 1,   10.0f },
+    { CALIB_ID_PRESION_OBJETIVO_REMOTO,       CAT_PROC, T_F_U16,   C_NINGUNO,         CAMPO(presionObjetivoRemoto),1,   10.0f },
+    { CALIB_ID_PRESION_REMOTO,                CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
+    { CALIB_ID_TIEMPO_LLENADO_S,              CAT_PROC, T_U16,     C_NINGUNO,         CAMPO(tiempoLlenadoS),       1,    1.0f },
     { CALIB_ID_RPM_MIN,                       CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMin),               1,   10.0f },
+    { CALIB_ID_RPM_MAX,                       CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMax),               1,   10.0f },
     { CALIB_ID_RPM_MAX_CARGA,                 CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMaxCarga),          1,   10.0f },
     { CALIB_ID_PRESION_MAX,                   CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(presionMax),           1,   10.0f },
-    { CALIB_ID_PID_RPM_KP,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidRpmKp),             1, 1000.0f },
-    { CALIB_ID_PID_RPM_KI,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidRpmKi),             1, 1000.0f },
-    { CALIB_ID_PID_ASP_KP,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidAspKp),             1, 1000.0f },
-    { CALIB_ID_PID_ASP_KI,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidAspKi),             1, 1000.0f },
-    { CALIB_ID_PID_PSI_KP,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidPsiKp),             1, 1000.0f },
-    { CALIB_ID_PID_PSI_KI,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidPsiKi),             1, 1000.0f },
     { CALIB_ID_SERVO_PULSO_MIN,               CAT_CONF, T_U16,     C_SESION_SERVO,    CAMPO(servoPulsoMinUs),      1,    1.0f },
     { CALIB_ID_SERVO_PULSO_MAX,               CAT_CONF, T_U16,     C_SESION_SERVO,    CAMPO(servoPulsoMaxUs),      1,    1.0f },
     { CALIB_ID_INTERVALO_ENVIO_OPERATIVO_S,   CAT_CONF, T_U16,     C_NINGUNO,         CAMPO(intervaloOperativoS),  1,    1.0f },
     { CALIB_ID_INTERVALO_ENVIO_STANDBY_S,     CAT_CONF, T_U16,     C_NINGUNO,         CAMPO(intervaloStandbyS),    1,    1.0f },
-    { CALIB_ID_PRESION_OBJETIVO_LOCAL,        CAT_PROC, T_F_U16,   C_NINGUNO,         CAMPO(presionObjetivoLocal), 1,   10.0f },
-    { CALIB_ID_PRESION_OBJETIVO_REMOTO,       CAT_PROC, T_F_U16,   C_NINGUNO,         CAMPO(presionObjetivoRemoto),1,   10.0f },
-    { CALIB_ID_TIEMPO_LLENADO_S,              CAT_PROC, T_U16,     C_NINGUNO,         CAMPO(tiempoLlenadoS),       1,    1.0f },
-
-    /* Con lógica propia (switch del dispatcher). El campo/escala es lo que
-     * se devuelve en el ACK y en el reporte. */
-    { CALIB_ID_CALIB,                         CAT_CAL,  T_U8,      C_NINGUNO,         CAMPO(calib),                1,    1.0f },
-    { CALIB_ID_MODO,                          CAT_CAL,  T_U8,      C_NINGUNO,         CAMPO(modo),                 1,    1.0f },
+    { CALIB_ID_HOROMETRO_H,                   CAT_CONF, T_HOROMETRO, C_NINGUNO,       0U,                          1,    1.0f },
+    { CALIB_ID_SET_RATIO,                     CAT_CAL,  T_F_U16,   C_MODO_CAL,        CAMPO(pulsosPorRevolucion),  1,  100.0f },
     { CALIB_ID_SET_RATIO_AUTO,                CAT_CAL,  T_F_U16,   C_MODO_CAL,        CAMPO(pulsosPorRevolucion),  0,  100.0f },
-    { CALIB_ID_SET_RPM,                       CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
-    { CALIB_ID_SET_PRESION,                   CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
-    { CALIB_ID_PRESION_REMOTO,                CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
+    { CALIB_ID_ALPHA,                         CAT_CAL,  T_F_U16,   C_NINGUNO,         CAMPO(alphaFiltro),          1, 1000.0f },
+    { CALIB_ID_PID_RPM_KP,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidRpmKp),             1, 1000.0f },
+    { CALIB_ID_PID_RPM_KI,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidRpmKi),             1, 1000.0f },
+    { CALIB_ID_PID_PSI_KP,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidPsiKp),             1, 1000.0f },
+    { CALIB_ID_PID_PSI_KI,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidPsiKi),             1, 1000.0f },
+    { CALIB_ID_PID_ASP_KP,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidAspKp),             1, 1000.0f },
+    { CALIB_ID_PID_ASP_KI,                    CAT_CAL,  T_F_S16,   C_MODO_CAL_CALIB0, CAMPO(pidAspKi),             1, 1000.0f },
     { CALIB_ID_REPORTAR_PARAMETROS,           CAT_CMD,  T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
     { CALIB_ID_FORZAR_REPORTE,                CAT_CMD,  T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
     { CALIB_ID_RESET_REMOTO,                  CAT_CMD,  T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
@@ -268,6 +277,7 @@ void CalibFlash_Init(void)
     s_setPresion = 0.0f;
     s_presionRemoto = 0.0f;
     s_presionRemotoUltimoTickMs = HAL_GetTick();
+    s_huboPresionRemota = false;
     s_reporteForzadoPendiente = false;
     s_reporteConfigPendiente = true; /* al arrancar se reportan los parámetros guardados */
     s_resetPendiente = false;
@@ -353,6 +363,15 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id, c
         /* El operador manda el RPM que marca un tacómetro externo y el
          * firmware despeja el ratio con su propia frecuencia (misma fórmula
          * que Tacometro_Update()). Sin motor girando no hay qué calcular. */
+        /* Fija el horometro (horas enteras); despues sigue sumando solo.
+         * Categoria CONFIGURACION: solo con el motor detenido. */
+        case CALIB_ID_HOROMETRO_H: {
+            bool ok = Horometro_Fijar((uint32_t)LeerUint16BigEndian(datos) * 3600UL);
+            s_ultimaEscrituraFallo = !ok;
+            *valorAplicadoRaw = ValorRaw(p);
+            return StatusDe(ok);
+        }
+
         case CALIB_ID_SET_RATIO_AUTO: {
             float rpmReferencia = (float)LeerUint16BigEndian(datos) / 10.0f;
             bool ok = (rpmReferencia > 0.0f && frecuenciaHzActual > 0.0f)
@@ -397,6 +416,7 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id, c
         case CALIB_ID_PRESION_REMOTO: {
             s_presionRemoto = (float)LeerUint16BigEndian(datos) / 10.0f;
             s_presionRemotoUltimoTickMs = HAL_GetTick();
+            s_huboPresionRemota = true;
             *valorAplicadoRaw = CodificarUint16(s_presionRemoto, 10.0f);
             return CALIB_STATUS_OK;
         }
@@ -440,8 +460,14 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id, c
         case CALIB_ID_MODO: {
             uint8_t solicitado = datos[1];
             CalibFlash_Modo_t anterior = CalibFlash_GetModo();
+            /* MODO 2 necesita enlace LoRa y el aspersor reportando, venga el
+             * pedido por downlink o por la consola serial. */
+            bool remotoDisponible = RAK3172_EstaUnido() && s_huboPresionRemota
+                    && (HAL_GetTick() - s_presionRemotoUltimoTickMs)
+                       < CalibFlash_GetTimeoutSinComandoS() * 1000UL;
             CalibFlash_ProtocoloStatus_t statusEntrada = Modo_ValidarEntrada(
-                    anterior, solicitado, motorOperando, s_datos.presionObjetivoRemoto);
+                    anterior, solicitado, motorOperando, s_datos.presionObjetivoRemoto,
+                    remotoDisponible);
             if (statusEntrada != CALIB_STATUS_OK) {
                 s_rechazoModoPendiente = true;
                 *valorAplicadoRaw = (uint16_t)anterior;
@@ -597,6 +623,10 @@ static uint16_t ValorRaw(const Param_t *p)
         case T_F_S16: return CodificarInt16ComoRaw(*(const float *)campo, p->escala);
         case T_U16:   return *(const uint16_t *)campo;
         case T_U8:    return *campo;
+        case T_HOROMETRO: {
+            uint32_t horas = Horometro_GetSegundos() / 3600UL;
+            return (horas > 65535UL) ? 65535U : (uint16_t)horas;
+        }
         default:      return 0U;
     }
 }
@@ -650,7 +680,6 @@ float CalibFlash_GetTasaLlenadoPsiS(void)
 /* ==================== REPORTE DE PARÁMETROS ==================== */
 
 bool CalibFlash_HayReportePendiente(void)    { return s_reporteConfigPendiente; }
-void CalibFlash_SolicitarReporte(void)       { s_reporteConfigPendiente = true; }
 void CalibFlash_TerminarReporte(void)        { s_reporteConfigPendiente = false; }
 
 uint8_t CalibFlash_ArmarReporte(uint8_t *indice, uint8_t *buf, uint8_t maxGrupos)
@@ -742,11 +771,15 @@ bool CalibFlash_SetPidAspGanancias(float kp, float ki)
 float CalibFlash_GetSetRpm(void)          { return s_setRpm; }
 void  CalibFlash_SetSetRpm(float v)       { s_setRpm = v; }
 float CalibFlash_GetSetPresion(void)      { return s_setPresion; }
-void  CalibFlash_SetSetPresion(float v)   { s_setPresion = v; }
 float CalibFlash_GetPresionRemoto(void)   { return s_presionRemoto; }
-void  CalibFlash_SetPresionRemoto(float v) { s_presionRemoto = v; }
 
 /* ==================== COMANDOS ==================== */
+
+void CalibFlash_LimpiarComandosManuales(void)
+{
+    s_setRpm = 0.0f;
+    s_setPresion = 0.0f;
+}
 
 bool     CalibFlash_HayReporteForzado(void)       { return s_reporteForzadoPendiente; }
 void     CalibFlash_ForzarReporte(void)           { s_reporteForzadoPendiente = true; }

@@ -26,7 +26,6 @@
 #include "numero_texto.h"
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 /* ==================== ESTADO INTERNO ==================== */
 
@@ -40,8 +39,9 @@ static uint16_t s_ultimaPosLeida = 0;
 static char     s_lineaEnConstruccion[GPS_LINEA_MAX_LEN];
 static uint16_t s_lineaLen = 0;
 
-/* Cola circular de sentencias NMEA completas pendientes de procesar. */
-#define GPS_MAX_LINEAS_PENDIENTES  8U
+/* Cola circular de lineas completas pendientes de procesar. El modulo
+ * manda una linea cada 10 s: 4 lugares sobran (2026-10-02, antes 8). */
+#define GPS_MAX_LINEAS_PENDIENTES  4U
 static char     s_colaLineas[GPS_MAX_LINEAS_PENDIENTES][GPS_LINEA_MAX_LEN];
 static volatile uint8_t s_colaHead = 0; /* siguiente a leer */
 static volatile uint8_t s_colaTail = 0; /* siguiente a escribir */
@@ -49,6 +49,16 @@ static volatile uint8_t s_colaCount = 0;
 
 /* Última posición conocida. */
 static volatile bool  s_tieneFix = false;
+/* HAL_GetTick() del ultimo "+CGPSINFO:" recibido (con o sin fix) -- si deja
+ * de llegar por mas de GPS_REPORTE_VIGENCIA_MS, el fix se da por vencido
+ * aunque el ultimo reporte lo trajera (ver GPS_ReporteVigente()). */
+static uint32_t s_ultimoReporteMs = 0;
+static bool     s_huboReporte = false;
+
+/* Re-armado del auto-reporte (ver GPS_REARMAR_* en gps.h). */
+static uint32_t s_inicioMs = 0;        /* referencia mientras nunca hubo reporte */
+static uint32_t s_rearmeMs = 0;        /* ultimo paso del re-armado */
+static bool     s_rearmeEnCurso = false; /* ya se mando AT+CGPS=1, falta AT+CGPSINFO=10 */
 static float           s_latitud = 0.0f;
 static float           s_longitud = 0.0f;
 
@@ -77,6 +87,15 @@ static void GPS_ProcesarSentencia(const char *linea);
 static void GPS_ProcesarCGPSInfo(char *linea);
 static uint8_t GPS_DividirCampos(char *sentencia, char *campos[], uint8_t maxCampos);
 static float GPS_NmeaACoordenadaDecimal(const char *campo, uint8_t digitosGrados);
+
+/* true si llego un "+CGPSINFO:" hace menos de GPS_REPORTE_VIGENCIA_MS. Sin
+ * esto, si el modulo dejaba de hablar (colgado, cable, reinicio propio), el
+ * ultimo fix quedaba valido para siempre y main.c re-seteaba el RTC con esa
+ * hora vieja cada 30 s (hallazgo B15, corregido 2026-10-02). */
+static bool GPS_ReporteVigente(void)
+{
+    return s_huboReporte && (HAL_GetTick() - s_ultimoReporteMs) <= GPS_REPORTE_VIGENCIA_MS;
+}
 
 /* Hasta 'n' digitos decimales desde 's' (reemplaza atoi() sobre un buffer
  * de n caracteres -- mismo resultado: se detiene en el primer no-digito y
@@ -107,6 +126,10 @@ void GPS_Init(UART_HandleTypeDef *huart)
     s_longitud = 0.0f;
     s_reportesVaciosSeguidos = 0;
     s_fechaHoraValida = false;
+    s_huboReporte = false;
+    s_inicioMs = HAL_GetTick();
+    s_rearmeMs = s_inicioMs;
+    s_rearmeEnCurso = false;
 
     /* Igual que en RAK3172_Init(): limpiar flags de error y vaciar el
      * registro de datos antes de arrancar, por si quedó algo colgado
@@ -150,8 +173,8 @@ void GPS_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
      * ⚠️ BUG CORREGIDO (2026-08-18, encontrado con el depurador -- se
      * quedaba colgado dentro de este while): cuando el DMA completa una
      * vuelta EXACTA del buffer, HAL puede reportar Size==GPS_RX_BUFFER_SIZE
-     * (512) en vez de 0. s_ultimaPosLeida jamas puede valer 512 porque
-     * el modulo lo mantiene siempre en 0..511 -- sin este ajuste, la
+     * en vez de 0. s_ultimaPosLeida jamas puede valer eso porque el modulo
+     * lo mantiene siempre en 0..GPS_RX_BUFFER_SIZE-1 -- sin este ajuste, la
      * condicion del while nunca se cumple y el ciclo gira para siempre
      * consumiendo basura, congelando el loop principal completo (todo
      * lo que dependa de HAL_UART_Transmit/printf sobre hlpuart1 se
@@ -197,11 +220,8 @@ void GPS_ErrorCallback(UART_HandleTypeDef *huart)
         return;
     }
 
-    /* ⚠️ DIAGNOSTICO TEMPORAL -- ver nota en RAK3172_ErrorCallback().
-     * Quitar una vez confirmado si este callback llega a dispararse. */
-    printf("GPS: HAL_UART_ErrorCallback disparado (ErrorCode=0x%08lX) -- rearmando recepcion\r\n",
-           (unsigned long)s_huart->ErrorCode);
-
+    /* (El printf de diagnostico con HAL ErrorCode se quito 2026-10-02, igual
+     * que en RAK3172_ErrorCallback(). Si hace falta, reponerlo aqui.) */
     __HAL_UART_CLEAR_OREFLAG(s_huart);
     __HAL_UART_CLEAR_FEFLAG(s_huart);
     __HAL_UART_CLEAR_NEFLAG(s_huart);
@@ -233,6 +253,29 @@ void GPS_Update(void)
 
         GPS_ProcesarSentencia(linea);
     }
+
+    /* Re-armado si el modulo se quedo mudo: el reintento por "10 reportes
+     * vacios" no cubre el caso en que NO llega ningun reporte (el SIM7600X
+     * se reinicio solo y olvido AT+CGPSINFO=10), porque ese contador solo
+     * sube con reportes vacios. Dos pasos sin bloquear el loop. */
+    uint32_t ahora = HAL_GetTick();
+    if (s_rearmeEnCurso) {
+        if (ahora - s_rearmeMs >= GPS_REARMAR_PAUSA_MS) {
+            GPS_EnviarComandoAT("AT+CGPSINFO=10");
+            s_rearmeEnCurso = false;
+            s_rearmeMs = ahora;
+        }
+    } else {
+        uint32_t ref = s_huboReporte ? s_ultimoReporteMs : s_inicioMs;
+        if (ahora - ref >= GPS_REARMAR_SIN_REPORTES_MS
+                && ahora - s_rearmeMs >= GPS_REARMAR_SIN_REPORTES_MS) {
+            printf("GPS: sin reportes hace %lus -- re-armando (AT+CGPS=1 + AT+CGPSINFO=10)\r\n",
+                   (unsigned long)((ahora - ref) / 1000UL));
+            GPS_EnviarComandoAT("AT+CGPS=1");
+            s_rearmeEnCurso = true;
+            s_rearmeMs = ahora;
+        }
+    }
 }
 
 bool GPS_EnviarComandoAT(const char *comando)
@@ -249,7 +292,12 @@ bool GPS_EnviarComandoAT(const char *comando)
 
 bool GPS_TieneFix(void)
 {
-    return s_tieneFix;
+    return s_tieneFix && GPS_ReporteVigente();
+}
+
+uint32_t GPS_GetEdadReporteMs(void)
+{
+    return HAL_GetTick() - s_ultimoReporteMs;
 }
 
 float GPS_GetLatitud(void)
@@ -265,7 +313,7 @@ float GPS_GetLongitud(void)
 bool GPS_GetFechaHoraUtc(uint16_t *anio, uint8_t *mes, uint8_t *dia,
                           uint8_t *hora, uint8_t *minuto, uint8_t *segundo)
 {
-    if (!s_tieneFix || !s_fechaHoraValida) {
+    if (!GPS_TieneFix() || !s_fechaHoraValida) {
         return false;
     }
 
@@ -283,7 +331,7 @@ bool GPS_GetFechaHoraUtc(uint16_t *anio, uint8_t *mes, uint8_t *dia,
 static void GPS_EncolarLinea(const char *linea, uint16_t len)
 {
     if (s_colaCount >= GPS_MAX_LINEAS_PENDIENTES) {
-        return; /* cola llena -- se descarta la sentencia más antigua no leída */
+        return; /* cola llena -- se descarta esta línea NUEVA (las ya encoladas se conservan) */
     }
 
     if (len == 0) {
@@ -305,9 +353,9 @@ static void GPS_EncolarLinea(const char *linea, uint16_t len)
 
 static void GPS_ProcesarSentencia(const char *linea)
 {
-    /* ⚠️ DIAGNOSTICO TEMPORAL -- util para confirmar en el monitor que
-     * los "+CGPSINFO:" siguen llegando cada N segundos. Quitar cuando
-     * ya no haga falta ver el crudo. */
+    /* Se deja A PROPOSITO (decision 2026-10-02): en el monitor serie es la
+     * forma de ver si el modulo tiene fix al satelite ("+CGPSINFO:" con
+     * datos) o no (",,,,,,,,") y que siguen llegando cada 10 s. */
     printf("GPS RX crudo: '%s'\r\n", linea);
 
     if (strncmp(linea, "+CGPSINFO:", 10) == 0) {
@@ -341,10 +389,12 @@ static void GPS_ProcesarCGPSInfo(char *linea)
     if (n < 5) {
         return; /* línea incompleta/corrupta */
     }
+    /* Llego un reporte (con o sin fix): el modulo sigue hablando. */
+    s_ultimoReporteMs = HAL_GetTick();
+    s_huboReporte = true;
 
-    /* campos[0] es "+CGPSINFO: <lat>" -- el prefijo se saltó al llamar
-     * con linea+10 más abajo en GPS_ProcesarSentencia, así que campos[0]
-     * ya es directamente el campo de latitud. */
+    /* GPS_ProcesarSentencia() ya salto el prefijo "+CGPSINFO: ", asi que
+     * campos[0] es directamente el campo de latitud. */
     if (campos[0][0] == '\0') {
         s_tieneFix = false; /* sin fix -- se conserva la ultima lat/lon conocida */
         s_fechaHoraValida = false;
@@ -403,10 +453,10 @@ static void GPS_ProcesarCGPSInfo(char *linea)
 
 static uint8_t GPS_DividirCampos(char *sentencia, char *campos[], uint8_t maxCampos)
 {
-    /* Tokeniza a mano (en vez de sscanf) porque NMEA permite campos
-     * vacíos entre comas consecutivas (ej. variación magnética casi
-     * siempre vacía) -- sscanf con "%[^,]" no matchea un campo vacío
-     * y desalinea todos los campos siguientes. */
+    /* Tokeniza a mano porque "+CGPSINFO:" trae campos vacios entre comas
+     * consecutivas (todos vacios sin fix) -- separar a mano no desalinea
+     * los campos siguientes. Se corta tambien en '*' por si alguna vez
+     * llega con checksum estilo NMEA. */
     uint8_t n = 0;
     char *cursor = sentencia;
     campos[n++] = cursor;
@@ -430,9 +480,9 @@ static float GPS_NmeaACoordenadaDecimal(const char *campo, uint8_t digitosGrados
         return 0.0f;
     }
 
-    /* Formato NMEA: los primeros 'digitosGrados' caracteres son los
-     * grados (2 para latitud, 3 para longitud), el resto son minutos
-     * decimales (mm.mmmm). */
+    /* Formato (el mismo de NMEA): los primeros 'digitosGrados' caracteres
+     * son los grados (2 para latitud, 3 para longitud), el resto son
+     * minutos decimales (mm.mmmm). */
     uint32_t grados = GPS_LeerDigitos(campo, digitosGrados);
     /* NumeroTexto_LeerDecimal() en vez de atof(): ahorra ~6-7 KB de flash
      * (ver numero_texto.h). atof() ya se truncaba a float aca, asi que la

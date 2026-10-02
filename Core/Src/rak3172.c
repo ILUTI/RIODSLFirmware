@@ -21,11 +21,9 @@
 #include "rak3172.h"
 #include "calibracion_flash.h"
 #include "tacometro.h"
-#include "presion_voltaje.h"
 #include "numero_texto.h"
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 /* ==================== ESTADO INTERNO ==================== */
 
@@ -48,7 +46,6 @@ static volatile uint8_t s_colaCount = 0;
 /* Estado del comando AT en curso. */
 static volatile bool     s_comandoEnCurso   = false;
 static volatile uint32_t s_comandoTickInicio = 0;
-static volatile uint32_t s_comandoTimeoutMs  = RAK3172_TIMEOUT_DEFAULT_MS;
 static RAK3172_Resultado_t s_ultimoResultado = RAK3172_OK;
 static char     s_ultimaRespuesta[RAK3172_RX_BUFFER_SIZE];
 static bool     s_hayRespuestaNueva = false;
@@ -60,7 +57,7 @@ static volatile bool s_estaUnido = false;
 static volatile uint32_t s_restringidoHastaTickMs = 0;
 
 /* true una vez que la red confirmó el envío de la hora (DeviceTimeReq)
- * -- ver "+EVT:TIMEREQ" en RAK3172_ProcesarLinea() y
+ * -- ver "+EVT:TIMEREQ_OK" en RAK3172_ProcesarLinea() y
  * RAK3172_SolicitarHoraRed()/RAK3172_ConsultarHoraRed(). */
 static volatile bool s_horaDeRedDisponible = false;
 
@@ -72,9 +69,7 @@ static volatile bool s_horaDeRedDisponible = false;
 #define RAK3172_ACK_REINTENTO_TIMEOUT_MS  5000U
 
 static volatile bool     s_ackPendiente = false;
-static uint8_t           s_ackId = 0;
-static uint8_t           s_ackStatus = 0;
-static uint16_t          s_ackValorRaw = 0;
+static uint8_t           s_ack[4];          /* [ID][STATUS][VALUE_H][VALUE_L] */
 static uint32_t          s_ackTickInicio = 0;
 
 /* ==================== PROTOTIPOS PRIVADOS ==================== */
@@ -83,7 +78,6 @@ static void RAK3172_EncolarLinea(const char *linea, uint16_t len);
 static void RAK3172_ProcesarLinea(const char *linea);
 static void RAK3172_ProcesarEventoDownlink(const char *linea);
 static bool RAK3172_HexAAlBytes(const char *hex, uint8_t longitudHex, uint8_t *bytesSalida, uint8_t maxBytes, uint8_t *cantidadBytes);
-static bool RAK3172_EnviarAckInterno(uint8_t id, uint8_t status, uint16_t valorRaw);
 
 /* ==================== API PÚBLICA ==================== */
 
@@ -120,9 +114,9 @@ void RAK3172_Init(UART_HandleTypeDef *huart)
     (void)dummy;
 
     /* Arranca la recepción continua por DMA con detección de línea
-     * inactiva (IDLE). El callback HAL_UARTEx_RxEventCallback debe
-     * reenviar el evento a RAK3172_RxEventCallback() cuando
-     * huart->Instance == LPUART1 (ver ejemplo en rak3172.h). */
+     * inactiva (IDLE). El callback HAL_UARTEx_RxEventCallback de main.c
+     * reenvía el evento a RAK3172_RxEventCallback() cuando viene de la
+     * UART del RAK3172 (USART1, ver ejemplo en rak3172.h). */
     HAL_UARTEx_ReceiveToIdle_DMA(s_huart, s_rxDmaBuffer, RAK3172_RX_BUFFER_SIZE);
     /* __HAL_DMA_DISABLE_IT(s_huart->hdmarx, DMA_IT_HT); -- causaba HardFault:
      * s_huart->hdmarx llegaba NULL en este punto. No es crítico (solo evita
@@ -175,16 +169,8 @@ void RAK3172_ErrorCallback(UART_HandleTypeDef *huart)
         return;
     }
 
-    /* ⚠️ DIAGNOSTICO TEMPORAL -- este callback nunca se habia probado
-     * en campo. Imprimir el codigo de error de HAL aca es la unica
-     * forma de confirmar si los "TIMEOUT" repetidos que se ven tras
-     * unos minutos de uplinks son en verdad un error de UART (este
-     * callback SI se dispara, y HAL_ErrorCode dice cual) o si el
-     * modulo/la red se quedan sordos sin que HAL detecte nada aca
-     * (este callback nunca se dispara) -- quitar una vez confirmado. */
-    printf("RAK3172: HAL_UART_ErrorCallback disparado (ErrorCode=0x%08lX) -- rearmando recepcion\r\n",
-           (unsigned long)s_huart->ErrorCode);
-
+    /* (El printf de diagnostico con HAL ErrorCode se quito 2026-10-02: ya
+     * funciona bien. Si vuelven los TIMEOUT repetidos, reponerlo aqui.) */
     __HAL_UART_CLEAR_OREFLAG(s_huart);
     __HAL_UART_CLEAR_FEFLAG(s_huart);
     __HAL_UART_CLEAR_NEFLAG(s_huart);
@@ -216,7 +202,7 @@ void RAK3172_Update(void)
     /* --- 2. Timeout de comando AT en curso --- */
     if (s_comandoEnCurso) {
         uint32_t transcurrido = HAL_GetTick() - s_comandoTickInicio;
-        if (transcurrido > s_comandoTimeoutMs) {
+        if (transcurrido > RAK3172_TIMEOUT_DEFAULT_MS) {
             s_comandoEnCurso = false;
             s_ultimoResultado = RAK3172_TIMEOUT;
         }
@@ -224,7 +210,7 @@ void RAK3172_Update(void)
 
     /* --- 3. Reintento de Application ACK pendiente --- */
     if (s_ackPendiente && RAK3172_ComandoListo()) {
-        if (RAK3172_EnviarAckInterno(s_ackId, s_ackStatus, s_ackValorRaw)) {
+        if (RAK3172_EnviarUplink(RAK3172_FPORT_ACK, s_ack, sizeof(s_ack))) {
             s_ackPendiente = false;
         } else if ((HAL_GetTick() - s_ackTickInicio) > RAK3172_ACK_REINTENTO_TIMEOUT_MS) {
             /* Se agotó el tiempo de reintento -- se descarta el ACK
@@ -232,7 +218,7 @@ void RAK3172_Update(void)
              * El parámetro en sí ya se aplicó correctamente; solo se
              * pierde esta confirmación puntual. */
             printf("RAK3172: Application ACK (ID=%u) descartado tras reintentar %lums sin éxito\r\n",
-                   s_ackId, (unsigned long)RAK3172_ACK_REINTENTO_TIMEOUT_MS);
+                   s_ack[0], (unsigned long)RAK3172_ACK_REINTENTO_TIMEOUT_MS);
             s_ackPendiente = false;
         }
     }
@@ -252,7 +238,6 @@ bool RAK3172_EnviarComandoAT(const char *comando)
 
     s_comandoEnCurso = true;
     s_comandoTickInicio = HAL_GetTick();
-    s_comandoTimeoutMs = RAK3172_TIMEOUT_DEFAULT_MS;
 
     /* Transmisión bloqueante: los comandos AT son cortos (unas pocas
      * decenas de bytes), igual que el patrón ya usado en __io_putchar
@@ -296,28 +281,17 @@ bool RAK3172_EstaRestringido(void)
 bool RAK3172_Join(void)
 {
     s_estaUnido = false;
-    /* ⚠️ PRUEBA TEMPORAL: AutoJoin=0 en vez de 1, para aislar si ese
-     * parametro especifico causa el AT_ERROR visto en campo (ver
-     * README/notas de sesion). El formato "1:0:10:8" es el que
-     * confirma la documentacion oficial de RAK que responde OK.
-     * Si esto funciona, evaluar si hace falta AutoJoin=1 en produccion
-     * (reintento automatico del propio modulo) o si conviene manejar
-     * los reintentos desde el host en su lugar. */
+    /* AT+JOIN=<unirse>:<AutoJoin>:<intervalo s>:<intentos> = 1:0:10:8:
+     * unirse ya, SIN AutoJoin, reintento cada 10 s, hasta 8 intentos
+     * (~80 s). Definitivo desde 2026-10-02 (antes era una prueba temporal
+     * mientras se buscaba un AT_ERROR, que resulto ser el bug de sub-banda
+     * de RUI3, resuelto con AT+MASK=0002).
+     * AutoJoin queda apagado a proposito: los reintentos los maneja el
+     * host (main.c, cada 2 min tras AT_NO_NETWORK_JOINED), que ANTES de
+     * cada uno reafirma AT+MASK=0002 y respeta el Restricted_Wait. Con
+     * AutoJoin=1 el modulo podria unirse solo antes de esa mascara y sumar
+     * intentos que alargan el backoff. */
     return RAK3172_EnviarComandoAT("AT+JOIN=1:0:10:8");
-}
-
-static bool RAK3172_EnviarAckInterno(uint8_t id, uint8_t status, uint16_t valorRaw)
-{
-    /* Protocolo Quick-Set (Application ACK), 4 bytes:
-     * [PARAMETER_ID][STATUS][VALUE_H][VALUE_L] */
-    char comando[RAK3172_TX_BUFFER_SIZE];
-    snprintf(comando, sizeof(comando), "AT+SEND=%u:%02X%02X%02X%02X",
-              (unsigned int)RAK3172_FPORT_ACK,
-              id, status,
-              (unsigned int)((valorRaw >> 8) & 0xFFU),
-              (unsigned int)(valorRaw & 0xFFU));
-
-    return RAK3172_EnviarComandoAT(comando);
 }
 
 bool RAK3172_HayAckPendiente(void)
@@ -327,7 +301,11 @@ bool RAK3172_HayAckPendiente(void)
 
 bool RAK3172_EnviarAck(uint8_t id, uint8_t status, uint16_t valorRaw)
 {
-    if (RAK3172_ComandoListo() && RAK3172_EnviarAckInterno(id, status, valorRaw)) {
+    /* Protocolo Quick-Set (Application ACK), 4 bytes:
+     * [PARAMETER_ID][STATUS][VALUE_H][VALUE_L] */
+    uint8_t ack[4] = { id, status, (uint8_t)(valorRaw >> 8), (uint8_t)(valorRaw & 0xFFU) };
+
+    if (RAK3172_ComandoListo() && RAK3172_EnviarUplink(RAK3172_FPORT_ACK, ack, sizeof(ack))) {
         return true; /* se pudo mandar de inmediato */
     }
 
@@ -337,10 +315,8 @@ bool RAK3172_EnviarAck(uint8_t id, uint8_t status, uint16_t valorRaw)
      * raro de dos downlinks casi simultáneos); se prioriza no
      * bloquear el sistema sobre no perder ningún ACK en ese
      * escenario extremo. */
+    memcpy(s_ack, ack, sizeof(s_ack));
     s_ackPendiente = true;
-    s_ackId = id;
-    s_ackStatus = status;
-    s_ackValorRaw = valorRaw;
     s_ackTickInicio = HAL_GetTick();
 
     return false;
@@ -351,7 +327,8 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
                                uint32_t inicioOperacionLocal,
                                uint32_t segundosTranscurridos,
                                float latitud, float longitud,
-                               uint8_t codigoAlerta)
+                               uint8_t codigoAlerta, uint8_t bateriaPct,
+                               uint32_t horometroDecimas)
 {
     if (rpm < 0.0f) { rpm = 0.0f; }
     if (rpm > 6553.5f) { rpm = 6553.5f; }
@@ -363,7 +340,9 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
     int32_t latRaw = (int32_t)(latitud * 10000000.0f);
     int32_t lonRaw = (int32_t)(longitud * 10000000.0f);
 
-    /* Layout de 28 bytes -- DEBE coincidir byte a byte con
+    if (horometroDecimas > 0xFFFFFFUL) { horometroDecimas = 0xFFFFFFUL; } /* 3 bytes */
+
+    /* Layout de 32 bytes -- DEBE coincidir byte a byte con
      * decoder.py::_decodificar_live() del lado AWS. Cualquier cambio
      * acá tiene que reflejarse allá, y viceversa:
      *   0-1   motorIdNumeric   uint16 BE
@@ -376,8 +355,12 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
      *   19-22 latitud          int32 BE, x10,000,000
      *   23-26 longitud         int32 BE, x10,000,000
      *   27    codigoAlerta     uint8 (0=sin alerta, ver ALERTA_* en main.c)
+     *   28    bateriaPct       uint8, 0-100 % de la bateria del nodo; 0xFF = sin
+     *                          medicion (agregado 2026-10-02, falta el hardware)
+     *   29-31 horometro        uint24 BE, en decimas de hora (horometro.c,
+     *                          agregado 2026-10-02)
      */
-    uint8_t payload[28];
+    uint8_t payload[32];
     payload[0]  = (uint8_t)((motorIdNumeric >> 8) & 0xFFU);
     payload[1]  = (uint8_t)(motorIdNumeric & 0xFFU);
     payload[2]  = (uint8_t)((rpmRaw >> 8) & 0xFFU);
@@ -406,6 +389,10 @@ bool RAK3172_EnviarUplinkLive(uint16_t motorIdNumeric, float rpm, float presion,
     payload[25] = (uint8_t)(((uint32_t)lonRaw >> 8) & 0xFFU);
     payload[26] = (uint8_t)((uint32_t)lonRaw & 0xFFU);
     payload[27] = codigoAlerta;
+    payload[28] = bateriaPct;
+    payload[29] = (uint8_t)((horometroDecimas >> 16) & 0xFFU);
+    payload[30] = (uint8_t)((horometroDecimas >> 8) & 0xFFU);
+    payload[31] = (uint8_t)(horometroDecimas & 0xFFU);
 
     return RAK3172_EnviarUplink(RAK3172_FPORT_UPLINK_RPM, payload, sizeof(payload));
 }
@@ -440,11 +427,8 @@ bool RAK3172_HoraDeRedDisponible(void)
 
 bool RAK3172_ConsultarHoraRed(void)
 {
-    /* ⚠️ PENDIENTE DE VERIFICAR EN CAMPO: no hay un ejemplo publicado
-     * del formato EXACTO de la respuesta a "AT+LTIME=?" (si es un
-     * entero decimal simple del epoch UTC, o trae texto/campos
-     * adicionales). El parseo en main.c asume un entero decimal plano
-     * -- si el monitor serie muestra otra cosa, ajustar el sscanf allá. */
+    /* Respuesta confirmada en campo (2026-08-17):
+     * "AT+LTIME=15h08m55s on 08/17/2026" -- la lee main.c. */
     return RAK3172_EnviarComandoAT("AT+LTIME=?");
 }
 
@@ -453,7 +437,7 @@ bool RAK3172_ConsultarHoraRed(void)
 static void RAK3172_EncolarLinea(const char *linea, uint16_t len)
 {
     if (s_colaCount >= RAK3172_MAX_LINEAS_PENDIENTES) {
-        return; /* cola llena -- se descarta la línea más antigua no leída */
+        return; /* cola llena -- se descarta esta línea NUEVA (las ya encoladas se conservan) */
     }
 
     uint16_t copiar = (len < (RAK3172_RX_BUFFER_SIZE - 1)) ? len : (RAK3172_RX_BUFFER_SIZE - 1);
@@ -466,38 +450,23 @@ static void RAK3172_EncolarLinea(const char *linea, uint16_t len)
 
 static void RAK3172_ProcesarLinea(const char *linea)
 {
-    /* ⚠️ DIAGNOSTICO TEMPORAL (antes solo se imprimian los "+EVT:") --
-     * ahora se imprime TODO lo que llega, igual que ya hace gps.c, para
-     * poder ver si el modulo sigue mandando algo (OK/ERROR/eco/basura)
-     * durante los TIMEOUT repetidos que se ven despues de unos minutos
-     * de uplinks, o si de verdad se queda callado por completo. Volver
-     * a filtrar solo "+EVT:" una vez diagnosticado. */
-    printf("RAK3172 RX crudo: '%s'\r\n", linea);
+    /* (El printf "RAK3172 RX crudo" de cada linea se quito 2026-10-02: era
+     * diagnostico de unos TIMEOUT repetidos y ya funciona bien. Si vuelven,
+     * reponerlo aqui.) */
 
     if (strcmp(linea, "+EVT:JOINED") == 0) {
         s_estaUnido = true;
         return;
     }
 
-    if (strcmp(linea, "+EVT:TIMEREQ_OK") == 0) {
-        /* Confirmación de que el uplink que se acaba de mandar trajo
-         * la hora de la red de vuelta (DeviceTimeReq) -- ya se puede
-         * consultar el valor con AT+LTIME=? (ver RAK3172_ConsultarHoraRed()).
-         * ⚠️ Nombre real confirmado en campo (2026-08-14): es
-         * "+EVT:TIMEREQ_OK", NO "+EVT:TIMEREQ" como se había asumido
-         * sin un ejemplo publicado -- con el nombre viejo este bloque
-         * nunca se ejecutaba y el reloj quedaba pegado en su valor
-         * por defecto para siempre. */
+    /* El uplink que se acaba de mandar trajo la hora de la red
+     * (DeviceTimeReq) -- ya se puede consultar con AT+LTIME=? (ver
+     * RAK3172_ConsultarHoraRed()). Nombre real confirmado en campo
+     * (2026-08-14): "+EVT:TIMEREQ_OK"; "+EVT:TIMEREQ" sin sufijo se acepta
+     * por si alguna version de RUI3 lo usa. */
+    if (strcmp(linea, "+EVT:TIMEREQ_OK") == 0 || strcmp(linea, "+EVT:TIMEREQ") == 0) {
         s_horaDeRedDisponible = true;
-        printf("RAK3172: hora de red disponible (+EVT:TIMEREQ_OK) -- listo para AT+LTIME=?\r\n");
-        return;
-    }
-
-    if (strcmp(linea, "+EVT:TIMEREQ") == 0) {
-        /* Se mantiene por si alguna version de RUI3 usa este nombre
-         * sin el sufijo _OK -- mismo efecto. */
-        s_horaDeRedDisponible = true;
-        printf("RAK3172: hora de red disponible (+EVT:TIMEREQ) -- listo para AT+LTIME=?\r\n");
+        printf("RAK3172: hora de red disponible (%s) -- listo para AT+LTIME=?\r\n", linea);
         return;
     }
 

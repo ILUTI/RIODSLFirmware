@@ -107,7 +107,7 @@ float PresionPidRemoto_ObjetivoAplicado(float objetivoDeseadoPsi, float tasaPsiS
     s_ultimaRampaMs = ahora;
 
     if (tasaPsiS <= 0.0f) {
-        /* Sin ritmo configurado (TASA_LLENADO_PSI_S = 0): directo, igual que
+        /* Sin ritmo de llenado (TIEMPO_LLENADO_S = 0, tasa 0): directo, igual que
          * MODO=1 sin rampa. */
         s_aplicado = objetivoDeseadoPsi;
         return s_aplicado;

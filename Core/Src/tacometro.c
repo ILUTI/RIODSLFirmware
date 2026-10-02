@@ -17,6 +17,10 @@ static volatile uint32_t s_ultimoPeriodoUs    = 0;     /* último período váli
 static volatile bool     s_primerFlancoHecho  = false; /* aún no hay período calculable */
 static volatile bool     s_hayPeriodoNuevo    = false; /* flag: Update() debe procesarlo */
 static volatile uint32_t s_contadorRuido      = 0;
+/* Capturas validas SEGUIDAS (sin rechazo ni pausa de mas de
+ * TACOMETRO_TIMEOUT_DETENIDO_MS entre ellas) -- con el motor detenido, se
+ * exigen TACOMETRO_CAPTURAS_PARA_ARRANQUE antes de declararlo operando. */
+static volatile uint8_t  s_validasSeguidas    = 0;
 
 static volatile uint32_t s_ultimoTickCapturaMs = 0; /* HAL_GetTick() de la última captura válida */
 
@@ -36,6 +40,7 @@ void Tacometro_Init(TIM_HandleTypeDef *htim, uint32_t canal)
     s_primerFlancoHecho  = false;
     s_hayPeriodoNuevo    = false;
     s_contadorRuido      = 0;
+    s_validasSeguidas    = 0;
     s_ultimoTickCapturaMs = HAL_GetTick();
 
     s_motorDetenido  = true;
@@ -77,18 +82,30 @@ void Tacometro_CaptureCallback(TIM_HandleTypeDef *htim)
 
     if (periodoUs < TACOMETRO_PERIODO_MINIMO_US) {
         s_contadorRuido++;
+        s_validasSeguidas = 0;
         return;
     }
 
     float duty = (float)anchoPulsoUs / (float)periodoUs;
     if (duty < TACOMETRO_DUTY_MINIMO || duty > TACOMETRO_DUTY_MAXIMO) {
         s_contadorRuido++;
+        s_validasSeguidas = 0;
         return;
+    }
+
+    uint32_t ahora = HAL_GetTick();
+    /* Una captura valida suelta, mucho despues de la anterior, no cuenta
+     * como "seguida": ruido aislado de vez en cuando nunca suma 3. */
+    if (ahora - s_ultimoTickCapturaMs > TACOMETRO_TIMEOUT_DETENIDO_MS) {
+        s_validasSeguidas = 0;
+    }
+    if (s_validasSeguidas < 255U) {
+        s_validasSeguidas++;
     }
 
     s_ultimoPeriodoUs     = periodoUs;
     s_hayPeriodoNuevo     = true;
-    s_ultimoTickCapturaMs = HAL_GetTick();
+    s_ultimoTickCapturaMs = ahora;
 }
 
 void Tacometro_Update(void)
@@ -96,8 +113,19 @@ void Tacometro_Update(void)
     if (s_hayPeriodoNuevo) {
         __disable_irq();
         uint32_t periodoUs = s_ultimoPeriodoUs;
+        uint8_t validasSeguidas = s_validasSeguidas;
         s_hayPeriodoNuevo = false;
         __enable_irq();
+
+        /* Hallazgo B18 (2026-10-02): con el motor detenido, 2 pulsos de ruido
+         * con forma creible bastaban para declararlo operando >= 500 ms, y
+         * las protecciones de main.c que usan Tacometro_EstaDetenido() sin
+         * debounce reaccionaban (CALIB 1/2 cancelada, prueba en espera que
+         * arranca, MODO=0 al volver a detenido). Ahora hacen falta
+         * TACOMETRO_CAPTURAS_PARA_ARRANQUE validas seguidas (~70 ms a 150 RPM). */
+        if (s_motorDetenido && validasSeguidas < TACOMETRO_CAPTURAS_PARA_ARRANQUE) {
+            return;
+        }
 
         /* Valores calibrados en flash (downlink SET_RATIO/ALPHA o CALIB=3). */
         float pulsosPorRevolucion = CalibFlash_GetPulsosPorRevolucion();

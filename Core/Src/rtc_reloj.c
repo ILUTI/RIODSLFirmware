@@ -23,8 +23,8 @@ static bool EsAnioBisiesto(uint32_t anio)
 
 static const uint8_t DIAS_POR_MES[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
-static uint32_t UtcAEpoch(uint16_t anio, uint8_t mes, uint8_t dia,
-                          uint8_t hora, uint8_t minuto, uint8_t segundo)
+uint32_t Reloj_CalendarioAEpoch(uint16_t anio, uint8_t mes, uint8_t dia,
+                                uint8_t hora, uint8_t minuto, uint8_t segundo)
 {
     uint32_t dias = 0;
     for (uint16_t a = 1970; a < anio; a++) {
@@ -40,6 +40,35 @@ static uint32_t UtcAEpoch(uint16_t anio, uint8_t mes, uint8_t dia,
     dias += (uint32_t)(dia - 1U);
 
     return (dias * 86400UL) + ((uint32_t)hora * 3600UL) + ((uint32_t)minuto * 60UL) + segundo;
+}
+
+/* Inversa de Reloj_CalendarioAEpoch(): epoch UTC -> campos de calendario. */
+static void EpochACalendario(uint32_t epoch, uint16_t *anio, uint8_t *mes, uint8_t *dia,
+                             uint8_t *hora, uint8_t *minuto, uint8_t *segundo)
+{
+    uint32_t dias = epoch / 86400UL;
+    uint32_t resto = epoch % 86400UL;
+    *hora = (uint8_t)(resto / 3600UL);
+    *minuto = (uint8_t)((resto % 3600UL) / 60UL);
+    *segundo = (uint8_t)(resto % 60UL);
+
+    uint16_t a = 1970U;
+    for (;;) {
+        uint32_t diasAnio = EsAnioBisiesto(a) ? 366UL : 365UL;
+        if (dias < diasAnio) break;
+        dias -= diasAnio;
+        a++;
+    }
+    uint8_t m = 0U;
+    for (;;) {
+        uint32_t diasMes = DIAS_POR_MES[m] + ((m == 1U && EsAnioBisiesto(a)) ? 1UL : 0UL);
+        if (dias < diasMes) break;
+        dias -= diasMes;
+        m++;
+    }
+    *anio = a;
+    *mes = (uint8_t)(m + 1U);
+    *dia = (uint8_t)(dias + 1UL);
 }
 
 /* ==================== API pública ==================== */
@@ -81,10 +110,20 @@ void Reloj_SetHoraUtc(uint16_t anio, uint8_t mes, uint8_t dia,
     s_sincronizado = true;
 }
 
+void Reloj_SetUnixTimeUtc(uint32_t epochUtc)
+{
+    uint16_t anio;
+    uint8_t mes, dia, hora, minuto, segundo;
+    EpochACalendario(epochUtc, &anio, &mes, &dia, &hora, &minuto, &segundo);
+    Reloj_SetHoraUtc(anio, mes, dia, hora, minuto, segundo);
+}
+
 bool Reloj_EstaSincronizado(void)
 {
     return s_sincronizado;
-}uint32_t Reloj_GetUnixTimeUtc(void)
+}
+
+uint32_t Reloj_GetUnixTimeUtc(void)
 {
     if (s_hrtc == NULL) {
         return 0;
@@ -101,8 +140,8 @@ bool Reloj_EstaSincronizado(void)
     HAL_RTC_GetTime(s_hrtc, &sTime, RTC_FORMAT_BIN);
     HAL_RTC_GetDate(s_hrtc, &sDate, RTC_FORMAT_BIN);
 
-    return UtcAEpoch((uint16_t)(2000U + sDate.Year), sDate.Month, sDate.Date,
-                      sTime.Hours, sTime.Minutes, sTime.Seconds);
+    return Reloj_CalendarioAEpoch((uint16_t)(2000U + sDate.Year), sDate.Month, sDate.Date,
+                                  sTime.Hours, sTime.Minutes, sTime.Seconds);
 }
 
 uint32_t Reloj_GetUnixTimeLocal(void)

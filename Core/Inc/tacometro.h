@@ -2,11 +2,17 @@
  * @file    tacometro.h
  * @brief   Módulo de medición de RPM vía Input Capture (TIM2, canal 1).
  *
- * Mide el período entre flancos de bajada de la señal proveniente del
- * H11AA1 (terminal W del alternador, ya acondicionada), y calcula
+ * Mide el período entre flancos de SUBIDA de la señal proveniente del
+ * H11AA1 (terminal W del alternador, ya acondicionada) -- TIM2 en modo PWM
+ * Input: canal 1 = período (subida), canal 2 = ancho del pulso (bajada), con
+ * el contador reseteado en cada subida (Slave Mode Reset) -- y calcula
  * frecuencia de pulsos y RPM con:
- *   - Filtrado de ruido en dos capas (filtro de hardware del timer +
- *     guarda mínima de período por software).
+ *   - Filtrado de ruido en tres capas: filtro de hardware del timer (Input
+ *     Capture Filter), guarda mínima de período y rango de duty cycle por
+ *     software (el ancho del pulso se mide en el canal 2, indirecto).
+ *   - Arranque: con el motor detenido hacen falta
+ *     TACOMETRO_CAPTURAS_PARA_ARRANQUE capturas válidas seguidas para
+ *     declararlo operando (ruido suelto no "prende" el motor).
  *   - Detección de motor detenido (timeout sin capturas nuevas).
  *   - Filtro de suavizado (media móvil exponencial) para no entregarle
  *     al lazo de control una lectura con jitter.
@@ -14,7 +20,8 @@
  * Uso típico en main.c:
  *   CalibFlash_Init();                          // ver calibracion_flash.h
  *   Tacometro_Init(&htim2, TIM_CHANNEL_1);
- *   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+ *   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);   // periodo (con interrupcion)
+ *   HAL_TIM_IC_Start(&htim2, TIM_CHANNEL_2);      // ancho del pulso (indirecto)
  *   ...
  *   while (1) {
  *       Tacometro_Update();
@@ -30,10 +37,10 @@
  *   Pulsos por revolución y ALPHA del filtro viven en flash
  *   (calibracion_flash.c; sus valores de fábrica son
  *   DEFAULT_PULSOS_POR_REVOLUCION / DEFAULT_ALPHA_FILTRO). Los downlinks
- *   SET_RATIO / SET_RATIO_AUTO / ALPHA y la
- *   auto-calibración CALIB=3 guardan el valor nuevo directo con
- *   CalibFlash_SetPulsosPorRevolucion()/CalibFlash_SetAlphaFiltro(), y se
- *   usa en todos los cálculos posteriores, incluso después de un reset.
+ *   SET_RATIO / SET_RATIO_AUTO / ALPHA los guarda el dispatcher de
+ *   calibracion_flash.c, y la auto-calibración CALIB=3 usa
+ *   CalibFlash_SetAlphaFiltro(). Tacometro_Update() los lee en cada
+ *   cálculo, así que valen al instante y también después de un reset.
  */
 
 #ifndef TACOMETRO_H
@@ -77,6 +84,11 @@ extern "C" {
 #define TACOMETRO_DUTY_MINIMO   0.30f
 #define TACOMETRO_DUTY_MAXIMO   0.70f
 
+/* Capturas válidas SEGUIDAS necesarias para pasar de "detenido" a
+ * "operando" (hallazgo B18, 2026-10-02). A ~150 RPM de arranque con 17.5
+ * pulsos/vuelta llegan ~44 pulsos/s: 3 son ~70 ms de demora, imperceptible. */
+#define TACOMETRO_CAPTURAS_PARA_ARRANQUE  3U
+
 /* ==================== API PÚBLICA ==================== */
 
 /**
@@ -115,8 +127,9 @@ float Tacometro_GetFrecuenciaHz(void);
 /** true si el motor se considera detenido (timeout sin pulsos nuevos). */
 bool Tacometro_EstaDetenido(void);
 
-/** Contador de capturas descartadas por la guarda de período mínimo
- * (ruido filtrado). Útil para diagnóstico en campo. */
+/** Contador de capturas descartadas por software (período demasiado corto
+ * o duty cycle fuera de rango = ruido filtrado). Útil para diagnóstico en
+ * campo. */
 uint32_t Tacometro_GetContadorRuidoFiltrado(void);
 
 #ifdef __cplusplus

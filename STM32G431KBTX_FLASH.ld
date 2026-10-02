@@ -45,13 +45,17 @@ _Min_Stack_Size = 0x1000; /* required amount of stack */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 32K
-  /* 126K, no 128K (cambio manual 2026-09-30): la ULTIMA pagina de 2 KB
-   * (0x0801F800-0x0801FFFF, pagina 63) es la de calibracion persistente
-   * (CALIB_FLASH_ADDRESS en calibracion_flash.c). Con 128K el linker dejaba
-   * poner codigo ahi sin avisar, y la primera escritura de calibracion lo
-   * borraba. Asi, si el programa crece de mas, falla al COMPILAR.
-   * ⚠️ Si CubeMX regenera este archivo, volver a poner 126K. */
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 126K
+  /* 124K, no 128K (cambio manual): las DOS ultimas paginas de 2 KB son
+   * datos persistentes, no codigo:
+   *   - pagina 63 (0x0801F800-0x0801FFFF): calibracion (CALIB_FLASH_ADDRESS
+   *     en calibracion_flash.c) -- 126K desde 2026-09-30;
+   *   - pagina 62 (0x0801F000-0x0801F7FF): horometro (HOROMETRO_FLASH_ADDRESS
+   *     en horometro.c) -- 124K desde 2026-10-02.
+   * Con mas, el linker dejaba poner codigo ahi sin avisar, y la primera
+   * escritura de datos lo borraba. Asi, si el programa crece de mas, falla
+   * al COMPILAR.
+   * ⚠️ Si CubeMX regenera este archivo, volver a poner 124K. */
+  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 124K
 }
 
 /* Sections */

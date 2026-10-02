@@ -38,6 +38,7 @@
 #include "presion_pid.h"
 #include "presion_pid_remoto.h"
 #include "numero_texto.h"
+#include "horometro.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -147,8 +148,8 @@
 #define INTERVALO_REINTENTO_JOIN_MS  (120UL * 1000UL)
 /* ⚠️ SUPUESTO / placeholder: por ahora hardcodeado a 1 (equivale a
  * "DSL-0001"). Cuando exista mas de un nodo motor, resolver esto desde
- * el DevEUI/nombre del dispositivo (NODE_ID, ID 18, se elimino 2026-10-01
- * sin haberse usado nunca). */
+ * el DevEUI/nombre del dispositivo (habia un parametro NODE_ID, se elimino
+ * 2026-10-01 sin haberse usado nunca). */
 #define MOTOR_ID_NUMERIC   1U
 
 /* Codigos de estado -- DEBEN coincidir exactamente con ESTADO_NOMBRES
@@ -354,6 +355,7 @@ int main(void)
   CalibFlash_Init();
   printf("FLASH: pagina de calibracion %s\r\n",
          CalibFlash_ArranqueConDefaults() ? "INVALIDA (magic no coincide) -- valores por defecto" : "valida");
+  Horometro_Init();
   Reloj_Init(&hrtc);
 
   /* 2026-10-01: ya NO se carga ni se guarda una "ultima hora conocida" en
@@ -455,9 +457,8 @@ int main(void)
   Servo_SetPulsoUs(CalibFlash_GetServoPulsoMinUs());
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
 
-  /* Consola serial en el puerto de debug (LPUART1) -- ver comando_serial.h.
-   * El mando de parametros por serial es TEMPORAL (README 2.7); el
-   * pass-through AT hacia el RAK3172 es permanente. */
+  /* Consola serial en el puerto de debug (LPUART1): parametros y
+   * pass-through AT al RAK3172 -- ver comando_serial.h (permanente). */
   ComandoSerial_Init(&hlpuart1);
 
   printf("Tacometro STM32G431 - inicio, join LoRaWAN solicitado...\r\n");
@@ -545,12 +546,17 @@ int main(void)
 
   		  uint16_t anioGps; uint8_t mesGps, diaGps, horaGps, minutoGps, segundoGps;
   		  if (GPS_GetFechaHoraUtc(&anioGps, &mesGps, &diaGps, &horaGps, &minutoGps, &segundoGps)) {
-  			  Reloj_SetHoraUtc(anioGps, mesGps, diaGps, horaGps, minutoGps, segundoGps);
+  			  /* La hora del GPS es la del MOMENTO del reporte (uno cada 10 s):
+  			   * se le suma lo que paso desde entonces, redondeado al segundo,
+  			   * para no dejar el RTC hasta 10 s atrasado (2026-10-02). */
+  			  uint32_t edadReporteS = (GPS_GetEdadReporteMs() + 500UL) / 1000UL;
+  			  Reloj_SetUnixTimeUtc(Reloj_CalendarioAEpoch(anioGps, mesGps, diaGps,
+  					  horaGps, minutoGps, segundoGps) + edadReporteS);
   			  relojFueCorregidoEsteCiclo = true;
   			  ultimoResyncExitosoTick = HAL_GetTick();
   			  huboResyncAlgunaVez = true;
-  			  printf("GPS: reloj sincronizado con hora satelital: %02u:%02u:%02u UTC, %02u/%02u/%04u\r\n",
-  					 horaGps, minutoGps, segundoGps, mesGps, diaGps, anioGps);
+  			  printf("GPS: reloj sincronizado con hora satelital: %02u:%02u:%02u UTC, %02u/%02u/%04u (+%lus de edad del reporte)\r\n",
+  					 horaGps, minutoGps, segundoGps, mesGps, diaGps, anioGps, (unsigned long)edadReporteS);
   		  }
   	  }
 
@@ -685,9 +691,24 @@ int main(void)
 		  estadoActual = estadoCandidato;
 	  }
 
+	  /* Horometro (2026-10-02): suma con el motor ENCENDIDO o ACTIVO (estado
+	   * ya con debounce), guarda al apagarse y cada 30 min. */
+	  Horometro_Update(estadoActual != ESTADO_APAGADO);
+
 	  uint32_t fechaHoraLocalIterActual = Reloj_GetUnixTimeLocal();
 
 	  if (!estadoInicializado || estadoActual != estadoAnterior) {
+		  /* Cambio de estado (APAGADO/ENCENDIDO/ACTIVO, ya con debounce):
+		   * uplink LIVE inmediato (2026-10-02), igual que con las alertas --
+		   * si no, GIO seguia mostrando el estado viejo hasta el proximo envio
+		   * periodico (hasta INTERVALO_ENVIO_STANDBY_S con el motor apagado).
+		   * Su fecha_hora marca el momento del cambio. No en el primer
+		   * calculo del arranque (no es un cambio real). */
+		  if (estadoInicializado) {
+			  printf("ESTADO_MOTOR: %u -> %u (1=ACTIVO, 2=APAGADO, 3=ENCENDIDO) -- uplink inmediato\r\n",
+					 (unsigned)estadoAnterior, (unsigned)estadoActual);
+			  CalibFlash_ForzarReporte();
+		  }
 		  estadoAnterior = estadoActual;
 		  inicioEstadoLocal = fechaHoraLocalIterActual;
 		  estadoInicializado = true;
@@ -705,7 +726,7 @@ int main(void)
   	  /* Envío periódico del uplink LIVE, en cuanto hay red. Sin hora
   	   * sincronizada, fecha_hora/inicio_operacion van en 0 ("Sin hora"). */
 	  static uint32_t ultimoEnvioRPM = 0;
-	  /* Intervalo configurable (IDs 14/15, conectado 2026-10-01): motor
+	  /* Intervalo configurable (IDs 15/16, conectado 2026-10-01): motor
 	   * apagado -> INTERVALO_ENVIO_STANDBY_S, si no INTERVALO_ENVIO_OPERATIVO_S. */
 	  uint32_t intervaloEnvioMs = 1000UL * ((estadoActual == ESTADO_APAGADO)
 			  ? CalibFlash_GetIntervaloEnvioStandbyS() : CalibFlash_GetIntervaloEnvioOperativoS());
@@ -745,7 +766,9 @@ int main(void)
   			  segundosTranscurridos,
   			  latitudActual,
   			  longitudActual,
-  			  (uint8_t)s_codigoAlertaActual
+  			  (uint8_t)s_codigoAlertaActual,
+  			  0xFFU,                              /* bateria del nodo: sin hardware de medicion todavia */
+  			  Horometro_GetSegundos() / 360UL     /* decimas de hora */
   		  );
 
   		  (void)encolado;
@@ -762,7 +785,7 @@ int main(void)
   		  }
 
 	  }
-  	  /* REPORTAR_PARAMETROS (ID 19, 2026-10-01): al arrancar (en cuanto hay
+  	  /* REPORTAR_PARAMETROS (ID 27, 2026-10-01): al arrancar (en cuanto hay
   	   * red) y cada vez que se pide, manda el valor guardado de cada
   	   * parametro por FPort 3, en partes de 7 grupos [ID][8][VAL_H][VAL_L]
   	   * (28 bytes, el tamano del LIVE). Una parte cada 5 s como minimo,
@@ -1015,9 +1038,15 @@ int main(void)
   	   * apaga estando en MODO=4 se mantiene en MODO=4. Las pruebas CALIB
   	   * en curso ya se abortan solas cuando el motor se detiene (cada una
   	   * tiene su propio chequeo de motorOperandoAhora). */
-  	  if (motorOperandoAntesParaModoSeguro && !motorOperandoAhora
-  			  && CalibFlash_GetModo() != CALIB_MODO_CALIBRACION) {
-  		  CalibFlash_SetModo(CALIB_MODO_RALENTI);
+  	  if (motorOperandoAntesParaModoSeguro && !motorOperandoAhora) {
+  		  /* En CUALQUIER MODO (2026-10-02, hallazgo B8): SET_RPM/SET_PRESION a
+  		   * 0, para que al rearrancar el motor no acelere solo a un valor
+  		   * viejo. MODO 4 no pasa a MODO 0 (abajo), y sin esto volvia al
+  		   * SET_RPM anterior en cuanto el tacometro lo veia girar. */
+  		  CalibFlash_LimpiarComandosManuales();
+  		  if (CalibFlash_GetModo() != CALIB_MODO_CALIBRACION) {
+  			  CalibFlash_SetModo(CALIB_MODO_RALENTI);
+  		  }
   	  }
   	  motorOperandoAntesParaModoSeguro = motorOperandoAhora;
 

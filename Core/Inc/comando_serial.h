@@ -1,8 +1,9 @@
 /**
  * @file    comando_serial.h
- * @brief   Comandos de parámetro escritos a mano por el puerto de debug
- *          (LPUART1), como mando manual TEMPORAL mientras no hay red
- *          LoRa disponible en campo para probar downlinks reales.
+ * @brief   Consola por el puerto de debug (LPUART1): parámetros escritos a
+ *          mano (mismo efecto que un downlink) y pass-through de comandos AT
+ *          al RAK3172. PERMANENTE (decisión 2026-10-02): se usa en banco y en
+ *          campo con la laptop conectada, también con la red LoRa activa.
  *
  * Reutiliza el mismo punto de entrada que un downlink real
  * (CalibFlash_ProcesarParametroConEstado(), el mismo que llama
@@ -20,16 +21,18 @@
  * ej.:
  *   CALIB 1
  *   SET_RPM 900
- *   RESTAURAR_DEFAULTS        (los comandos no llevan VALOR)
+ *   REPORTAR_PARAMETROS       (los comandos no llevan VALOR)
+ *   AT+DEVEUI=?               (pass-through al RAK3172, ver comando_serial.c)
  *
  * Nombres válidos: los mismos (exactos, en mayúsculas) de la tabla de
- * parámetros del TID (README sección 3) y de PARAMETER_TABLE en
- * send_downlink.py -- mismo valor "humano" que se manda por MQTT (ej.
- * RPM directo, no el raw escalado).
+ * parámetros del README y de PARAM_TABLE de la Lambda de downlink -- mismo
+ * valor "humano" que se manda por MQTT (ej. RPM directo, no el raw
+ * escalado).
  *
- * Quitar este módulo (y su llamada en main.c) el día que exista un
- * mando local real (pantalla/botonera), o cuando ya no se necesite
- * probar sin red LoRa en campo.
+ * La línea se ARMA en la interrupción (letra por letra, con eco) pero se
+ * PROCESA en ComandoSerial_Update(), en el loop normal (2026-10-02,
+ * hallazgo B16): procesarla dentro de la ISR podía escribir flash y hacer
+ * printf bloqueante en medio de cualquier otra cosa.
  */
 
 #ifndef COMANDO_SERIAL_H
@@ -43,22 +46,21 @@ extern "C" {
 
 /** Inicializa el módulo sobre el UART de debug ya inicializado
  * (MX_LPUART1_UART_Init(), generado por CubeMX) -- no reconfigura el
- * periférico, solo guarda el handle para sondear su bandera RXNE. */
+ * periférico: guarda el handle y arranca la recepción por interrupción. */
 void ComandoSerial_Init(UART_HandleTypeDef *huart);
 
-/** Llamar en cada vuelta del loop principal. No hace polling de UART
- * (ver ComandoSerial_RxCpltCallback) -- por ahora no tiene trabajo
- * pendiente propio, se mantiene por simetría con el resto de los
- * módulos (Update() en cada loop) por si se necesita en el futuro. */
+/** Llamar en cada vuelta del loop principal. Procesa la línea que dejó
+ * lista la ISR (parámetro o comando AT) y maneja el pass-through AT. No
+ * hace polling de UART (ver ComandoSerial_RxCpltCallback). */
 void ComandoSerial_Update(void);
 
 /**
  * Debe llamarse desde el callback global HAL_UART_RxCpltCallback() en
  * main.c, cuando el evento provenga del UART de debug (LPUART1). Cada
  * byte recibido por interrupción arma la línea carácter por carácter
- * con eco local, y al recibir '\r'/'\n' la procesa como si fuera un
- * downlink recién llegado -- luego siempre rearma la recepción del
- * siguiente byte con HAL_UART_Receive_IT().
+ * con eco local, y al recibir '\r'/'\n' la deja lista para
+ * ComandoSerial_Update() (no la procesa aquí) -- luego siempre rearma la
+ * recepción del siguiente byte con HAL_UART_Receive_IT().
  *
  * Recepción por interrupción en vez de polling en ComandoSerial_Update()
  * (agregado 2026-09-24, recuperando un fix perdido en el incidente de

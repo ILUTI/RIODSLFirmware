@@ -34,7 +34,7 @@ servo.c/h               -> Control PWM del servo del acelerador
 pid.c/h                 -> Lazo de control PID de RPM -> pulso del servo
 rtc_reloj.c/h           -> Reloj interno (RTC sobre LSI) + conversion epoch<->calendario
 gps.c/h                 -> Posicion GPS/GNSS (SIM7600X) + disciplina del RTC
-comando_serial.c/h      -> Mando manual TEMPORAL por serial (sustituto de LoRa en banco)
+comando_serial.c/h      -> Consola por serial: parametros (como un downlink) + pass-through AT
 main.c                  -> Orquestacion general
 ```
 
@@ -46,11 +46,16 @@ cada flanco de subida, el canal indirecto captura el ancho de pulso en
 el mismo instante — sin condición de carrera entre dos capturas
 separadas.
 
-- **Filtro de ruido en 2 capas**: filtro de hardware del timer
-  (`ICFilter=8`) + guarda de período mínimo por software
-  (`TACOMETRO_PERIODO_MINIMO_US`).
-- **Filtro de duty cycle** (`TACOMETRO_DUTY_MINIMO/MAXIMO`): descarta
-  picos angostos que no representan un semiciclo real de la señal.
+- **Filtro de ruido en 3 capas**: filtro de hardware del timer
+  (`ICFilter=8`), guarda de período mínimo por software
+  (`TACOMETRO_PERIODO_MINIMO_US`) y filtro de duty cycle
+  (`TACOMETRO_DUTY_MINIMO/MAXIMO`, descarta picos angostos que no
+  representan un semiciclo real). Lo descartado suma en `RuidoFiltrado`.
+- **Arranque con 3 capturas seguidas** (2026-10-02, hallazgo B18): con el
+  motor detenido hacen falta `TACOMETRO_CAPTURAS_PARA_ARRANQUE` (3)
+  capturas válidas seguidas para declararlo operando (~70 ms a 150 RPM).
+  Antes bastaba una, y 2 pulsos de ruido "prendían" el motor ≥ 500 ms para
+  las protecciones de `main.c` que reaccionan sin debounce.
 - **Detección de motor detenido**: timeout sin capturas nuevas
   (`TACOMETRO_TIMEOUT_DETENIDO_MS`) → `Tacometro_EstaDetenido()`. Este
   es el criterio único para saber si el motor opera — **no depende de
@@ -121,7 +126,7 @@ error antes de rearmar la recepción en cada `RAK3172_Init()`.
 
 | FPort | Uso |
 |---|---|
-| 1 | Uplink LIVE (28 bytes: RPM + presión + estado + timestamps + lat/lon + código de alerta) |
+| 1 | Uplink LIVE (32 bytes: RPM + presión + estado + timestamps + lat/lon + código de alerta + batería + horómetro) |
 | 2 | Downlink de parámetro (ver protocolo abajo) |
 | 3 | Application ACK |
 
@@ -130,15 +135,14 @@ clase automáticamente** solo porque el Device Profile en el servidor
 diga "admite Clase C" — hay que mandarle explícitamente `AT+CLASS=C`
 (default de fábrica es Clase A).
 
-⚠️ **`AutoJoin` en `0`, no `1`, como prueba temporal en curso**
-(`RAK3172_Join()` manda `AT+JOIN=1:0:10:8`): se cambió para aislar si
-ese parámetro específico causaba el `AT_ERROR` de join visto en campo.
-La causa real resultó ser el bug de sub-banda de abajo (`AT+MASK`), ya
-resuelto — falta decidir si `AutoJoin` vuelve a `1` en producción
-(reintento automático interno del propio módulo tras un power-cycle,
-sin que el host tenga que pedir el join de nuevo) o si conviene dejarlo
-en `0` y manejar todos los reintentos desde el host, como ya se hace
-ahora (ver más abajo). Ver pendientes, sección 8.
+**`AutoJoin` en `0` — definitivo (2026-10-02).** `RAK3172_Join()` manda
+`AT+JOIN=1:0:10:8`: unirse ya, **sin** AutoJoin, reintento cada 10 s,
+hasta 8 intentos (~80 s). Se había puesto en `0` como prueba para aislar un
+`AT_ERROR` de join, cuya causa real fue el bug de sub-banda de abajo
+(`AT+MASK`). Se deja en `0` porque los reintentos los maneja el host (ver
+más abajo): antes de cada uno reafirma `AT+MASK=0002` y respeta el
+`Restricted_Wait`. Con `AutoJoin=1` el módulo podría unirse solo, antes de
+esa máscara, y sumar intentos que alargan el backoff de join.
 
 #### Orden de arranque, join, y recuperación ante caídas — LoRa como prioridad
 
@@ -432,7 +436,7 @@ se puede cambiar con el motor operando:
 
 **`RESTAURAR_DEFAULTS` eliminado (2026-10-01):** nunca se usó (y tenía un
 bug: respondía `OK` sin restaurar nada). Su ID 19 pasó a ser
-`REPORTAR_PARAMETROS`.
+`REPORTAR_PARAMETROS` (hoy ID 27, renumeración del 2026-10-02).
 
 ### 2.4 `servo.c/h`
 
@@ -448,9 +452,13 @@ solicitud (ni del downlink, ni de un futuro PID).
 `destinoUs` sin bloquear, limitando la velocidad a
 `SERVO_VELOCIDAD_MAX_US_S` (µs/segundo, constante fija en `servo.h`,
 no configurable remoto — protección mecánica contra saltos bruscos
-del pulso, ej. ante una corrección fuerte del futuro PID). Calcula el
-paso por tiempo real transcurrido (`HAL_GetTick()`), no por conteo de
-llamadas, así que no depende de la cadencia exacta del loop principal.
+del pulso, ej. ante una corrección fuerte del PID). Calcula el paso por
+tiempo real transcurrido (`HAL_GetTick()`), no por conteo de llamadas,
+y desde 2026-10-02 guarda la fracción de µs que sobra para la vuelta
+siguiente, así que la velocidad es **exacta y no depende de la cadencia
+del loop** (hallazgo B19: antes perdía los decimales y variaba entre
+~1000 y ~1250 µs/s según lo ocupado del loop). El valor quedó en
+**1000 µs/s**, lo que en la práctica veía el PID#1 cuando se sintonizó.
 
 **Modo calibración** (`main.c`): con el motor detenido, un downlink
 `CALIB=2` activa un barrido continuo del servo entre
@@ -537,6 +545,23 @@ mientras `PID_RPM_KI=0`, para que no acumule en silencio y aparezca de
 golpe cuando se active esa ganancia. `PID_Init()` se llama una sola vez
 en el flanco de entrada a este modo, para que el primer cálculo no use
 un `dt` inflado por el tiempo inactivo.
+
+**Núcleo P+I compartido (2026-10-02).** PID#1 (`pid.c`) y PID#2
+(`presion_pid.c`) usan la misma función `Pi_Calcular()` (`pid.h`): P+I con
+anti-windup por integración condicional y ganancias temporales en RAM para
+los autotunes. Cada lazo le pasa sus límites. Para el **PID#1** las cuentas
+son las mismas de antes y en el mismo orden (comparado en simulación con
+números de 32 bits: 400 000 pasos, 0 diferencias). Para el **PID#2**
+cambiaron dos cosas, ⚠️ **a validar en campo**:
+- **Techo `RPM_MAX_CARGA`** (antes `RPM_MAX`): `main.c` recorta su salida a
+  `RPM_MAX_CARGA`, y con el anti-windup en `RPM_MAX` el integral seguía
+  acumulando entre los dos techos y la presión se pasaba al alcanzarla.
+- **Anti-windup hacia abajo en `RPM_MIN`** (antes en 0 RPM): con la presión
+  por encima del objetivo, el integral se vaciaba hasta pedir 0 RPM y al
+  volver a bajar la presión tardaba en acelerar. En una simulación de
+  válvula cerrada 3 min, el motor empezaba a acelerar 50 s después de abrir
+  (ahora 1 s) y la presión caía hasta 12.6 PSI con objetivo 40 (ahora 18.5).
+  La salida sí puede seguir bajando a 0 (el P pide "sin comandar").
 
 **`RPM_MIN` es el umbral de "¿debe intervenir el control?", no solo un
 límite duro** — `RPM_MIN` ya está documentado como "límite duro /
@@ -643,6 +668,24 @@ UTC del último `+CGPSINFO:` con fix (campos `fecha ddmmyy`/`hora
 hhmmss.s` del formato de arriba — antes descartados, solo se usaba
 lat/lon). Es la fuente **primaria** de sincronización del RTC, con la
 red LoRaWAN como respaldo — ver sección 2.2 para el mecanismo completo.
+Desde 2026-10-02 `main.c` le suma la **edad del reporte**
+(`GPS_GetEdadReporteMs()`, hasta 10 s) antes de poner el RTC
+(`Reloj_SetUnixTimeUtc()`), así el reloj queda al segundo en vez de con
+el atraso del último reporte.
+
+**Caducidad del fix (2026-10-02, hallazgo B15).** Antes, `GPS_TieneFix()`
+solo se apagaba con un reporte vacío: si el módulo dejaba de hablar
+(colgado, cable, reinicio propio), el último fix quedaba válido para
+siempre y el RTC se re-seteaba cada 30 s con esa hora vieja. Ahora, si no
+llega **ningún** `+CGPSINFO:` en `GPS_REPORTE_VIGENCIA_MS` (30 s = 3
+reportes perdidos), el fix se da por vencido: el LIVE manda `0/0` y la hora
+pasa al respaldo LoRaWAN.
+
+**Buffers (2026-10-02):** el DMA bajó de 512 a 128 bytes y la cola de 8 a
+4 líneas (~760 bytes de RAM): el módulo solo manda una línea de ~80
+caracteres cada 10 s. El log `GPS RX crudo` se deja a propósito (es donde
+se ve si hay fix); el print de diagnóstico de `GPS_ErrorCallback()` se
+quitó.
 
 ⚠️ **Hallazgos de hardware del Waveshare SIM7600X-H 4G HAT** (jumpers,
 alimentación, antena) → ver hardware, sección 6.1.
@@ -666,14 +709,29 @@ cielo), el reenvío es inofensivo: con el GPS ya encendido, `AT+CGPS=1`
 solo contesta `ERROR` sin interrumpir la adquisición en curso. El
 contador se reinicia también en cuanto llega un fix real.
 
-### 2.7 `comando_serial.c/h` — mando manual TEMPORAL por serial
+**Re-armado si el módulo se queda mudo (2026-10-02).** El reintento de
+arriba solo cuenta reportes *vacíos*: si el SIM7600X se reinicia solo,
+olvida `AT+CGPS=1` y `AT+CGPSINFO=10` y deja de mandar reportes por
+completo, así que ese contador nunca sube. Ahora, si no llega **ningún**
+`+CGPSINFO:` en `GPS_REARMAR_SIN_REPORTES_MS` (60 s), `GPS_Update()` vuelve
+a mandar las dos órdenes del arranque separadas por 1.5 s
+(`GPS_REARMAR_PAUSA_MS`, sin bloquear el loop), y lo repite como mucho una
+vez por minuto mientras siga mudo. Log: `GPS: sin reportes hace Ns --
+re-armando`.
 
-Mientras no hay red LoRa disponible en campo para probar downlinks
-reales, este módulo permite escribir a mano un "downlink" por el mismo
-puerto de debug (LPUART1) que ya se usa para ver los logs. Recibe **por
-interrupción** (`HAL_UART_Receive_IT`, un byte a la vez, en un ring
-buffer — requiere `LPUART1 global interrupt` habilitada en el `.ioc`,
-NVIC), arma la línea con eco local, y al recibir Enter la pasa por
+### 2.7 `comando_serial.c/h` — consola por serial (permanente)
+
+**Permanente desde 2026-10-02** (antes "mando manual TEMPORAL"): se usa en
+banco y en campo con la laptop conectada, también con la red LoRa activa.
+Permite escribir a mano un "downlink" por el mismo puerto de debug
+(LPUART1) que ya se usa para ver los logs. Recibe **por interrupción**
+(`HAL_UART_Receive_IT`, un byte a la vez — requiere `LPUART1 global
+interrupt` habilitada en el `.ioc`, NVIC) y arma la línea con eco local.
+Al recibir Enter, la ISR **solo entrega la línea**; la procesa
+`ComandoSerial_Update()` en el loop normal (2026-10-02, hallazgo B16:
+procesarla dentro de la interrupción podía escribir flash durante decenas
+de ms sin atender el tacómetro, mezclar `printf` y pisar una escritura de
+flash que el loop tuviera a medias). Ahí pasa por
 `CalibFlash_ProcesarParametroConEstado()` — **el mismo punto
 de entrada que usa `rak3172.c` para un downlink real** (misma
 validación de rango, mismo bloqueo por categoría con el motor
@@ -698,7 +756,7 @@ Formato de línea: `NOMBRE_PARAMETRO [VALOR]`, con el mismo nombre y el
 mismo valor "humano" (sin escalar) que se manda por MQTT vía
 `RIO-DSL-SendDownlink` (ver sección 6) — ej. `CALIB 1`,
 `SET_RPM 900`, `SERVO_PULSO_MIN 1050`. Los comandos
-(`RESTAURAR_DEFAULTS`, `FORZAR_REPORTE`, `RESET_REMOTO`) no llevan
+(`REPORTAR_PARAMETROS`, `FORZAR_REPORTE`, `RESET_REMOTO`) no llevan
 VALOR, el módulo manda el byte de confirmación `0xA5` automáticamente.
 
 #### Pass-through AT hacia el RAK3172 (permanente)
@@ -787,11 +845,37 @@ Se verificó con una réplica exacta contra el valor correctamente redondeado:
 200 000 casos idénticos o a 1 ulp (una parte en 10 millones), y error máximo
 de 0.36 cm en coordenadas GPS.
 
+### 2.10 `horometro.c/h` — horas de motor encendido (2026-10-02)
+
+Como el cuentakilómetros de un carro, pero en horas: **solo sube con el
+motor encendido** (estado ENCENDIDO o ACTIVO, con su debounce de 3 s) y
+nunca baja ni se reinicia solo. Se **fija** por downlink con
+`HOROMETRO_H` (ID 17, horas enteras) al instalar el TID en un motor que ya
+trae horas; después sigue sumando sin límite práctico.
+
+**Guardado en flash sin gastarla:** usa **su propia página** (62,
+`0x0801F000`), no la de calibración, como un cuaderno: cada guardado
+escribe un **renglón** nuevo de 8 bytes (`[segundos][~segundos]`, el
+complemento detecta renglones borrados o dañados) sin borrar nada, y la
+página (256 renglones) solo se borra cuando se llena. Se guarda **al
+apagarse el motor** (la sesión completa, al segundo) y, con el motor
+encendido, **cada 30 min** como respaldo: si el TID pierde el voltaje con
+el motor andando, lo máximo que se pierde son 30 min. Con el motor 24 h al
+día son ~48 renglones/día → una borrada cada ~5 días → la página dura más
+de 100 años (10 000 borradas). Por esta página el `.ld` declara **124K**.
+
+**Dónde se ve:** en el LIVE (bytes 29-31, décimas de hora) y en el ACK /
+reporte de parámetros del ID 17 (horas enteras, topado en 65 535 h). Al
+arrancar imprime `HOROMETRO: N.N h (renglon X de 256)`.
+
+⚠️ Compila; no probado en equipo.
+
 **Flash (2026-09-30):**
-- El `.ld` ahora declara **126K** en vez de 128K: la última página
-  (`0x0801F800`) es la de calibración, así que si el programa crece de más
-  **falla al compilar** en vez de borrarla. Si CubeMX regenera el `.ld`, hay
-  que volver a poner 126K.
+- El `.ld` declara **124K** en vez de 128K (126K desde 2026-09-30, 124K desde
+  2026-10-02): las dos últimas páginas son la del horómetro (62, `0x0801F000`)
+  y la de calibración (63, `0x0801F800`), así que si el programa crece de más
+  **falla al compilar** en vez de borrarlas. Si CubeMX regenera el `.ld`, hay
+  que volver a poner 124K.
 - Para campo se recomienda flashear **Release**: ~78 KB de 126 KB. Debug
   queda en ~116 KB (2026-10-01, tras pasar `calibracion_flash.c` a tabla).
 
@@ -823,53 +907,68 @@ por FPort 3 de más de 4 bytes es el reporte de parámetros: varios grupos de
 | 4 | `APPLY_ERROR` | Valor válido pero el `MODO`/`CALIB` actual no lo permite (columna "Candado" de la tabla de abajo) |
 | 5 | `REJECTED_ENGINE_RUNNING` | Parámetro de categoría CONFIGURACION, motor operando |
 | 6 | `REJECTED_ENGINE_STOPPED` | `MODO=1`/`2` (control automático) con el motor detenido (agregado 2026-09-22, sección 4.3) |
-| 8 | `REPORTE` | No es respuesta a un downlink: valor guardado, enviado por `REPORTAR_PARAMETROS` (ID 19) |
+| 8 | `REPORTE` | No es respuesta a un downlink: valor guardado, enviado por `REPORTAR_PARAMETROS` (ID 27) |
 | 7 | `REJECTED_OBJETIVO_REMOTO_NO_CONFIGURADO` | `MODO=2` con `PRESION_OBJETIVO_REMOTO` en `0` (sin configurar) — agregado 2026-09-23, sección 4.3. No es un candado de seguridad (a diferencia del `6`), es para evitar que `MODO=2` quede "andando" sin hacer nada útil, en silencio |
 
 ### Tabla completa de parámetros
 
-Vigente al 2026-10-01, igual a `k_params[]` / `RangoValido()` en
+Vigente al 2026-10-02, igual a `k_params[]` / `RangoValido()` en
 `calibracion_flash.c`. "Candado" = condición extra además de la categoría
 (rechazo con `APPLY_ERROR`). Los parámetros de 1 byte usan solo `VALUE_L`.
 
-| ID | Nombre | Escala | Ancho | Categoría | Candado | Rango / notas |
-|---|---|---|---|---|---|---|
-| 1 | `SET_RATIO` | x100 | uint16 | Calibración | `MODO=4` | 0.1–200 pulsos/vuelta |
-| 2 | `ALPHA` | x1000 | uint16 | Calibración | — | (0, 1]. Coeficiente del filtro EMA de RPM. `CALIB=3` lo calcula solo |
-| 3 | `SET_RPM` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM. Setpoint directo; limpia `SET_PRESION`. Sin rango propio (el control lo recorta a `RPM_MIN`/`RPM_MAX_CARGA`) |
-| 4 | `RPM_MAX` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, 6000]. Techo MECÁNICO del motor, fijo por modelo |
-| 5 | `RPM_MIN` | x10 | uint16 | Configuración | `MODO=4` | [0, `RPM_MAX`). Ralentí. `CALIB=8` lo calcula solo |
-| 6 | `PID_RPM_KP` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Con signo, sin rango. PID#1 (RPM→servo). `CALIB=13` lo calcula solo |
-| 7 | `PID_RPM_KI` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Igual que `PID_RPM_KP` |
-| 8 | `TIEMPO_LLENADO_S` | directo (s) | uint16 | Proceso | — | `0` (sin rampa) o ≥ 60 s. Segundos para llenar la tubería de 0 PSI a `PRESION_OBJETIVO_LOCAL`. La velocidad de la rampa de `MODO=1/2` se calcula al usarla (`objetivo / segundos`), así que cambiar el objetivo después la ajusta sola. También lo usan `CALIB=9/14`. Movido aquí desde el ID 33 el 2026-10-01 (antes el 8 era `TASA_LLENADO_PSI_S`, y antes `PID_KD`). ⚠️ Una Lambda sin actualizar que mande el viejo `TASA_LLENADO_PSI_S` sería leída como segundos; el mínimo de 60 s rechaza los valores chicos |
-| 9 | `SERVO_PULSO_MIN` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | [500, `SERVO_PULSO_MAX`). En sesión 1/2 queda en RAM y se guarda al salir. `CALIB=4` lo calcula solo |
-| 10 | `SERVO_PULSO_MAX` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | (`SERVO_PULSO_MIN`, 2500] |
-| 11 | — | — | — | — | — | **Libre.** Era `TIMEOUT_SIN_COMANDO_S`; fijo en **360 s** desde 2026-10-01 (`FIJO_TIMEOUT_SIN_COMANDO_S`) |
-| 12 | — | — | — | — | — | **Libre.** Era `TASA_MAX_CAMBIO_RPM_S` (nunca se usó, eliminado 2026-10-01) |
-| 13 | `CALIB` | 0–14 | 1B | Calibración | ver sección 4.4 / hoja CALIB | ≠0 exige `MODO=4` (salvo `12`, que también arranca desde `MODO=1`); `1`/`2` exigen el motor detenido (`REJECTED_ENGINE_RUNNING`); `3`–`14` solo desde `CALIB=0`. Entrar a cualquier ≠0 limpia `SET_RPM`. Solo RAM, el arranque lo deja en `0` |
-| 14 | `INTERVALO_ENVIO_OPERATIVO_S` | directo (s) | uint16 | Configuración | — | 5–3600, default 30. Cada cuánto sale el uplink LIVE con el motor encendido (estado `ENCENDIDO`/`ACTIVO`). Conectado 2026-10-01 |
-| 15 | `INTERVALO_ENVIO_STANDBY_S` | directo (s) | uint16 | Configuración | — | 5–3600, default 30. Cada cuánto sale el uplink LIVE con el motor apagado. Conectado 2026-10-01. ⚠️ Una unidad que ya tenía flash guardada conserva el default viejo (300 s): verlo en el reporte de arranque y mandar 30 desde GIO |
-| 16 | `MODO` | 0–4 | 1B | Calibración | reglas de `modo_fsm.c` (sección 4.3.3) | `0` ralentí, `1` presión local, `2` remoto, `3` manual, `4` calibración. `1`/`2` con el motor detenido → `6`; `2` sin objetivo remoto → `7`; `2` solo desde `1`. Solo RAM, el arranque lo deja en `0` |
-| 17 | `PRESION_REMOTO` | x10 | uint16 | Proceso | — | Solo RAM. Lectura que manda el aspersor; refresca el watchdog del ID 11 |
-| 18 | — | — | — | — | — | **Libre.** Era `NODE_ID` (eliminado 2026-10-01, nunca se usó) → `UNKNOWN_PARAMETER_ID` |
-| 19 | `REPORTAR_PARAMETROS` | — | 1B | Comando | byte `0xA5` | Manda por FPort 3 el valor guardado de cada parámetro (ver "Reporte de parámetros" abajo). Se ejecuta solo al arrancar. Era `RESTAURAR_DEFAULTS` (nunca se usó, eliminado 2026-10-01) |
-| 20 | `FORZAR_REPORTE` | — | 1B | Comando | byte `0xA5` | Uplink inmediato |
-| 21 | — | — | — | — | — | **Libre.** Era `HISTERESIS_MODO_S`; fijo en **30 s** desde 2026-10-01 |
-| 22 | `RESET_REMOTO` | — | 1B | Comando | byte `0xA5` | `NVIC_SystemReset`. Solo con el motor detenido o en ralentí sin nada comandado; si no, `REJECTED_ENGINE_RUNNING` |
-| 23 | `PRESION_OBJETIVO_LOCAL` | x10 | uint16 | Proceso | — | (0, `PRESION_MAX`). Objetivo del lazo de presión de `MODO=1` |
-| 24 | — | — | — | — | — | **Libre.** Era `TASA_MAX_CAMBIO_RPM_LLENADO_S`; fijo en **10 RPM/s** (rampa de bajada) desde 2026-10-01 |
-| 25 | `SET_RATIO_AUTO` | x10 (entrada) | uint16 | Calibración | `MODO=4` | Comando con valor (no guarda nada propio): se manda el RPM que marca un tacómetro externo y el firmware calcula y guarda `SET_RATIO = Hz × 60 / RPM`. El ACK devuelve el ratio (x100). `OUT_OF_RANGE` con `0` o sin lectura de tacómetro |
-| 26 | `PID_ASP_KP` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Con signo. PID#3 (presión remota, `MODO=2`). `CALIB=12` lo calcula solo |
-| 27 | `PID_ASP_KI` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Igual que `PID_ASP_KP` |
-| 28 | `PID_PSI_KP` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Con signo. PID#2 (presión local, `MODO=1`). `CALIB=14` lo calcula solo |
-| 29 | `PID_PSI_KI` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Igual que `PID_PSI_KP` |
-| 30 | `PRESION_OBJETIVO_REMOTO` | x10 | uint16 | Proceso | — | [0, 500]. Setpoint del PID de `MODO=2`; `0` = sin configurar (`MODO=2` se rechaza con `7`) |
-| 31 | `SET_PRESION` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM, `< PRESION_MAX`. Arma la cascada de `MODO=1` sin rampa; limpia `SET_RPM`. Sección 4.3.1 |
-| 32 | `RPM_MAX_CARGA` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, `RPM_MAX`]. Techo con carga (hidráulico) de la instalación |
-| 33 | — | — | — | — | — | **Libre.** `TIEMPO_LLENADO_S` se movió al ID 8 el 2026-10-01 |
-| 34 | `PRESION_MAX` | x10 | uint16 | Configuración | `MODO=4` | (0, 500] y mayor que `PRESION_OBJETIVO_LOCAL` y `SET_PRESION`. Guarda dura: si se supera, ralentí + alerta `5` (se libera al 90 %). Exenta en `MODO=0` |
+⚠️ **IDs renumerados el 2026-10-02** por categoría, 1-29 sin huecos (antes
+iban de 1 a 34 con los huecos 12, 18, 21, 24 y 33 que dejaron los parámetros
+eliminados el 2026-10-01). La columna "Antes" da el ID viejo. Es un cambio de
+protocolo: **el firmware y las dos Lambdas (`RIODSLSendDownlink` y
+`RIODSLDecodeUplink`) se actualizan juntos**. Un nodo con firmware viejo
+interpretaría un ID nuevo como otro parámetro (ej. el nuevo `1` = `MODO` es
+el viejo `SET_RATIO`), así que no se le mandan downlinks hasta reflashearlo.
+GIO manda los parámetros por **nombre**, así que no se entera del cambio.
 
-**Reporte de parámetros (`REPORTAR_PARAMETROS`, ID 19, 2026-10-01).** Al
+| ID | Antes | Nombre | Escala | Ancho | Categoría | Candado | Rango / notas |
+|---|---|---|---|---|---|---|---|
+| | | **Modos** | | | | | |
+| 1 | 16 | `MODO` | 0–4 | 1B | Calibración | reglas de `modo_fsm.c` (sección 4.3.3) | `0` ralentí, `1` presión local, `2` remoto, `3` manual, `4` calibración. `1`/`2` con el motor detenido → `6`; `2` sin objetivo remoto → `7`; `2` solo desde `1`. Solo RAM, el arranque lo deja en `0` |
+| 2 | 13 | `CALIB` | 0–14 | 1B | Calibración | ver sección 4.4 / hoja CALIB | ≠0 exige `MODO=4` (salvo `12`, que también arranca desde `MODO=1`); `1`/`2` exigen el motor detenido (`REJECTED_ENGINE_RUNNING`); `3`–`14` solo desde `CALIB=0`. Entrar a cualquier ≠0 limpia `SET_RPM`. Solo RAM, el arranque lo deja en `0` |
+| | | **Proceso** (se aceptan con el motor operando) | | | | | |
+| 3 | 3 | `SET_RPM` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM. Setpoint directo; limpia `SET_PRESION`. Sin rango propio (el control lo recorta a `RPM_MIN`/`RPM_MAX_CARGA`) |
+| 4 | 31 | `SET_PRESION` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM, `< PRESION_MAX`. Arma la cascada de `MODO=1` sin rampa; limpia `SET_RPM`. Sección 4.3.1 |
+| 5 | 23 | `PRESION_OBJETIVO_LOCAL` | x10 | uint16 | Proceso | — | (0, `PRESION_MAX`). Objetivo del lazo de presión de `MODO=1` |
+| 6 | 30 | `PRESION_OBJETIVO_REMOTO` | x10 | uint16 | Proceso | — | [0, 500]. Setpoint del PID de `MODO=2`; `0` = sin configurar (`MODO=2` se rechaza con `7`) |
+| 7 | 17 | `PRESION_REMOTO` | x10 | uint16 | Proceso | — | Solo RAM. Lectura que manda el aspersor; refresca el watchdog de `TIMEOUT_SIN_COMANDO_S` (fijo, 360 s) |
+| 8 | 8 | `TIEMPO_LLENADO_S` | directo (s) | uint16 | Proceso | — | `0` (sin rampa) o ≥ 60 s. Segundos para llenar la tubería de 0 PSI a `PRESION_OBJETIVO_LOCAL`. La velocidad de la rampa de `MODO=1/2` se calcula al usarla (`objetivo / segundos`), así que cambiar el objetivo después la ajusta sola. También lo usan `CALIB=9/14`. El ACK devuelve los segundos. (Hasta 2026-10-01 el 8 era `TASA_LLENADO_PSI_S`, y antes `PID_KD`; el mínimo de 60 s rechaza un valor viejo de PSI/s.) |
+| | | **Configuración** (solo con el motor detenido) | | | | | |
+| 9 | 5 | `RPM_MIN` | x10 | uint16 | Configuración | `MODO=4` | [0, `RPM_MAX`). Ralentí. `CALIB=8` lo calcula solo |
+| 10 | 4 | `RPM_MAX` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, 6000]. Techo MECÁNICO del motor, fijo por modelo |
+| 11 | 32 | `RPM_MAX_CARGA` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, `RPM_MAX`]. Techo con carga (hidráulico) de la instalación |
+| 12 | 34 | `PRESION_MAX` | x10 | uint16 | Configuración | `MODO=4` | (0, 500] y mayor que `PRESION_OBJETIVO_LOCAL` y `SET_PRESION`. Guarda dura: si se supera, ralentí + alerta `5` (se libera al 90 %). Exenta en `MODO=0` |
+| 13 | 9 | `SERVO_PULSO_MIN` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | [500, `SERVO_PULSO_MAX`). En sesión 1/2 queda en RAM y se guarda al salir. `CALIB=4` lo calcula solo |
+| 14 | 10 | `SERVO_PULSO_MAX` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | (`SERVO_PULSO_MIN`, 2500] |
+| 15 | 14 | `INTERVALO_ENVIO_OPERATIVO_S` | directo (s) | uint16 | Configuración | — | 5–3600, default 30. Cada cuánto sale el uplink LIVE con el motor encendido (estado `ENCENDIDO`/`ACTIVO`). Conectado 2026-10-01 |
+| 16 | 15 | `INTERVALO_ENVIO_STANDBY_S` | directo (s) | uint16 | Configuración | — | 5–3600, default 30. Cada cuánto sale el uplink LIVE con el motor apagado. Conectado 2026-10-01. ⚠️ Una unidad que ya tenía flash guardada conserva el default viejo (300 s): verlo en el reporte de arranque y mandar 30 desde GIO |
+| 17 | 11 | `HOROMETRO_H` | directo (h) | uint16 | Configuración | — | 0–65 535 horas enteras. **Fija** el horómetro (al instalar en un motor que ya trae horas, o para corregirlo); después sigue sumando solo. El ACK y el reporte de parámetros devuelven el valor **actual** en horas enteras (topado en 65 535); el valor completo va en el LIVE. Ver 2.10 |
+| | | **Calibración** | | | | | |
+| 18 | 1 | `SET_RATIO` | x100 | uint16 | Calibración | `MODO=4` | 0.1–200 pulsos/vuelta |
+| 19 | 25 | `SET_RATIO_AUTO` | x10 (entrada) | uint16 | Calibración | `MODO=4` | Comando con valor (no guarda nada propio): se manda el RPM que marca un tacómetro externo y el firmware calcula y guarda `SET_RATIO = Hz × 60 / RPM`. El ACK devuelve el ratio (x100). `OUT_OF_RANGE` con `0` o sin lectura de tacómetro |
+| 20 | 2 | `ALPHA` | x1000 | uint16 | Calibración | — | (0, 1]. Coeficiente del filtro EMA de RPM. `CALIB=3` lo calcula solo |
+| 21 | 6 | `PID_RPM_KP` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Con signo, sin rango. PID#1 (RPM→servo). `CALIB=13` lo calcula solo |
+| 22 | 7 | `PID_RPM_KI` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Igual que `PID_RPM_KP` |
+| 23 | 28 | `PID_PSI_KP` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Con signo. PID#2 (presión local, `MODO=1`). `CALIB=14` lo calcula solo |
+| 24 | 29 | `PID_PSI_KI` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Igual que `PID_PSI_KP` |
+| 25 | 26 | `PID_ASP_KP` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Con signo. PID#3 (presión remota, `MODO=2`). `CALIB=12` lo calcula solo |
+| 26 | 27 | `PID_ASP_KI` | x1000 | int16 | Calibración | `MODO=4` y `CALIB=0` | Igual que `PID_ASP_KP` |
+| | | **Comandos** (byte de confirmación `0xA5`) | | | | | |
+| 27 | 19 | `REPORTAR_PARAMETROS` | — | 1B | Comando | byte `0xA5` | Manda por FPort 3 el valor guardado de cada parámetro (ver "Reporte de parámetros" abajo). También se ejecuta solo al arrancar |
+| 28 | 20 | `FORZAR_REPORTE` | — | 1B | Comando | byte `0xA5` | Uplink inmediato |
+| 29 | 22 | `RESET_REMOTO` | — | 1B | Comando | byte `0xA5` | `NVIC_SystemReset`. Solo con el motor detenido o en ralentí sin nada comandado; si no, `REJECTED_ENGINE_RUNNING` |
+
+Parámetros viejos que ya no existen (eliminados o fijos en código el
+2026-10-01), con su ID de entonces: `TASA_MAX_CAMBIO_RPM_S` (12), `NODE_ID`
+(18), `HISTERESIS_MODO_S` (21, fijo en 30 s), `TASA_MAX_CAMBIO_RPM_LLENADO_S`
+(24, fijo en 10 RPM/s), `TIMEOUT_SIN_COMANDO_S` (11, fijo en 360 s) y
+`RESTAURAR_DEFAULTS` (19).
+
+**Reporte de parámetros (`REPORTAR_PARAMETROS`, ID 27, 2026-10-01).** Al
 arrancar el TID (en cuanto se une a la red) y cada vez que llega el
 comando, el TID manda el valor guardado de cada parámetro para que GIO
 muestre qué está configurado. Va por el **FPort 3** (el del ACK, sin regla
@@ -879,12 +978,14 @@ nueva en AWS) en grupos de 4 bytes con el mismo formato del ACK:
 [ID][STATUS=8 REPORTE][VALUE_H][VALUE_L]  x 7 por uplink (28 bytes)
 ```
 
-Son 21 valores (IDs 1, 2, 4, 5, 32, 34, 6, 7, 26, 27, 28, 29, 9, 10, 14, 15,
-23, 30, 8, 13, 16), es decir 3 uplinks, separados al menos 5 s y cediendo el
-canal al LIVE y al ACK. Si el módulo rechaza una parte, se reintenta hasta 3
-veces. Cada valor va en la misma escala que su ACK. `STATUS=8` indica que no
-es la respuesta a un downlink. Log por consola: `REPORTE_PARAMETROS,PARTE` y
-`REPORTE_PARAMETROS,FIN`.
+Son 22 valores, en orden de ID (1, 2, 5, 6, 8-18, 20-26), es decir 4
+uplinks (7+7+7+1), separados al menos 5 s y cediendo el canal al LIVE y al
+ACK. Si el módulo rechaza una parte, se reintenta hasta 3 veces. Cada valor
+va en la misma escala que su ACK. `STATUS=8` indica que no es la respuesta a
+un downlink: el decoder lo reconoce por eso (el último uplink trae **un solo
+grupo**, 4 bytes, igual de largo que un ACK) y lo devuelve como
+`PARAMETER_REPORT`, sin avisarle a GIOMaps como si fuera un ACK. Log por
+consola: `REPORTE_PARAMETROS,PARTE` y `REPORTE_PARAMETROS,FIN`.
 
 **Rampa de bajada (2026-10-01).** Una caída brusca de presión con la bomba
 cargada puede reventar la tubería igual que una subida brusca. Antes, al
@@ -925,7 +1026,15 @@ Determinado por `!Tacometro_EstaDetenido()`, consultado en
 
 Distinto de la máquina de estados del gobernador (4.3) — este es el
 campo `estado` que viaja en el uplink LIVE (ver sección 6), calculado
-en `main.c`:
+en `main.c`.
+
+**Cada cambio de estado dispara un uplink LIVE inmediato** (2026-10-02),
+igual que las alertas: antes GIO seguía mostrando el estado viejo hasta el
+próximo envío periódico (hasta `INTERVALO_ENVIO_STANDBY_S` con el motor
+apagado, 300 s en la unidad de banco). Ahora se actualiza a los ~3 s del
+cambio (el debounce del estado), y el `fecha_hora` de ese uplink marca el
+momento exacto del cambio. Log: `ESTADO_MOTOR: X -> Y ... uplink
+inmediato`. El primer cálculo al arrancar no cuenta como cambio.
 
 ```
 ESTADO_APAGADO   (2): rpm == 0
@@ -950,7 +1059,7 @@ de `0` confiable.
 
 ### 4.3 Modos de operación del motor (`MODO` 0/1/2/3/4) — **implementado, renumerado 2026-09-14, extendido 2026-09-24**
 
-`MODO` (ID 16) gobierna de dónde sale el setpoint de RPM del lazo
+`MODO` (ID 1) gobierna de dónde sale el setpoint de RPM del lazo
 interno (`pid.c`). Es un parámetro real de protocolo (se manda por
 downlink/serial), no solo un nombre interno -- la numeración sigue la
 terminología que ya usa el cliente en campo:
@@ -1086,8 +1195,8 @@ presión medida (PresionV_GetPresionPsi(), sensor propio del TID)
 
 | ID | Nombre | Escala | Notas |
 |---|---|---|---|
-| 28 | `PID_PSI_KP` | x100, con signo | Ganancia proporcional del lazo externo |
-| 29 | `PID_PSI_KI` | x1000, con signo | Ganancia integral del lazo externo |
+| 23 | `PID_PSI_KP` | x1000, con signo | Ganancia proporcional del lazo externo |
+| 24 | `PID_PSI_KI` | x1000, con signo | Ganancia integral del lazo externo |
 
 Mismo patrón de calibración que `PID_RPM_KP/KI`/`PRESION_GANANCIA_RPM`:
 solo se aceptan con `MODO=CALIBRACIÓN` + `CALIB=0` (ver
@@ -1205,8 +1314,8 @@ para `MODO=1`.
 
 | ID | Nombre | Escala | Notas |
 |---|---|---|---|
-| 26 | `PID_ASP_KP` | x100, con signo | Ganancia proporcional |
-| 27 | `PID_ASP_KI` | x1000, con signo | Ganancia integral |
+| 25 | `PID_ASP_KP` | x1000, con signo | Ganancia proporcional |
+| 26 | `PID_ASP_KI` | x1000, con signo | Ganancia integral |
 
 Mismo patrón de calibración que `PID_RPM_KP/KI`/`PID_PSI_KP/KI`:
 solo se aceptan con `MODO=CALIBRACIÓN` + `CALIB=0` (ver
@@ -1237,7 +1346,7 @@ primer setpoint inmediato con el último dato de `PRESION_REMOTO` conocido (sin
 esperar a un reporte nuevo), para no quedarse en `0` hasta 20-25min si
 el aspersor está reportando presión baja.
 
-⚠️ **`PRESION_OBJETIVO_REMOTO` (ID 30) cambió de rol el 2026-09-23**:
+⚠️ **`PRESION_OBJETIVO_REMOTO` (ID 6) cambió de rol el 2026-09-23**:
 antes solo alimentaba el supervisor de abajo (opcional, default `0` =
 "sin configurar" era inofensivo). Ahora es el setpoint REAL que recibe
 el PID -- dejó de ser un dato opcional. Con `0` sin configurar, el PID
@@ -1254,7 +1363,7 @@ es para evitar que `MODO=2` quede "andando" sin hacer nada útil, en
 silencio, sin que el supervisor de abajo llegue a dispararse nunca
 (nunca se satura en `RPM_MAX` si el objetivo es `0`).
 
-**Watchdog de `TIMEOUT_SIN_COMANDO_S` (ID 11) — implementado, solo
+**Watchdog de `TIMEOUT_SIN_COMANDO_S` (fijo en 360 s desde 2026-10-01) — implementado, solo
 aplica en `MODO=2`.** Si no llega una `PRESION_REMOTO` válida en más de ese
 tiempo (cuenta desde el arranque si nunca llegó ninguna), el firmware
 fuerza el setpoint a "sin comandar" -- el motor cae a ralentí natural
@@ -1277,10 +1386,10 @@ sin que el watchdog reaccionara. Sigue siendo un parámetro configurable
 por downlink (rango `60-3600s`) -- ajustar por nodo si el patrón real
 de pérdida de paquetes de su enlace LoRa lo justifica.
 
-**`PRESION_OBJETIVO_REMOTO` (ID 30) — setpoint del PID de `MODO=2` Y
+**`PRESION_OBJETIVO_REMOTO` (ID 6) — setpoint del PID de `MODO=2` Y
 objetivo del supervisor, agregado 2026-09-23, cambió de rol el mismo
 día (ver arriba).** Es la presión que **se espera** que reporte el
-aspersor remoto -- distinta de `PRESION_REMOTO` (ID 17), que es la lectura
+aspersor remoto -- distinta de `PRESION_REMOTO` (ID 7), que es la lectura
 real que manda el remoto por downlink. Se configura en este mismo TID
 (categoría PROCESO, se puede cambiar en caliente con el motor operando,
 igual que `PRESION_OBJETIVO_LOCAL` local). Default `0.0` = "sin configurar" --
@@ -1340,46 +1449,34 @@ a ojo. Si `PRESION_OBJETIVO_REMOTO` no está calibrado (`0`), el criterio
 cae a "solo saturado en `RPM_MAX`" pero el retroceso activo sigue
 aplicando igual.
 
-**El watchdog de `TIMEOUT_SIN_COMANDO_S` (arriba) tiene prioridad y es
+**El watchdog de `TIMEOUT_SIN_COMANDO_S` tiene prioridad y es
 independiente de este ciclo de reintentos** -- si la señal se cae del
 todo a mitad de un ciclo (no "llega un reporte diciendo que sigue mal",
-sino "no llega nada"), ese es un problema de enlace, no de fuga: el
-watchdog ya fuerza ralentí por su cuenta, y este supervisor cancela
-cualquier reintento en curso en vez de competir con él.
+sino "no llega nada"), ese es un problema de enlace, no de fuga: desde
+2026-10-01 el bloque de enlace de `main.c` pasa `MODO=2` → `MODO=1` (con
+vuelta automática a 2, alerta 4) y este supervisor deja de correr.
 
-Misma limitación que el de `MODO=1`: solo monitor serial por ahora, no
-existe un ID de alerta en el protocolo para mandarlo por LoRa.
+La alerta va por LoRa en el byte 27 del LIVE (código `2`,
+`MODO_REMOTO_OBJETIVO_NO_ALCANZADO`, desde 2026-09-23).
 
-**Pendientes de esta sección (2026-09-14, sin implementar todavía):**
-- **Selección de modo por switch físico**: el cliente va a instalar un
-  selector físico en el gabinete para cambiar `MODO` localmente, además
-  del downlink remoto -- sin código todavía (ni lectura de GPIO, ni
-  lógica de selector). Cuando se defina el pin/comportamiento, debería
-  bastar con un módulo nuevo que llame a `CalibFlash_SetModo()`, el
-  mismo punto de entrada que ya usa el downlink -- no debería requerir
-  tocar la lógica de `main.c` de esta sección.
-- **Prioridad control local (serial) sobre remoto (downlink)**,
-  mencionada por el cliente con el criterio de un variador ABB por
-  Modbus (el control local, cuando está activo, tiene prioridad sobre
-  cualquier comando remoto). **Hoy no existe** -- `comando_serial.c` y
-  `rak3172.c` llaman al mismo `CalibFlash_ProcesarParametroConEstado()`
-  sin ningún concepto de "quién manda": el que escriba último gana, sin
-  importar el canal. Falta diseñar el mecanismo de prioridad/bloqueo.
-- **Reglas de transición entre MODOs** — ✅ **parcialmente resuelto
-  2026-09-30:** `MODO=2` solo se acepta viniendo de `MODO=1` (ver triple
-  cascada arriba). El resto de los saltos sigue sin restricción. Texto
-  original: hoy `CalibFlash_SetModo()`
-  acepta cualquier salto directo entre 0/1/2/3, sin restricción de
-  secuencia. Se discutió (2026-09-14) la posibilidad de exigir pasar
-  por `MODO=0` como estado neutro obligatorio antes de saltar entre
-  modos activos (1/2/3) -- pero el flujo real de operación (llenado de
-  tubería en `MODO=1` sin necesariamente pasar por ralentí antes de
-  `MODO=2`; traslado de equipo en `MODO=3` sin necesariamente bajar
-  presión primero) todavía no está claro, así que **se decidió dejar
-  pendiente y seguir cambiando `MODO` manualmente sin restricciones**
-  hasta que el flujo operativo real esté más definido.
+**Pendientes de esta sección** (planteados 2026-09-14, estado al 2026-10-02):
+- [ ] **Selección de modo por switch físico**: sin código todavía. Propuesta
+  conversada el 2026-10-02 (ver sección 8.1): selector de 3 posiciones
+  (MODO 0/1/2), actúa solo al moverlo y pasa por las mismas reglas de
+  `modo_fsm.c` que un downlink.
+- [ ] **Prioridad control local sobre remoto** (criterio de variador ABB
+  por Modbus): hoy `comando_serial.c` y `rak3172.c` usan el mismo
+  `CalibFlash_ProcesarParametroConEstado()` y **gana el último que
+  escribe**. La propuesta para el switch (8.1) es la misma regla: gana el
+  último que habló. Falta confirmarlo con el cliente.
+- [x] **Reglas de transición entre MODOs** — resuelto 2026-10-01 con la
+  máquina de estados (`modo_fsm.c`, hoja "Máquina de estados" del Excel,
+  sección 4.3.3): MODO 1/2 rechazados con el motor detenido, MODO 2 solo
+  desde MODO 1 (y desde 2026-10-02 solo con enlace LoRa y el aspersor
+  reportando), MODO 1 desde cualquier MODO, efectos al entrar a MODO 3/4,
+  y degradación automática al perder el enlace.
 
-#### 4.3.1 `SET_PRESION` (ID 31) — sostener una presión puntual en `MODO=3` (agregado 2026-09-25)
+#### 4.3.1 `SET_PRESION` (ID 4) — sostener una presión puntual en `MODO=3` (agregado 2026-09-25)
 
 Equivalente de `SET_RPM` (ID 3) pero para el lazo de presión -- un
 downlink de PROCESO (no persistente, se puede mandar con el motor
@@ -1429,19 +1526,19 @@ de llegar al servo. Corregido agregando `&& !presionLocalActivoAhora`
 a la condición de ese bloque (mismo arreglo necesario para que
 `SET_PRESION` funcione, ya que comparte el mismo camino de código).
 
-#### 4.3.2 `RPM_MAX` vs `RPM_MAX_CARGA` (ID 4 y 32) — dos techos de RPM distintos (agregado 2026-09-28)
+#### 4.3.2 `RPM_MAX` vs `RPM_MAX_CARGA` (ID 10 y 11) — dos techos de RPM distintos (agregado 2026-09-28)
 
 Las motobombas de este proyecto tienen un **embrague físico** que
 conecta/desconecta la bomba del motor -- esto separa dos riesgos
 completamente distintos que antes se confundían bajo un solo concepto
 de "techo de RPM":
 
-- **`RPM_MAX`** (ID 4, ya existía): el techo **MECÁNICO** del
+- **`RPM_MAX`** (ID 10, ya existía): el techo **MECÁNICO** del
   motor/motobomba -- fijo por modelo, no depende de la instalación ni
   de si la bomba está embragada o no. Protege contra sobre-acelerar el
   motor en sí (relevante incluso con la bomba desembragada, girando en
   vacío).
-- **`RPM_MAX_CARGA`** (ID 32, nuevo): el techo **CON CARGA**
+- **`RPM_MAX_CARGA`** (ID 11, nuevo): el techo **CON CARGA**
   (hidráulico) -- específico de cada instalación (ej. "no reventar la
   tubería de esta bomba en particular"), SIEMPRE `≤ RPM_MAX` (rechazado
   si se intenta configurar más alto). Solo tiene sentido cuando la
@@ -1500,7 +1597,14 @@ consola y `main.c` a los eventos. **MODO 5 (diagnóstico) y 6 (mantenimiento) NO
 **Reglas de entrada** (`Modo_ValidarEntrada`): `MODO=0/3/4` siempre se aceptan (3 y 4 también con
 motor apagado); `MODO=1/2` se rechazan con motor detenido (`REJECTED_ENGINE_STOPPED`); `MODO=1` se
 acepta desde cualquier modo (decisión 2026-10-01, no se restringe); `MODO=2` exige
-`PRESION_OBJETIVO_REMOTO > 0` y venir de `MODO=1` (o ya estar en 2).
+`PRESION_OBJETIVO_REMOTO > 0`, venir de `MODO=1` (o ya estar en 2) y, desde 2026-10-02, **enlace LoRa
+unido y el aspersor reportando** (al menos un `PRESION_REMOTO` real recibido, el último hace menos de
+`TIMEOUT_SIN_COMANDO_S`). Vale igual por downlink o por la consola serial (se puede armar desde la laptop
+en banco, pero solo con la red y el aspersor activos); si no, `APPLY_ERROR` + alerta 13.
+
+**Al detenerse el motor** (2026-10-02, hallazgo B8): en **cualquier** MODO, `SET_RPM` y `SET_PRESION`
+vuelven a 0 (`CalibFlash_LimpiarComandosManuales()`), además del paso a `MODO=0` (salvo `MODO=4`). Antes,
+en `MODO=4`, al rearrancar el motor aceleraba solo al `SET_RPM` anterior.
 
 **Efectos al entrar:** a `MODO=3` desde 1/2, `SET_RPM` = RPM actual (acotada por `RPM_MAX_CARGA`); desde
 otro modo, 0. `SET_PRESION` siempre 0. A `MODO=4` (solo en la transición), `SET_RPM`, `SET_PRESION`
@@ -2017,8 +2121,9 @@ Antes de cambiar, guardar el estado con `AT+BAND=?`, `AT+MASK=?`,
 RX2 ni DR (los defaults de AU915 son correctos; la numeración de DR
 cambia respecto a US915). El firmware sigue mandando `AT+MASK=0002` en el
 arranque y antes de cada reintento de join — misma sintaxis en AU915. El
-uplink de 28 bytes cabe desde DR0 (51 bytes máx. en DR0-2; en US915 DR0
-solo admitía 11).
+uplink LIVE (32 bytes desde 2026-10-02) cabe desde DR0 sin dwell time
+(51 bytes máx. en DR0-2; en US915 DR0 solo admitía 11). En campo el módulo
+está en `AT+DR=5`.
 
 **Lambdas.** Revisadas, sin cambios necesarios:
 - `RIO-DSL-DecodeUplink` solo lee `Fport` y `PayloadData`; no depende de
@@ -2065,7 +2170,7 @@ envolverlo en una propiedad extra.
 Acción: **Republish** a `RIO/DSL/DECODED`, rol IAM `GIO_role`
 (compartido con la regla del nodo aspersor).
 
-### Layout de bytes del uplink LIVE (FPort 1, 28 bytes)
+### Layout de bytes del uplink LIVE (FPort 1, 32 bytes)
 
 Debe coincidir byte a byte entre `RAK3172_EnviarUplinkLive()`
 (firmware) y `decoder.py::_decodificar_live()` (Lambda):
@@ -2082,9 +2187,16 @@ Debe coincidir byte a byte entre `RAK3172_EnviarUplinkLive()`
 | 19–22 | 4 | `latitud` | int32 BE, x10,000,000 |
 | 23–26 | 4 | `longitud` | int32 BE, x10,000,000 |
 | 27 | 1 | `codigoAlerta` | uint8 — ver tabla de alertas abajo |
+| 28 | 1 | `bateria_pct` | uint8, 0–100 % de la batería propia del nodo (Li-ion 1S); `0xFF` = sin medición (hoy siempre: falta el divisor al ADC en el hardware) |
+| 29–31 | 3 | `horometro` | uint24 BE, en décimas de hora (máx. 1 677 721.5 h) — ver 2.10 |
 
 `latitud`/`longitud` vienen del GPS en vivo cuando hay fix; sin fix se
 mandan en `0` ("Sin posición") — ver 2.6.
+
+⚠️ **Subido de 28 a 32 bytes el 2026-10-02** (batería y horómetro). En el decoder:
+si el payload trae 28 bytes (firmware anterior), dejar `bateria_pct` y `horometro` vacíos.
+Con `AT+DR=5` (AU915, SF7) caben ~222 bytes; ojo si ADR bajara el DR (DR2 con
+dwell time solo admite 11 bytes).
 
 ⚠️ **Subido de 27 a 28 bytes el 2026-09-23** al agregar `codigoAlerta`.
 Antes de esto, las alertas del sistema (`ALERTA,PRESION_OBJETIVO_NO_ALCANZADA`,
@@ -2126,9 +2238,12 @@ en el que se limpia sola).
 # LIVE (FPort 1) -- registro plano estilo GIOSoftware:
 {
   "fecha_hora": "2026-08-14 14:45:41",
+  "hora_del_nodo": True,          # False = "Sin hora": hora de recepción (2026-10-02)
   "codigo_maquinaria": "DSL-0001",
-  "tipo": "Motor Diesel",
-  "area": "Riegos",
+  "tipo_maquinaria": "Electro Bomba",
+  "area_maquinaria": "RIEGOS",    # o el del activo asignado en GIOMaps
+  "grupo": "SIN_GRUPO",
+  "rpm_motor": 1500.0,
   "presion": 88.5,
   "nombre_operacion": "ACTIVO",
   "codigo_operacion": 1,
@@ -2136,13 +2251,18 @@ en el que se limpia sola).
   "inicio_operacion": "2026-08-14T14:44:31",
   "tiempo_transcurrido": "0 dias, 00:01:10",
   "segundos_transcurridos": 70,
-  "alerta": "SIN_ALERTA",  # agregado 2026-09-23, ver NOMBRES_ALERTA
-  "longitud": -91.092375,
-  "latitud": 14.2740023
+  "longitud": -91.092375,         # None = "Sin posición" (el nodo mandó 0/0)
+  "latitud": 14.2740023,
+  "alerta": "SIN_ALERTA",
+  "bateria_pct": None,            # None = sin medición (0xFF) o firmware viejo
+  "horometro": 1234.5             # horas; None con firmware viejo (28 bytes)
 }
 
-# ACK (FPort 3):
-{"parameter": "SET_RATIO", "status": "OK", "valorAplicado": 17.5}
+# ACK (FPort 3, 4 bytes):
+{"messageType": "QUICK_SET_ACK", "parameter": "SET_RATIO", "status": "OK", "valorAplicado": 17.5}
+
+# Reporte de parámetros (FPort 3, STATUS=8, 1 a 7 grupos por uplink):
+{"messageType": "PARAMETER_REPORT", "parametros": {"MODO": 0.0, "CALIB": 0.0, "PID_RPM_KP": 0.047}}
 ```
 
 ⚠️ **SUPUESTOS pendientes de confirmar contra lo que espera
@@ -2186,30 +2306,19 @@ escribir `SET_RATIO 17.5` y Enter.
 
 ## 8. Pendientes generales
 
-- [ ] **Segundo timeout, más largo, para `MODO=2` tras señal caída por
-      mucho tiempo — esperando confirmación del cliente, no
-      implementado (2026-09-23).** Hoy, si se cae la señal remota, el
-      motor se COMPORTA como ralentí (`setpointRpmCrudo=0`, ver watchdog
-      de `TIMEOUT_SIN_COMANDO_S` sección 4.3) pero `MODO` nunca cambia
-      de verdad -- en cuanto vuelve un downlink válido de `PRESION_REMOTO`,
-      retoma control automático de inmediato, sin que nadie tenga que
-      reconfirmar nada. Preocupación real planteada por el usuario: si
-      la caída dura mucho (ejemplo dado: ~1 hora), el motor detenido
-      todo ese tiempo puede dejar que la tubería se vacíe de agua (aire
-      adentro) -- retomar control automático apenas vuelve la señal,
-      sin que un operador haya confirmado que la tubería sigue en
-      condiciones, es el mismo riesgo que ya se resolvió para el
-      arranque del equipo (`MODO` nunca arranca solo en `1`/`2`, sección
-      4.3) y para el intento final del supervisor de fuga de arriba.
-      **Diseño propuesto, aún no construido**: un segundo timeout, bien
-      más largo que `TIMEOUT_SIN_COMANDO_S` (360s), que si se supera con
-      la señal caída, fuerce `MODO` a `RALENTI` **de verdad** (mismo
-      mecanismo que el intento 4 del supervisor de fuga) -- así, al
-      volver la señal, el motor se queda en ralentí real esperando que
-      un operador mande `MODO 2` explícito de nuevo, en vez de
-      reanudar solo. **Falta confirmar con el cliente cuál es el umbral
-      real razonable** (el usuario tiró "una hora" como ejemplo, no
-      confirmado) antes de implementarlo.
+- [x] **Segundo timeout, más largo, para `MODO=2` tras señal caída por
+      mucho tiempo** (planteado 2026-09-23) — **superado por el diseño del
+      2026-10-01.** La preocupación era que, con la señal caída mucho
+      tiempo, el motor quedara en ralentí, la tubería se vaciara y al
+      volver la señal retomara solo. Hoy, sin reportes del aspersor
+      (`TIMEOUT_SIN_COMANDO_S`, fijo en 360 s) o sin enlace, `MODO=2` pasa
+      a **`MODO=1` de verdad**, que **sigue sosteniendo
+      `PRESION_OBJETIVO_LOCAL`** con el sensor propio: la tubería no se
+      vacía. Vuelve solo a `MODO=2` cuando regresan el enlace y los
+      reportes, salvo que el operador mande cualquier MODO o el motor se
+      detenga (que fuerza `MODO=0`). Si el cliente igual quiere un tope de
+      tiempo para esa vuelta automática, es un cambio chico en el bloque
+      de enlace de `main.c`.
 - [ ] **Terminar el circuito de acondicionamiento del lazo 4-20mA
       (pausado 2026-09-14).** El diferencial (3 op-amps) ya funciona
       bien (validado contra el amperímetro de la fuente de banco); el
@@ -2247,8 +2356,9 @@ escribir `SET_RATIO 17.5` y Enter.
       promedio recortado ya activo antes de concluir que el offset es
       real -- y en ese caso, corregirlo con una constante medida a
       mano alcanza, no hace falta reabrir el diseño de downlink/flash.
-- [ ] **Horómetro del motor — no diseñado, solo anotado como pendiente
-      (2026-09-10).**
+- [x] **Horómetro del motor** (anotado 2026-09-10) — **implementado
+      2026-10-02**, ver sección 2.10 (`horometro.c`, ID 17
+      `HOROMETRO_H`, bytes 29-31 del LIVE). Falta probarlo en equipo.
 - [ ] **LED físico de diagnóstico de alertas — no diseñado, solo anotado
       como pendiente (2026-09-23).** Idea del usuario: usar la misma
       variable `codigoAlerta`/`s_codigoAlertaActual` que ya alimenta el
@@ -2296,109 +2406,48 @@ escribir `SET_RATIO 17.5` y Enter.
       Implementado en `main.c` (bloque junto a la rama `MODO=1`, ver
       sección 4.3/12). Se ignora mientras el sensor de presión está en
       falla (esa condición ya tiene su propia alerta separada, ver
-      arriba). **Pendiente real**: solo compile-verificado, falta
-      probarlo con el sistema hidráulico real (mismo pendiente que el
-      resto de la cascada); y decidir si este mismo supervisor también
-      debería aplicarse a `MODO=2` (la idea original era para ese modo)
-      una vez que `MODO=1` esté validado en campo.
+      arriba). El techo que mira es `RPM_MAX_CARGA` (no `RPM_MAX`).
+      `MODO=2` tiene su propio supervisor (de fuga, alerta 2, sección
+      4.3). **Pendiente real**: probarlo con el sistema hidráulico real.
 - [x] Lazo PID (`pid.c/h`) implementado y activo en `main.c` (motor
       operando, sin calibración) — ver secciones 2.4 y 4.4.
-- [ ] Ganancias reales `PID_RPM_KP/KI` — siguen en default (`1.0/0`),
-      pendientes de sintonizar en el motor real. Ver sección 9 para el
-      procedimiento (Ziegler-Nichols en lazo cerrado, sin MATLAB) — solo
-      se pueden tocar con `MODO=CALIBRACIÓN` + `CALIB=0`
-      (ver sección 4.4, gate actualizado 2026-09-29).
+- [x] Ganancias reales `PID_RPM_KP/KI` — **sintonizadas en el motor
+      real: `Kp=0.047`, `Ki=0.11`** (montaje directo del servo, SIMC; ver
+      sección 9). El default de fábrica sigue en `1.0/0`. `CALIB=13` las
+      calcula solo (sin probar todavía en motor). Se tocan con
+      `MODO=CALIBRACIÓN` + `CALIB=0`.
 - [x] **AWS**: `send_downlink.py`'s `PARAMETER_TABLE["CALIB"]["max"]`
       subido de `2` a `3` para aceptar el nuevo modo de sintonización de
       PID (mismo ajuste que ya se había hecho cuando se agregó el valor
       `2`).
-- [ ] **AWS, pendientes acumulados (ir agregando acá cada vez que el
-      firmware agregue/cambie algo del lado de `send_downlink.py`, para
-      no perder el hilo entre sesiones)**:
-      - `PARAMETER_TABLE["CALIB"]["max"]` subir a `10`
-        (quedó en `3` la última vez que se confirmó hecho — cubre de
-        una vez los modos `3` a `10` agregados/renumerados después, ver
-        secciones 4.4/9/10/11/12; incluye el modo `6` -- auto-escalón
-        del lazo interno -- agregado en la segunda renumeración del
-        2026-09-23, que no existía la última vez que se tocó este
-        archivo).
-      - `PARAMETER_TABLE` necesita una entrada nueva para
-        `SET_RATIO_AUTO` (ID `25`, escala `x10`, sin la cual ese
-        parámetro solo funciona por serial, no por downlink LoRa —
-        ver sección 12).
-      - `ALPHA_AUTO` NO necesita entrada propia — quedó como
-        `CALIB=3`, cubierto por el bump de arriba.
-      - **Nuevo 2026-09-11**: IDs `26-29` (antes `MECANISMO_*`) quedaron
-        libres al quitarse el mecanismo biela-manivela — si ya se
-        habían agregado a `PARAMETER_TABLE`, quitarlos de ahí también.
-        `PRESION_GANANCIA_RPM`/`PRESION_OFFSET_RPM` se corrieron de
-        `30`/`31` a `26`/`27` para ocupar ese hueco — si ya estaban en
-        `PARAMETER_TABLE` con `30`/`31`, actualizar los IDs, no solo
-        agregar entradas nuevas.
-      - `PARAMETER_TABLE` necesita 2 entradas para
-        `PRESION_GANANCIA_RPM` (ID `26`, escala x100, con
-        signo) y `PRESION_OFFSET_RPM` (ID `27`, escala x10) — sin ellas
-        `MODO=2` no se puede calibrar por downlink LoRa, solo por
-        serial. Ver sección 4.3.
-      - **Nuevo 2026-09-14**: IDs `28-29` (que habían quedado libres el
-        2026-09-11) se reasignaron a `PID_PSI_KP` (ID `28`, escala
-        x100, con signo) y `PID_PSI_KI` (ID `29`, escala x1000, con
-        signo) — las ganancias del lazo EXTERNO de presión local de
-        `MODO=1` (sección 4.3, `presion_pid.c`). `PARAMETER_TABLE`
-        necesita estas 2 entradas nuevas, sin ellas `MODO=1` no se
-        puede calibrar por downlink LoRa, solo por serial.
-      - **Nuevo 2026-09-14**: `MODO` se renumeró (ver sección 4.3) —
-        el valor `1` pasó de "SET_RPM directo" a "presión local", y
-        "SET_RPM directo" se corrió al valor `3`. Si `send_downlink.py`
-        o cualquier Lambda tiene alguna validación/documentación propia
-        de los valores válidos de `MODO` (más allá de solo aceptar
-        0-3), revisar que no siga asumiendo el significado viejo de `1`.
-      - [x] **`decoder.py` (lado de las ACKs) — corregido y entregado
-        2026-09-17.** No tenía los IDs `25-29` en `NOMBRES_PARAMETRO`/
-        `ESCALA_PARAMETRO`/`PARAMETROS_CON_SIGNO` — sus ACKs salían como
-        `"DESCONOCIDO(N)"` con el valor crudo sin escalar. Ojo con `25`
-        (`SET_RATIO_AUTO`): el downlink que se manda es RPM×10, pero el
-        ACK que se devuelve es el ratio resultante ×100 (mismo patrón
-        que `SET_RATIO`) — la escala agregada es para decodificar el
-        ACK, no la entrada.
-      - [x] **`send_downlink.py`/`PARAMETER_TABLE` (dirección downlink)
-        — corregido y entregado 2026-09-17.** Tenía 3 problemas reales
-        (bloqueaban funcionalidad, no solo imprecisión de rango):
-        `CALIB["max"]` en `3` (subido a `7`), `MODO["max"]`
-        en `2` (subido a `3`), y faltaban por completo las entradas para
-        `25-29` (`ValueError: nombre de parametro desconocido` al
-        intentar mandarlos). De paso se ajustaron los rangos min/max de
-        varios parámetros existentes para que coincidan exacto con la
-        validación real del firmware (antes más permisivos — no rompían
-        nada, pero el Lambda tardaba un downlink completo en avisar del
-        error en vez de fallar de una vez). `RPM_MAX/MIN` y
-        `SERVO_PULSO_MIN/MAX` quedan con una nota: el firmware valida
-        esos dos pares de forma RELACIONAL (uno contra el otro, contra
-        el valor ya guardado en el nodo) — una tabla estática no puede
-        replicar eso, sigue siendo el firmware el validador real ahí.
-      - ⚠️ **Ninguno de estos dos archivos vive en este repositorio** —
-        se entregaron como archivos sueltos en la conversación (no hay
-        acceso al repo Lambda-RIO desde esta sesión); hay que copiarlos
-        manualmente al repo/consola de AWS.
-      - **Aviso importante, no es un cambio de tabla**: `MODO` (ID 16)
-        ahora sí tiene efecto real en el firmware (antes era un no-op
-        aceptado y ACKeado sin hacer nada) — si alguna Lambda/servicio
-        ya manda `MODO=2` + `PRESION_REMOTO` esperando que el motor reaccione,
-        confirmar primero que `PRESION_GANANCIA_RPM`/`PRESION_OFFSET_RPM`
-        ya se calibraron en ese nodo (ver sección 4.3) y que el nodo no
-        se quedó en `MODO=0` tras la actualización (ver aviso de
-        migración en esa misma sección) — si no, `MODO=2` no va a mover
-        el motor aunque el downlink de `PRESION_REMOTO` llegue y se ACKee OK.
-      - **Pendiente de diseño (no de AWS), agregado 2026-09-14**: switch
-        físico selector de `MODO` en el gabinete, prioridad de control
-        local (serial) sobre remoto (downlink, estilo variador ABB por
-        Modbus), y reglas de transición entre valores de `MODO` (hoy
-        `CalibFlash_SetModo()` acepta cualquier salto directo, sin
-        restricción de secuencia) — ninguno tiene código todavía, ver
-        sección 4.3 para el detalle de cada uno.
-- [ ] Posible parámetro 25, `INTEGRAL_MAX` (anti-windup configurable
-      del PID) — hoy el anti-windup es fijo en `pid.c` (integración
-      condicional, sin límite configurable por downlink).
+- [x] **AWS sincronizado con el firmware — 2026-10-02** (las Lambdas viven
+      fuera de este repo: `RIODSLSendDownlink` y `RIODSLDecodeUplink`;
+      cambios sin commit en esos repos, el deploy a AWS es manual):
+      - **Renumeración de IDs 1-29** (tabla de la sección 3, columna
+        "Antes"). ⚠️ Desplegar las dos Lambdas **y** reflashear los nodos
+        al mismo tiempo: un nodo con firmware viejo leería los IDs nuevos
+        como otros parámetros.
+      - **Downlink (`PARAMETER_TABLE`):** tabla nueva 1-29, `HOROMETRO_H`,
+        `REPORTAR_PARAMETROS`, `CALIB` máx. 14, `TIEMPO_LLENADO_S` en
+        segundos (`0` o ≥ 60, se valida en la Lambda); quitados los
+        parámetros eliminados el 2026-10-01 y `RESTAURAR_DEFAULTS`.
+      - **Decoder:** LIVE de 32 bytes (`bateria_pct`, `horometro`; con 28
+        bytes quedan en `None`); reporte de parámetros (`PARAMETER_REPORT`,
+        reconocido por `STATUS=8`, también cuando trae un solo grupo; no se
+        le avisa a GIOMaps como ACK); ACK de `TIEMPO_LLENADO_S` en segundos;
+        alertas 6-13; `STATUS=8`.
+      - **"Sin hora"** (`fecha_hora = 0`): el decoder usa la hora de
+        recepción en hora local (UTC-6), marca `hora_del_nodo = false` y
+        estima `inicio_operacion = fecha_hora - segundos_transcurridos`
+        (`fecha_hora` es llave de partición del histórico, no puede ir
+        vacía). **"Sin posición"** (`0/0`): `latitud`/`longitud` = `None`.
+        ⚠️ Confirmar que GIOMaps y el histórico aceptan `null` en lat/lon.
+- [ ] Posible parámetro `INTEGRAL_MAX` (anti-windup configurable del PID)
+      — **sin necesidad por ahora**. Si se agrega, toma el ID 30
+      (el 25 que se pensaba usar terminó siendo `SET_RATIO_AUTO`). El anti-windup es fijo (integración condicional,
+      núcleo `Pi_Calcular()` de `pid.c`) y se mejoró el 2026-10-02 para el
+      PID#2 (techo `RPM_MAX_CARGA`, piso `RPM_MIN`). Reabrir solo si en
+      campo hace falta ajustarlo por instalación.
 - [x] **Puente aspersor → motor (`MODO`/`PRESION_REMOTO`/`TIMEOUT_SIN_COMANDO_S`)
       — implementado 2026-09-07** (encontrado al revisar qué pasaría si
       otra Lambda empezara a mandar `PRESION_REMOTO` como downlink automático
@@ -2413,15 +2462,12 @@ escribir `SET_RATIO 17.5` y Enter.
       `CALIB_MODO_RALENTI/PRESION_LOCAL/REMOTO/MANUAL_BANCO`, ver
       sección 4.3); y
       el watchdog de `TIMEOUT_SIN_COMANDO_S` fuerza ralentí si `MODO=2`
-      deja de recibir `PRESION_REMOTO` fresca. **Pendientes reales que quedan**
-      (no de diseño, de calibración/AWS): `PRESION_GANANCIA_RPM`/
-      `PRESION_OFFSET_RPM` siguen en `0` (sin calibrar) hasta que se
-      corra una sesión real con el motor y el sistema hidráulico
-      completo; `PARAMETER_TABLE` de `send_downlink.py` necesita las
-      entradas para IDs 30/31 (ver checklist de AWS arriba); y el día
-      que exista `presion.c` (sección 5), decidir si `MODO=1` debería
-      pasar a usar esa lectura propia en vez de `SET_RPM` (ver aviso en
-      sección 4.3).
+      deja de recibir `PRESION_REMOTO` fresca. ⚠️ **Historia: superado.**
+      La fórmula lineal (`PRESION_GANANCIA_RPM`/`OFFSET_RPM`) se reemplazó
+      por un PID (2026-09-23) y luego por la **triple cascada** (PID#3,
+      2026-09-30, `PID_ASP_KP/KI`, IDs 26/27); el watchdog ahora degrada
+      `MODO=2` → `MODO=1` (2026-10-01). Lo que queda pendiente es
+      calibrar el PID#3 en campo (`CALIB=12`, sin probar).
 - [x] Construcción física del circuito de presión (LM358) y `presion.c/h`
       — implementado 2026-09-09, compilado limpio (0 errores/0
       warnings), ver sección 5. **Pendiente real que queda**: prueba en
@@ -2429,12 +2475,11 @@ escribir `SET_RATIO 17.5` y Enter.
       compile-verificado), y ajustar `PRESION_UMBRAL_ACTIVO_PSI`
       (`main.c`, hoy `5.0` PSI sin dato de campo) una vez que se tenga
       una sesión real con la motobomba cargada — ver sección 4.2.
-- [ ] El uplink LIVE ahora manda la presión real (PSI) en vez del
-      placeholder `0.0f` fijo — confirmar que `decoder.py` (AWS, fuera
-      de este repo) no tenga ninguna lógica que asumiera ese `0.0`
-      constante (ej. algún cálculo o validación que nunca se probó con
-      un valor distinto de cero).
-- [x] `RESET_REMOTO` (ID 22) — **conectado 2026-10-01.** Durante el
+- [ ] El uplink LIVE manda la presión real (PSI) en vez del placeholder
+      `0.0f` fijo — confirmar que `decoder.py` (AWS) no tenga ninguna
+      lógica que asumiera ese `0.0` constante. (Se revisa junto con los
+      demás cambios de AWS de arriba.)
+- [x] `RESET_REMOTO` (ID 29) — **conectado 2026-10-01.** Durante el
       arranque el servo queda sin PWM ~2.5-8.5 s; el LD-25MG se queda en
       su posición (confirmado por el usuario) y después MODO arranca en
       RALENTI. Por eso solo se acepta con el motor detenido, o en ralentí
@@ -2445,22 +2490,18 @@ escribir `SET_RATIO 17.5` y Enter.
       si algo cambió). Al volver, el log de arranque muestra
       `SOFTWARE(NVIC_SystemReset)` como causa. Para permitirlo también
       bombeando, cambiar `CalibFlash_ResetEsSeguro()`.
-- [ ] Valores reales (no placeholder) de `RPM_MAX/MIN`,
-      `TIMEOUT_SIN_COMANDO_S`, `HISTERESIS_MODO_S` — pendientes de
-      definir con datos del motor/cliente real.
+- [ ] Valores reales de `RPM_MAX` (por modelo de motor), `RPM_MIN`
+      (`CALIB=8` lo mide), `RPM_MAX_CARGA` y `PRESION_MAX` (por
+      instalación) — pendientes de definir con datos del motor/cliente
+      real. `TIMEOUT_SIN_COMANDO_S` (360 s) y `HISTERESIS_MODO_S` (30 s)
+      ya no son parámetros: quedaron fijos en código el 2026-10-02.
 - [ ] Confirmar con el equipo si los IDs de parámetro son un espacio
       compartido entre tipos de nodo, o independientes por tipo.
-- [ ] **Idea planteada 2026-09-03, no diseñada aún**: un mecanismo para
-      que el backend pueda *pedir* (no solo recibir el ACK del momento
-      en que se aplicó) los valores vigentes de los parámetros de
-      calibración de un nodo — útil para auditar/resincronizar la base
-      de datos si se sospecha que un ACK se perdió. Hoy el único camino
-      es el Application ACK de cada downlink individual (FPort 3, en el
-      momento en que se manda ese parámetro) — el uplink estándar
-      (FPort 1, sección 6) NO incluye `SET_RATIO`/`ALPHA`/etc., solo
-      telemetría operativa. No confundir con `FORZAR_REPORTE`
-      (dispara ese mismo uplink estándar, no un volcado de
-      configuración).
+- [x] **Pedir los valores vigentes de los parámetros** (idea del
+      2026-09-03) — **implementado 2026-10-02**: `REPORTAR_PARAMETROS`
+      (ID 27) manda por FPort 3 el valor guardado de cada parámetro, y se
+      envía solo al arrancar el TID (ver "Reporte de parámetros", sección
+      3).
 - [ ] Verificar si `AT+TIMEREQ=1` requiere mandarse después del primer
       uplink exitoso (no solo después del join) — reporte de la
       comunidad de RAK sugiere que puede fallar si se manda demasiado
@@ -2469,11 +2510,12 @@ escribir `SET_RATIO 17.5` y Enter.
       exista más de un nodo motor, resolverlo desde el DevEUI / nombre
       del dispositivo en vez de una constante (`NODE_ID`, ID 18, se
       eliminó el 2026-10-01 sin haberse usado nunca).
-- [ ] GPS (sección 2.6) — funcionando en campo, con fix real
-      confirmado. Pendiente: confirmar si `AT+CGPS=1` devolviendo
-      `ERROR` ocasionalmente (ej. si el GPS ya estaba encendido de un
-      arranque anterior) necesita manejarse distinto, o si es
-      inofensivo como parece hasta ahora.
+- [x] GPS (sección 2.6) — funcionando en campo, con fix real
+      confirmado. `AT+CGPS=1` devolviendo `ERROR` cuando el GPS ya estaba
+      encendido es inofensivo (no interrumpe la adquisición). Desde
+      2026-10-02 el fix caduca a los 30 s sin reportes y, si el módulo se
+      queda mudo 60 s, se le vuelven a mandar `AT+CGPS=1` +
+      `AT+CGPSINFO=10` (re-armado, sección 2.6).
 - [ ] **Reinicios espontáneos del RAK3172 en campo (2026-08-29)** — ver
       sección 2.2. El módulo se reinicia solo (banner de arranque
       reaparece en medio de la sesión), a veces en ciclo continuo.
@@ -2484,14 +2526,79 @@ escribir `SET_RATIO 17.5` y Enter.
       de antena y estabilidad del rail de alimentación del RAK3172
       durante una transmisión (osciloscopio o multímetro en modo
       min/max), y considerar más capacitancia de desacople local.
-- [ ] Decidir si `AutoJoin` en `RAK3172_Join()` (`AT+JOIN=1:0:10:8`)
-      vuelve a `1` para producción, o se queda en `0` (prueba temporal
-      actual, ver 2.2) manejando todos los reintentos desde el host.
-- [ ] Quitar los prints de `DIAGNOSTICO TEMPORAL` en `rak3172.c`
-      (`RAK3172_ProcesarLinea()` imprimiendo toda línea cruda, y
-      `RAK3172_ErrorCallback()`) y `gps.c` (`GPS_ErrorCallback()`) una
-      vez confirmada en campo la causa raíz de los reinicios del
-      RAK3172 — agregados el 2026-08-29 solo para diagnóstico, ver 2.2.
+- [x] `AutoJoin` en `RAK3172_Join()` (`AT+JOIN=1:0:10:8`): se queda en
+      `0`, decidido 2026-10-02 (ver 2.2).
+- [x] Prints de `DIAGNOSTICO TEMPORAL` de `rak3172.c` quitados
+      2026-10-02 (línea cruda en `RAK3172_ProcesarLinea()` y
+      `RAK3172_ErrorCallback()`). Si vuelven los TIMEOUT repetidos,
+      reponerlos (quedó un comentario en cada lugar).
+- [x] Print de diagnóstico de `GPS_ErrorCallback()` quitado 2026-10-02.
+      `GPS RX crudo` se deja a propósito (ahí se ve si hay fix).
+
+- [ ] **Probar en equipo la revisión del 2026-10-01/02** (todo compila,
+      nada corrió todavía en hardware):
+      - Downlinks y ACK (lectura de `+EVT:RX` hecha a mano, sin `sscanf`).
+      - Hora: `AT+LTIME`, fecha del GPS y la suma de la edad del reporte;
+        caducidad del fix (30 s) y re-armado del GPS (apagar y prender el
+        SIM7600X con el TID encendido).
+      - Reporte de parámetros al arrancar (4 uplinks FPort 3, `STATUS=8`).
+      - Intervalos (IDs 15/16): la unidad de banco trae `STANDBY=300` guardado;
+        mandar 30 desde GIO.
+      - Candados de la tabla de parámetros (ej. `RPM_MAX` en MODO 0 →
+        `APPLY_ERROR`, en MODO 4 → OK) y `TIEMPO_LLENADO_S` en el ID 8.
+      - Horómetro: fijarlo, correr el motor, apagar, cortar la energía.
+      - Tacómetro: 3 capturas seguidas para declarar el motor operando.
+      - Servo a 1000 µs/s exactos (barrido de CALIB 2 de MIN a MAX ~0.5 s).
+      - PID#1 igual que siempre (MODO 3 + `SET_RPM`).
+      - PID#2: con la presión pasada del objetivo y el motor en ralentí,
+        que no se quede prendiendo y apagando cerca del ralentí.
+      - MODO 4 + `SET_RPM`, apagar y rearrancar el motor → debe quedar en
+        ralentí. MODO 2 sin aspersor reportando → rechazado.
+      - Consola: parámetros y comandos AT siguen respondiendo.
+
+### 8.1 Planeado a futuro (2026-10-02, sin implementar)
+
+Ideas ya conversadas; se implementan cuando el hardware esté definido.
+
+- [ ] **Nivel de batería del nodo** (Li-ion 1S2P propia, en %). El byte 28
+      del LIVE ya está reservado (hoy siempre `0xFF` = sin medición). Falta
+      en el hardware un divisor (ej. 100k/100k, 2.1 V con 4.2 V) a un pin
+      ADC libre, y habilitar ese canal en CubeMX; el firmware convierte
+      voltaje → % con la curva de Li-ion (4.2 V = 100 %, 3.0 V = 0 %).
+- [ ] **Switch físico de MODO 0/1/2** (selector de 3 posiciones, 2 entradas
+      digitales). Propuesta: actúa **solo al moverlo** (flanco), gana el
+      último que habló (switch o downlink), y pasa por las mismas reglas de
+      `modo_fsm.c` (MODO 1/2 rechazados con motor apagado, MODO 2 solo con
+      enlace y aspersor, alerta 13 si se rechaza). Costo estimado ~0.5 KB.
+- [ ] **Tres sensores más** (~2-3 KB en total):
+      - **Caudalímetro** con conector M12 (marca por confirmar): si tiene
+        salida de pulsos, contar pulsos → caudal y **litros totales**
+        (guardados en flash como el horómetro); si es 4-20 mA, leer caudal.
+      - **Combustible, flotador:** probablemente un contacto de nivel bajo
+        (entrada digital).
+      - **Combustible, nivel continuo:** 4-20 mA.
+      - Cada 4-20 mA necesita su resistencia (ej. 150 Ω → 0.6-3.0 V) y un
+        pin ADC; revisar que el transmisor funcione con el voltaje
+        disponible (muchos piden 12-24 V). Mismo tipo de circuito que el
+        4-20 mA de presión pendiente.
+      - Por decidir: qué hace el TID con combustible bajo (solo alerta, o
+        además bajar a ralentí).
+      - Cada valor suma 2 bytes al LIVE (con `AT+DR=5` caben de sobra).
+- [ ] **Pines:** todo lo de arriba pide unos 6 pines más (3 ADC, 3
+      digitales) y la NUCLEO-G431KB (32 pines) ya tiene ocupados tacómetro,
+      servo, RAK3172, GPS, consola y 2 ADC de presión. Contar en CubeMX los
+      libres antes de diseñar; al quitar el sensor de presión por voltaje
+      (PA4) se libera un ADC.
+- [ ] **Posible migración a otro STM32 con más flash/pines.** Hoy quedan
+      ~10 KB libres de 124 KB (Debug). Pasar Debug a `-Og` y quitar los
+      logs/`printf` con decimales al terminar la validación libera bastante,
+      pero con más sensores y funciones el G431KB (128 KB, 32 pines) queda
+      justo. Si se migra, conviene quedarse en la familia **STM32G4**
+      (ej. G431 en encapsulado de más pines, o G473/G474/G491 con 256-512
+      KB): mismo HAL, mismos periféricos (TIM, ADC, LPUART, flash por
+      double word), así que el código se porta casi sin cambios. Revisar
+      en ese caso las direcciones de las páginas de calibración/horómetro
+      (`CALIB_FLASH_ADDRESS`, `HOROMETRO_FLASH_ADDRESS`) y el `.ld`.
 
 ---
 
@@ -3292,25 +3399,20 @@ así que con la tubería ya presurizada es mucho menos que `TIEMPO_LLENADO_S`:
    `PRESION_OBJETIVO_LOCAL` **no se modifica**: el objetivo de prueba vive
    en RAM.
 
-⚠️ **Dos partes desactivadas con interruptores en `autotune_psi.c`**
-(2026-09-30, pendientes de probar en campo):
-- `AUTOTUNE2_USAR_CURVA 0`: el **cálculo y uso** de la curva de ganancia
-  durante la subida. Los **datos** de la curva sí se imprimen siempre en el
-  log (`PRESION_GANANCIA_CAL,PASO`, mismo formato que `CALIB=9`, sirven para
-  `pid_tuning.py --ganancia-log`). No cuestan tiempo, porque la rampa ocurre
-  de todas formas, y dejan la curva real de la bomba para decidir con datos.
-  Se sospecha que no aporta: tu 1.72/0.39 salió sin curva, con ~11 s de
-  tiempo muerto la K de la curva sale inflada, y la curva del PID#1 no
-  la reemplaza, porque mide pulso→RPM y aquí la planta es RPM→PSI. Si en
-  campo se confirma, se borra; si hace falta, se cambia a `1`.
-- `AUTOTUNE2_VALIDAR_ZONA2 0`: la **validación en zona 2**, un escalón
-  desde ralentí hasta `PRESION_OBJETIVO_LOCAL`. Iba **sin rampa de
-  llenado**: con un objetivo de 60 PSI serían ~48 PSI en 1 a 2 min, lo
-  que la regla de `TIEMPO_LLENADO_S` prohíbe. Sin ella, la zona alta de
-  presión no queda validada. Queda pendiente decidir cómo validarla sin
-  violar el ritmo de llenado.
+⚠️ **Estado de las dos partes que estaban desactivadas en
+`autotune_psi.c`** (2026-09-30, actualizado 2026-10-02):
+- **Curva de ganancia en la subida:** ya no hay interruptor
+  (`AUTOTUNE2_USAR_CURVA` no existe). Desde 2026-10-01 la subida registra
+  el RPM al cruzar 4 tramos de presión y con la K del primero calcula la
+  **Kp de prueba** del escalón cerrado (como `sugerir-kp-presion`); no
+  entra en SIMC. Los datos siguen saliendo en el log
+  (`PRESION_GANANCIA_CAL,PASO`).
+- **Validación en zona 2** (escalón desde ralentí hasta
+  `PRESION_OBJETIVO_LOCAL`): **eliminada 2026-10-02**. Iba sin rampa de
+  llenado (con un objetivo de 60 PSI serían ~48 PSI en 1 a 2 min, lo que
+  la regla de `TIEMPO_LLENADO_S` prohíbe). Se valida solo con +5 PSI desde
+  ralentí; la zona alta de presión no queda validada por el autotune.
 
-Los dos se probaron compilando en `1` y en `0`.
 
 **`CALIB=12` — PID#3, aspersor remoto (MODO=2, triple cascada)** —
 agregado 2026-09-30, **reemplaza al viejo auto-escalón remoto de `CALIB=12`**,
@@ -3498,11 +3600,8 @@ RALENTI_CAL,COMPLETO,promedio=<rpm>,RPM_MIN_nuevo=<rpm>,muestras=<n>,ok=<0/1>
 RALENTI_CAL,ABORTADO,motivo=motor_se_detuvo                         -- vuelve a esperar, sigue en modo 8
 ```
 
-**Pendiente**: `send_downlink.py` (Lambda AWS, fuera de este repo)
-necesita `PARAMETER_TABLE["CALIB"]["max"]` bumped hasta
-`12` (cubre este modo y el de la sección 11, más los agregados
-después) — mismo patrón que cuando se agregaron
-`CALIB=2` y los modos posteriores.
+**Pendiente (AWS)**: `CALIB` máximo en la Lambda de downlink — hoy
+`12`, tiene que ser `14` (ver lista de AWS en la sección 8).
 
 ## 11. Auto-calibración de `SERVO_PULSO_MIN` (`CALIB=4`)
 
@@ -3620,8 +3719,8 @@ transición gradual, no un salto limpio. **Margen subido de 3 a 6
 pasos (24µs→48µs)** en base a estos dos barridos reales (cubre la
 rampa observada sin perjudicar el caso abrupto). Corregido en el
 sitio manualmente ese mismo día (`SERVO_PULSO_MIN=950`, confirmado sin
-acelerar el relentí) mientras se aplicaba el fix. Sigue pendiente
-hacer el bump de AWS Lambda mencionado arriba. También sigue pendiente
+acelerar el relentí) mientras se aplicaba el fix. (El máximo de
+`CALIB` en AWS sigue pendiente, ver sección 8.) También sigue pendiente
 (no construida, apenas discutida) una tercera medida de seguridad: si
 el PID entra en oscilación sostenida por más de ~30s, desactivarlo
 automáticamente (bajar a `SET_RPM=0`, no de a poco — ya se confirmó en
@@ -3677,9 +3776,8 @@ conviene saltarlos ni cambiar el orden.
    entre un punto y otro, no es la medición del firmware (ver arriba)
    — es la fuente de la señal físicamente. `OUT_OF_RANGE` si se manda
    `0` o si el motor no tiene lectura válida en ese momento. Comando
-   serial equivalente: `SET_RATIO_AUTO <rpm>`. **Pendiente**: falta el
-   alta en `send_downlink.py`'s `PARAMETER_TABLE` (ID 25, escala x10)
-   para poder mandarlo por downlink LoRa, no solo por serial.
+   serial equivalente: `SET_RATIO_AUTO <rpm>`. Ya está en la Lambda de
+   downlink (ID 19, escala x10, sincronizada 2026-10-02).
 4. `ALPHA` (o `ALPHA_AUTO`, ver abajo) — fijar el filtro EMA de RPM.
    Debe quedar fijo **antes** de los modos `4`/`5`/`6`/`10`: cambiarlo
    después de sintonizar el PID le cambia la dinámica que el PID ya
@@ -3732,10 +3830,9 @@ conviene saltarlos ni cambiar el orden.
    reemplaza a `ALPHA` directo — sigue haciendo falta para
    cargar/restaurar un valor ya conocido desde la base de datos sin
    tener que correr la medición de nuevo (mismo argumento que
-   `SET_RATIO` vs `SET_RATIO_AUTO`). **Pendiente**: falta el bump de
-   `send_downlink.py`'s `PARAMETER_TABLE["CALIB"]["max"]`
-   hasta `10` (mismo patrón que las subidas anteriores) y una prueba
-   real en campo (por ahora solo compila limpio).
+   `SET_RATIO` vs `SET_RATIO_AUTO`). **Pendiente**: prueba real en
+   campo (por ahora solo compila limpio); el máximo de `CALIB` en AWS
+   está en la lista de la sección 8.
 
 **⚠️ Reordenado 2026-09-23 (segunda renumeración del día)**: las Fases
 C/D/E de abajo cambiaron de orden respecto a versiones anteriores de
@@ -3813,8 +3910,8 @@ sintonización de los lazos de presión, `MODO=1`/`MODO=2`, agregado
     firmware no tiene forma de detectar "hay aire en la línea" por sí
     solo. En una recalibración posterior de una máquina que ya operó
     (tubería ya llena de antes), este paso se puede saltar.
-13. Definir y mandar `PRESION_OBJETIVO_LOCAL` (ID 23) — el PSI que se quiere
-    sostener en operación — y `TIEMPO_LLENADO_S` (ID 33) — cuántos
+13. Definir y mandar `PRESION_OBJETIVO_LOCAL` (ID 5) — el PSI que se quiere
+    sostener en operación — y `TIEMPO_LLENADO_S` (ID 8) — cuántos
     segundos tarda un llenado seguro de esta tubería, según ya lo sabe
     el operador. **Ambos son obligatorios ANTES del paso 14** (movido
     2026-09-28): `CALIB=9` ya no caracteriza a ciegas
@@ -3829,7 +3926,7 @@ sintonización de los lazos de presión, `MODO=1`/`MODO=2`, agregado
     `sugerir-kp-presion`). No escribe flash. Asume la tubería YA llena
     (paso 12).
 15. ⚠️ Actualizado 2026-09-29: con `MODO=CALIBRACIÓN` + `CALIB=0`
-    (sección 4.4), mandar `PID_PSI_KP`/`PID_PSI_KI` (IDs 28/29)
+    (sección 4.4), mandar `PID_PSI_KP`/`PID_PSI_KI` (IDs 23/24)
     con valores conservadores (arrancan en `0`, sin efecto -- o la
     recomendación del paso 14 si ya se corrió `pid_tuning.py auto
     --loop presion` con ese log), y LUEGO pasar a `MODO=1` para
@@ -3857,9 +3954,9 @@ sintonización de los lazos de presión, `MODO=1`/`MODO=2`, agregado
     `pid_tuning.py compare --loop presion`. Camino corto en vez de los
     pasos 14-17: `CALIB=14` (autotune completo).
 18. Si este nodo también va a operar en `MODO=2` (gobernado por un
-    aspersor remoto), definir primero `PRESION_OBJETIVO_REMOTO` (ID 30
+    aspersor remoto), definir primero `PRESION_OBJETIVO_REMOTO` (ID 6
     -- ahora es el setpoint real del PID, no opcional) y calibrar ahí
-    mismo `PID_ASP_KP`/`PID_ASP_KI` (IDs 26/27)
+    mismo `PID_ASP_KP`/`PID_ASP_KI` (IDs 25/26)
     de la misma forma, siempre con `MODO=CALIBRACIÓN` +
     `CALIB=0` (ver sección 4.4). Mismo
     criterio de sintonización que el paso 15 (empezar conservador,
@@ -3947,10 +4044,9 @@ El operador (o el switch físico selector, cuando exista -- sección 8)
 solo toca `MODO`, nunca `CALIB` ni ninguna ganancia. Es
 la separación de fondo entre los dos parámetros: `CALIB`
 es el modo de banco/ingeniería (esta sección 12, uso esporádico);
-`MODO` es el selector operativo del día a día. ⚠️ Las reglas exactas
-de transición entre valores de `MODO` (ej. si hace falta pasar por `0`
-antes de saltar entre 1/2/3) todavía están pendientes de definir, ver
-sección 4.3/8 — hoy cualquier salto directo se acepta sin restricción.
+`MODO` es el selector operativo del día a día. Las reglas de
+transición entre valores de `MODO` están en `modo_fsm.c` (máquina de
+estados, sección 4.3.3, desde 2026-10-01).
 
 ⚠️ **`MODO` se fuerza solo a `0` (RALENTÍ) cada vez que el motor se
 detiene** (agregado 2026-09-24, decisión explícita del usuario tras un

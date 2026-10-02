@@ -1,85 +1,101 @@
 /**
  * @file    pid.c
- * @brief   Implementación del lazo de control PID de RPM -> servo.
+ * @brief   Nucleo P+I compartido (Pi_*) y lazo de RPM -> servo (PID#1).
  */
 
 #include "pid.h"
 #include "calibracion_flash.h"
 #include "stm32g4xx_hal.h"
 
-/* ==================== ESTADO INTERNO ==================== */
+/* ==================== NUCLEO P+I COMPARTIDO ==================== */
 
-static float s_integral = 0.0f;
-static uint32_t s_ultimoCalculoMs = 0;
+void Pi_Init(Pi_t *pi)
+{
+    pi->integral = 0.0f;
+    pi->ultimoCalculoMs = HAL_GetTick();
+}
 
-/* Ganancias temporales (solo RAM) -- usadas por la autosintonia
- * (autotune_rpm.c) para probar candidatas SIN escribir flash: un corte de
- * energia a mitad del ensayo no deja una Kp de prueba pegada, y no se gasta
- * flash en cada intento. Si estan activas, pisan a las de CalibFlash. */
-static bool  s_gananciasTemporalesActivas = false;
-static float s_kpTemporal = 0.0f;
-static float s_kiTemporal = 0.0f;
+void Pi_SetGananciasTemporales(Pi_t *pi, float kp, float ki)
+{
+    pi->kpTemporal = kp;
+    pi->kiTemporal = ki;
+    pi->temporalesActivas = true;
+}
 
-/* ==================== API PÚBLICA ==================== */
+void Pi_LimpiarGananciasTemporales(Pi_t *pi)
+{
+    pi->temporalesActivas = false;
+}
+
+float Pi_Calcular(Pi_t *pi, float error, float kpGuardada, float kiGuardada,
+                  float awMin, float awMax, float salidaMin, float salidaMax)
+{
+    uint32_t ahora = HAL_GetTick();
+    float dtS = (ahora - pi->ultimoCalculoMs) / 1000.0f;
+    pi->ultimoCalculoMs = ahora;
+
+    float kp = pi->temporalesActivas ? pi->kpTemporal : kpGuardada;
+    float ki = pi->temporalesActivas ? pi->kiTemporal : kiGuardada;
+
+    if (ki > 0.0f) {
+        /* Anti-windup por integración condicional: solo se acumula si el
+         * resultado tentativo no está empujando más allá de [awMin, awMax]
+         * en la misma dirección del error -- evita que la integral siga
+         * creciendo mientras la salida no puede (o no debe) moverse más. */
+        float integralTentativa = pi->integral + error * dtS;
+        float salidaTentativa = kp * error + ki * integralTentativa;
+        bool saturaAlto = salidaTentativa > awMax;
+        bool saturaBajo = salidaTentativa < awMin;
+        if (!(saturaAlto && error > 0.0f) && !(saturaBajo && error < 0.0f)) {
+            pi->integral = integralTentativa;
+        }
+    } else {
+        /* KI=0 -- no acumular en silencio mientras esta ganancia está
+         * apagada (si no, al activarla más adelante el termino integral
+         * aparecería con un salto de golpe). */
+        pi->integral = 0.0f;
+    }
+
+    float salida = kp * error + ki * pi->integral;
+    if (salida > salidaMax) {
+        salida = salidaMax;
+    } else if (salida < salidaMin) {
+        salida = salidaMin;
+    }
+    return salida;
+}
+
+/* ==================== PID#1: RPM -> SERVO ==================== */
+
+static Pi_t s_pid1;
 
 void PID_SetGananciasTemporales(float kp, float ki)
 {
-    s_kpTemporal = kp;
-    s_kiTemporal = ki;
-    s_gananciasTemporalesActivas = true;
+    Pi_SetGananciasTemporales(&s_pid1, kp, ki);
 }
 
 void PID_LimpiarGananciasTemporales(void)
 {
-    s_gananciasTemporalesActivas = false;
+    Pi_LimpiarGananciasTemporales(&s_pid1);
 }
 
 void PID_Init(void)
 {
-    s_integral = 0.0f;
-    s_ultimoCalculoMs = HAL_GetTick();
+    Pi_Init(&s_pid1);
 }
 
 uint16_t PID_CalcularSalidaUs(float setpointRpm, float rpmMedida)
 {
-    uint32_t ahora = HAL_GetTick();
-    float dtS = (ahora - s_ultimoCalculoMs) / 1000.0f;
-    s_ultimoCalculoMs = ahora;
-
-    float error = setpointRpm - rpmMedida;
-
-    float kp = s_gananciasTemporalesActivas ? s_kpTemporal : CalibFlash_GetPidRpmKp();
-    float ki = s_gananciasTemporalesActivas ? s_kiTemporal : CalibFlash_GetPidRpmKi();
-
     uint16_t minimo = CalibFlash_GetServoPulsoMinUs();
     uint16_t maximo = CalibFlash_GetServoPulsoMaxUs();
     float rango = (float)(maximo - minimo);
 
-    if (ki > 0.0f) {
-        /* Anti-windup por integración condicional: solo se acumula si
-         * el resultado tentativo no está empujando más allá del
-         * límite ya saturado -- evita que la integral siga creciendo
-         * sin límite mientras la salida no puede moverse más. */
-        float integralTentativa = s_integral + error * dtS;
-        float salidaTentativa = kp * error + ki * integralTentativa;
-        bool saturaAlto = salidaTentativa > rango;
-        bool saturaBajo = salidaTentativa < 0.0f;
-        if (!(saturaAlto && error > 0.0f) && !(saturaBajo && error < 0.0f)) {
-            s_integral = integralTentativa;
-        }
-    } else {
-        /* KI=0 -- no acumular en silencio mientras esta ganancia está
-         * apagada (si no, al activarla más adelante el termino
-         * integral aparecería con un salto de golpe). */
-        s_integral = 0.0f;
-    }
-
-    float salida = kp * error + ki * s_integral;
-    if (salida > rango) {
-        salida = rango;
-    } else if (salida < 0.0f) {
-        salida = 0.0f;
-    }
+    /* Mismas cuentas que antes de juntar los PID (2026-10-02): corrección en
+     * [0, rango] tanto para el anti-windup como para la salida, y se suma a
+     * SERVO_PULSO_MIN. Valores de campo validados: Kp=0.047, Ki=0.11. */
+    float salida = Pi_Calcular(&s_pid1, setpointRpm - rpmMedida,
+                               CalibFlash_GetPidRpmKp(), CalibFlash_GetPidRpmKi(),
+                               0.0f, rango, 0.0f, rango);
 
     return (uint16_t)(minimo + salida);
 }

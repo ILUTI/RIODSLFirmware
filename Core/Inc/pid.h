@@ -1,30 +1,31 @@
 /**
  * @file    pid.h
- * @brief   Lazo de control PID de RPM -> pulso del servo del acelerador.
+ * @brief   Nucleo P+I compartido (Pi_*) y lazo de control de RPM -> pulso
+ *          del servo del acelerador (PID#1).
  *
- * Cierra el lazo entre la RPM real (tacometro.c) y el pulso del servo
- * (servo.c): la salida es directamente el ancho de pulso en
- * microsegundos que se le manda a Servo_MoverHacia(), usando
- * SERVO_PULSO_MIN (posición sin aceleración, ver servo.h) como línea
- * base -- la corrección del PID se suma sobre esa base, no la
- * reemplaza.
+ * NUCLEO COMPARTIDO (2026-10-02): PID#1 (este archivo) y PID#2
+ * (presion_pid.c) eran casi el mismo codigo; ahora usan Pi_Calcular(), que
+ * hace el P+I con anti-windup por integracion condicional y ganancias
+ * temporales. Cada lazo le pasa sus propios limites. Para el PID#1 las
+ * cuentas son las mismas de antes, en el mismo orden.
  *
- * No decide POR SÍ MISMO cuándo debe correr ni de dónde sale el
- * setpoint -- eso lo resuelve el llamador (main.c): hoy el setpoint es
- * SET_RPM (downlink directo, uso de prueba); más adelante lo dará la
- * máquina de estados Modo 0/1/2 (ver README sección 4.3) según la
- * presión, sin que este módulo tenga que cambiar.
+ * PID#1 cierra el lazo entre la RPM real (tacometro.c) y el pulso del servo
+ * (servo.c): la salida es directamente el ancho de pulso en microsegundos
+ * que se le manda a Servo_MoverHacia(), usando SERVO_PULSO_MIN (posición
+ * sin aceleración, ver servo.h) como línea base -- la corrección se suma
+ * sobre esa base, no la reemplaza.
  *
- * Ganancias (PID_RPM_KP/KI) vienen de calibracion_flash.h -- mientras
- * no se sintonicen en el motor real (ver README sección 9, método de
- * ganancia última / Ziegler-Nichols en lazo cerrado), quedan en sus
- * valores default (Kp=1.0, Ki=0), suficientes para validar que
- * el lazo completo mueve el servo en la dirección correcta, no para
- * un control ya afinado.
+ * No decide POR SÍ MISMO cuándo debe correr ni de dónde sale el setpoint
+ * -- eso lo resuelve main.c según MODO: SET_RPM directo (MODO 3/4), la
+ * salida del PID#2 (MODO 1/2), o lo que pida un autotune.
+ *
+ * Ganancias PID_RPM_KP/KI (calibracion_flash.h). Default de fábrica Kp=1,
+ * Ki=0 (solo para ver que el servo se mueve hacia el lado correcto); las de
+ * campo validadas son Kp=0.047 / Ki=0.11, y CALIB=13 las calcula solo
+ * (SIMC, ver autotune_rpm.h y README sección 9).
  *
  * Solo P+I (sin derivativo) -- PID_KD se eliminó del protocolo
- * 2026-09-23: el ruido de RPM lo hacía inútil en la práctica (ver
- * README sección 9).
+ * 2026-09-23: el ruido de RPM lo hacía inútil en la práctica.
  */
 
 #ifndef PID_H
@@ -35,6 +36,38 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stdbool.h>
+
+/* ==================== NUCLEO P+I COMPARTIDO ==================== */
+
+typedef struct {
+    float    integral;
+    uint32_t ultimoCalculoMs;
+    bool     temporalesActivas;  /* ganancias de prueba en RAM (autotunes) */
+    float    kpTemporal;
+    float    kiTemporal;
+} Pi_t;
+
+/** Resetea integral y ancla de tiempo (flanco de entrada al lazo). */
+void Pi_Init(Pi_t *pi);
+
+/** Ganancias TEMPORALES (solo RAM) que pisan a las guardadas mientras
+ *  esten activas -- para que los autotunes prueben candidatas sin escribir
+ *  flash. Limpiar siempre al terminar/abortar. */
+void Pi_SetGananciasTemporales(Pi_t *pi, float kp, float ki);
+void Pi_LimpiarGananciasTemporales(Pi_t *pi);
+
+/**
+ * Corrección P+I de este ciclo: kp*error + ki*integral, recortada a
+ * [salidaMin, salidaMax]. El integral solo acumula si la salida tentativa no
+ * pasa de [awMin, awMax] en la dirección del error (anti-windup). El dt se
+ * mide con HAL_GetTick(). kpGuardada/kiGuardada se usan salvo que haya
+ * ganancias temporales activas.
+ */
+float Pi_Calcular(Pi_t *pi, float error, float kpGuardada, float kiGuardada,
+                  float awMin, float awMax, float salidaMin, float salidaMax);
+
+/* ==================== PID#1: RPM -> SERVO ==================== */
 
 /**
  * Resetea el estado interno (integral, ancla de tiempo). Llamar
@@ -50,10 +83,8 @@ void PID_Init(void);
  * integración se calcula por tiempo real transcurrido
  * (HAL_GetTick()), no por conteo de llamadas.
  *
- * @param setpointRpm  RPM objetivo (el llamador es responsable de
- *                      recortarla contra RPM_MIN/RPM_MAX antes de
- *                      pasarla -- ver nota en
- *                      CalibFlash_SetSetRpm()).
+ * @param setpointRpm  RPM objetivo (main.c ya la recorta a RPM_MAX o
+ *                      RPM_MAX_CARGA antes de pasarla).
  * @param rpmMedida    RPM real, típicamente Tacometro_GetRPMFiltrada().
  * @return Pulso en µs a aplicar (pásalo a Servo_MoverHacia()).
  */
@@ -62,7 +93,7 @@ uint16_t PID_CalcularSalidaUs(float setpointRpm, float rpmMedida);
 /**
  * Ganancias TEMPORALES (solo RAM, no tocan flash) que pisan a
  * PID_RPM_KP/KI mientras esten activas -- uso exclusivo de la autosintonia
- * (autotune_rpm.c, CALIB=13). Limpiar siempre al terminar/abortar.
+ * (autotune_rpm.c, CALIB 5/6/7/13). Limpiar siempre al terminar/abortar.
  */
 void PID_SetGananciasTemporales(float kp, float ki);
 void PID_LimpiarGananciasTemporales(void);

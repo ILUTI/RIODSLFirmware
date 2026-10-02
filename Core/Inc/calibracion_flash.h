@@ -30,65 +30,73 @@ extern "C" {
 #include <stdbool.h>
 
 /* ==================== IDs DE PARÁMETROS ==================== */
-/* Deben coincidir con PARAM_TABLE de la Lambda RIODSLSendDownlink y con
- * PARAM_NAMES de decoder.py (AWS). */
+/* Deben coincidir con PARAMETER_TABLE de la Lambda RIODSLSendDownlink y con
+ * NOMBRES_PARAMETRO de decoder.py (AWS). Renumerados 2026-10-02 por
+ * categoría, 1-29 sin huecos (la tabla vieja -> nueva está en el README,
+ * "Tabla completa de parámetros"). Firmware y las dos Lambdas deben
+ * actualizarse JUNTOS: un nodo con firmware viejo interpretaría los IDs
+ * nuevos como otro parámetro. */
 
-#define CALIB_ID_SET_RATIO                         1U
-#define CALIB_ID_ALPHA                             2U
+/* ---- Modos ---- */
+#define CALIB_ID_MODO                              1U
+#define CALIB_ID_CALIB                             2U
+
+/* ---- Proceso (se aceptan con el motor operando) ---- */
 #define CALIB_ID_SET_RPM                           3U
-#define CALIB_ID_RPM_MAX                           4U
-#define CALIB_ID_RPM_MIN                           5U
-#define CALIB_ID_PID_RPM_KP                        6U
-#define CALIB_ID_PID_RPM_KI                        7U
-/* 8: segundos para llenar la tubería de 0 PSI a PRESION_OBJETIVO_LOCAL. La
- * velocidad de la rampa de MODO=1/2 (PSI/s) se calcula al usarla:
- * objetivo / segundos. 0 = sin rampa. También lo usan CALIB=9/14.
- * (Historia del ID: PID_KD hasta 2026-09-23, TASA_LLENADO_PSI_S hasta
- * 2026-10-01, cuando TIEMPO_LLENADO_S se movió aquí desde el ID 33.) */
-#define CALIB_ID_TIEMPO_LLENADO_S                  8U
-#define CALIB_ID_SERVO_PULSO_MIN                   9U
-#define CALIB_ID_SERVO_PULSO_MAX                  10U
-/* 11: era TIMEOUT_SIN_COMANDO_S, fijo en 360 s desde 2026-10-01. Libre. */
-/* 12: era TASA_MAX_CAMBIO_RPM_S (nunca se usó, eliminado 2026-10-01). Libre. */
-#define CALIB_ID_CALIB                            13U
-#define CALIB_ID_INTERVALO_ENVIO_OPERATIVO_S      14U  /* uplink LIVE con el motor encendido */
-#define CALIB_ID_INTERVALO_ENVIO_STANDBY_S        15U  /* uplink LIVE con el motor apagado */
-#define CALIB_ID_MODO                             16U
-#define CALIB_ID_PRESION_REMOTO                   17U
-/* 18: era NODE_ID (nunca se usó, eliminado 2026-10-01). Libre. */
-/* 19: manda por FPort 3 el valor vigente de cada parámetro guardado
- * (grupos [ID][STATUS=REPORTE][VAL_H][VAL_L]). Se ejecuta solo al arrancar.
- * Era RESTAURAR_DEFAULTS (nunca se usó, eliminado 2026-10-01). */
-#define CALIB_ID_REPORTAR_PARAMETROS              19U
-#define CALIB_ID_FORZAR_REPORTE                   20U  /* uplink LIVE inmediato */
-/* 21: era HISTERESIS_MODO_S, fijo en 30 s desde 2026-10-01. Libre. */
-#define CALIB_ID_RESET_REMOTO                     22U
-#define CALIB_ID_PRESION_OBJETIVO_LOCAL           23U
-/* 24: era TASA_MAX_CAMBIO_RPM_LLENADO_S, fijo en 10 RPM/s desde 2026-10-01. Libre. */
-#define CALIB_ID_SET_RATIO_AUTO                   25U  /* comando con valor: RPM externa -> calcula SET_RATIO */
-/* 26-29: ganancias de los lazos externos de presión (26/27 MODO=2 remoto,
- * 28/29 MODO=1 local). Reusados 2026-09-23 (antes fórmula lineal /
- * biela-manivela). */
-#define CALIB_ID_PID_ASP_KP                       26U
-#define CALIB_ID_PID_ASP_KI                       27U
-#define CALIB_ID_PID_PSI_KP                       28U
-#define CALIB_ID_PID_PSI_KI                       29U
-/* 30: presión que SE ESPERA que reporte el aspersor en MODO=2 -- es el
- * setpoint del PID remoto (no confundir con PRESION_REMOTO, ID 17, que es la
- * lectura real). 0 = sin configurar: MODO=2 se rechaza. */
-#define CALIB_ID_PRESION_OBJETIVO_REMOTO          30U
-/* 31: equivalente de SET_RPM pero de presión, solo RAM, solo MODO=3, arma la
+/* 4: equivalente de SET_RPM pero de presión, solo RAM, solo MODO=3, arma la
  * misma cascada de MODO=1 sin rampa de llenado. Mutuamente excluyente con
  * SET_RPM (gana el último). Siempre < PRESION_MAX. */
-#define CALIB_ID_SET_PRESION                      31U
-/* 32: techo de RPM CON CARGA (hidráulico), propio de cada instalación,
+#define CALIB_ID_SET_PRESION                       4U
+#define CALIB_ID_PRESION_OBJETIVO_LOCAL            5U
+/* 6: presión que SE ESPERA que reporte el aspersor en MODO=2 -- es el
+ * setpoint del PID remoto (no confundir con PRESION_REMOTO, ID 7, que es la
+ * lectura real). 0 = sin configurar: MODO=2 se rechaza. */
+#define CALIB_ID_PRESION_OBJETIVO_REMOTO           6U
+#define CALIB_ID_PRESION_REMOTO                    7U
+/* 8: segundos para llenar la tubería de 0 PSI a PRESION_OBJETIVO_LOCAL. La
+ * velocidad de la rampa de MODO=1/2 (PSI/s) se calcula al usarla:
+ * objetivo / segundos. 0 = sin rampa. También lo usan CALIB=9/14. */
+#define CALIB_ID_TIEMPO_LLENADO_S                  8U
+
+/* ---- Configuración (solo con el motor detenido) ---- */
+#define CALIB_ID_RPM_MIN                           9U
+#define CALIB_ID_RPM_MAX                          10U
+/* 11: techo de RPM CON CARGA (hidráulico), propio de cada instalación,
  * siempre <= RPM_MAX (techo mecánico del motor). */
-#define CALIB_ID_RPM_MAX_CARGA                    32U
-/* 33: libre (TIEMPO_LLENADO_S se movió al ID 8 el 2026-10-01). */
-/* 34: guarda dura de presión local. Si la presión medida la supera, el
+#define CALIB_ID_RPM_MAX_CARGA                    11U
+/* 12: guarda dura de presión local. Si la presión medida la supera, el
  * setpoint cae a ralentí (histéresis 90 %) y sale la alerta 5. Exenta en
  * MODO=0. */
-#define CALIB_ID_PRESION_MAX                      34U
+#define CALIB_ID_PRESION_MAX                      12U
+#define CALIB_ID_SERVO_PULSO_MIN                  13U
+#define CALIB_ID_SERVO_PULSO_MAX                  14U
+#define CALIB_ID_INTERVALO_ENVIO_OPERATIVO_S      15U  /* uplink LIVE con el motor encendido */
+#define CALIB_ID_INTERVALO_ENVIO_STANDBY_S        16U  /* uplink LIVE con el motor apagado */
+/* 17: horas del horometro (horas enteras, 0-65535), para FIJARLO al instalar
+ * el TID en un motor que ya trae horas o corregirlo; despues sigue sumando
+ * solo (ver horometro.h). Solo con el motor detenido. El ACK y el reporte
+ * de parametros devuelven el valor ACTUAL en horas enteras (topado en
+ * 65535); el valor completo, con decimas, va en el uplink LIVE. */
+#define CALIB_ID_HOROMETRO_H                      17U
+
+/* ---- Calibración ---- */
+#define CALIB_ID_SET_RATIO                        18U
+#define CALIB_ID_SET_RATIO_AUTO                   19U  /* comando con valor: RPM externa -> calcula SET_RATIO */
+#define CALIB_ID_ALPHA                            20U
+#define CALIB_ID_PID_RPM_KP                       21U  /* PID#1, lazo interno RPM */
+#define CALIB_ID_PID_RPM_KI                       22U
+#define CALIB_ID_PID_PSI_KP                       23U  /* PID#2, presión local MODO=1 */
+#define CALIB_ID_PID_PSI_KI                       24U
+#define CALIB_ID_PID_ASP_KP                       25U  /* PID#3, aspersor remoto MODO=2 */
+#define CALIB_ID_PID_ASP_KI                       26U
+
+/* ---- Comandos (byte de confirmación 0xA5) ---- */
+/* 27: manda por FPort 3 el valor vigente de cada parámetro guardado
+ * (grupos [ID][STATUS=REPORTE][VAL_H][VAL_L]). También se ejecuta solo al
+ * arrancar. */
+#define CALIB_ID_REPORTAR_PARAMETROS              27U
+#define CALIB_ID_FORZAR_REPORTE                   28U  /* uplink LIVE inmediato */
+#define CALIB_ID_RESET_REMOTO                     29U
 
 /* Byte de confirmación de los comandos -- debe coincidir con la Lambda. */
 #define CALIB_BYTE_CONFIRMACION   0xA5U
@@ -237,12 +245,18 @@ bool CalibFlash_SetPidAspGanancias(float kp, float ki);
 
 /* ==================== NO PERSISTENTES (solo RAM) ==================== */
 
+/* SET_PRESION (ID 4) y PRESION_REMOTO (ID 7) los escribe SOLO el
+ * dispatcher, al llegar su downlink (o el comando serial): por eso no tienen
+ * setter publico. SET_RPM si, porque main.c y los autotunes lo mueven. */
 float CalibFlash_GetSetRpm(void);
 void  CalibFlash_SetSetRpm(float nuevoValor);     /* sin rango propio, el control lo recorta */
 float CalibFlash_GetSetPresion(void);
-void  CalibFlash_SetSetPresion(float nuevoValor); /* 0 = sin comandar */
 float CalibFlash_GetPresionRemoto(void);
-void  CalibFlash_SetPresionRemoto(float nuevoValor);
+/** SET_RPM = 0 y SET_PRESION = 0. main.c lo llama cada vez que el motor se
+ *  detiene (en cualquier MODO): al rearrancar no se vuelve solo a un valor
+ *  viejo -- en MODO 4, que no pasa a MODO 0 al detenerse, el motor
+ *  aceleraba solo al SET_RPM anterior (hallazgo B8, 2026-10-02). */
+void  CalibFlash_LimpiarComandosManuales(void);
 
 /* ==================== COMANDOS ==================== */
 
@@ -260,7 +274,6 @@ void CalibFlash_ForzarReporte(void);
  * [ID][CALIB_STATUS_REPORTE][VAL_H][VAL_L], avanza '*indice' (arrancar en
  * 0) y devuelve la cantidad de bytes (0 = ya no queda nada). */
 bool    CalibFlash_HayReportePendiente(void);
-void    CalibFlash_SolicitarReporte(void);
 void    CalibFlash_TerminarReporte(void);
 uint8_t CalibFlash_ArmarReporte(uint8_t *indice, uint8_t *buf, uint8_t maxGrupos);
 

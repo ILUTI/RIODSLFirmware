@@ -4,9 +4,9 @@
  *          LSE poblado en este Nucleo-32), SIN respaldo de batería/VBAT
  *          dedicado. Consecuencia práctica: la hora se PIERDE en cada
  *          corte real de energía (no en un NVIC_SystemReset() mientras
- *          VDD no se interrumpa) -- hay que re-sincronizar contra la red
- *          LoRaWAN (DeviceTimeReq) después de cada arranque. Ver
- *          Reloj_EstaSincronizado().
+ *          VDD no se interrumpa) -- se re-sincroniza contra el GPS
+ *          (primaria) o la red LoRaWAN (DeviceTimeReq, respaldo) después
+ *          de cada arranque, ver main.c. Ver Reloj_EstaSincronizado().
  *
  * El RTC guarda la hora en UTC (la misma que entrega DeviceTimeReq/
  * AT+LTIME) -- el offset de -6h de Guatemala se aplica SOLO al leer la
@@ -44,8 +44,17 @@ void Reloj_Init(RTC_HandleTypeDef *hrtc);
 void Reloj_SetHoraUtc(uint16_t anio, uint8_t mes, uint8_t dia,
                        uint8_t hora, uint8_t minuto, uint8_t segundo);
 
+/** Igual que Reloj_SetHoraUtc() pero desde un epoch UTC -- permite sumarle
+ * segundos a una hora de calendario (ej. la edad del reporte del GPS) sin
+ * hacer a mano el acarreo de minutos/horas/dias/meses. */
+void Reloj_SetUnixTimeUtc(uint32_t epochUtc);
+
+/** Campos de calendario UTC -> epoch UTC (segundos desde 1970). */
+uint32_t Reloj_CalendarioAEpoch(uint16_t anio, uint8_t mes, uint8_t dia,
+                                uint8_t hora, uint8_t minuto, uint8_t segundo);
+
 /** true si el RTC ya fue seteado al menos una vez desde el arranque
- * actual (por DeviceTimeReq). false significa que la hora que devuelve
+ * actual (por GPS o DeviceTimeReq). false significa que la hora que devuelve
  * el RTC es solo el valor por defecto de MX_RTC_Init() -- NO confiable,
  * no se debe mandar en ningún uplink todavía. */
 bool Reloj_EstaSincronizado(void);

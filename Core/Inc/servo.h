@@ -1,7 +1,7 @@
 /**
  * @file    servo.h
- * @brief   Control del servo del acelerador (MG996R/análogo) vía PWM
- *          (TIM3_CH3, PB0).
+ * @brief   Control del servo del acelerador (LD-25MG, montaje directo
+ *          sobre el eje de la palanca) vía PWM (TIM3_CH3, PB0).
  *
  * NOTA: se usa PB0 (TIM3_CH3) en vez de PA6 (TIM3_CH1) porque en el
  * Nucleo-32 (NUCLEO-G431KB), el header físico donde vive PA6 comparte
@@ -16,11 +16,12 @@
  * recorte de seguridad contra los límites mecánicos configurados
  * (SERVO_PULSO_MIN/MAX en calibracion_flash.h).
  *
- * Uso típico en main.c:
+ * Uso típico en main.c (en este orden):
  *   Servo_Init(&htim3, TIM_CHANNEL_3);
- *   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
- *   ...
- *   Servo_SetPulsoUs(CalibFlash_GetServoPulsoMinUs());  // posición segura (sin aceleración) al arrancar
+ *   Servo_SetPulsoUs(CalibFlash_GetServoPulsoMinUs());  // posición segura, ANTES de arrancar el PWM
+ *   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);           // asi el primer pulso ya es el MIN calibrado
+ *   ...                                                 // (sin el "saltito" del 1500 de CubeMX)
+ *   Servo_MoverHacia(destino);                          // en cada vuelta del loop
  *
  * IMPORTANTE (prueba en banco antes de conectar a la varilla real):
  *   Antes de conectar el servo a la varilla del acelerador, pruébalo
@@ -40,22 +41,24 @@ extern "C" {
 #include <stdint.h>
 
 /* Velocidad máxima de movimiento del servo, en µs de pulso por segundo.
- * Protección mecánica: limita qué tan rápido puede saltar el pulso
- * aplicado de un ciclo a otro (evita choques en la varilla del
- * acelerador ante una corrección brusca del PID). Distinto de
- * TASA_MAX_CAMBIO_RPM_S (esa limita el setpoint de RPM, no el pulso
- * físico del servo). 1250 µs/s == el barrido de la prueba de banco
- * original (25µs cada 20ms).
+ * Constante FIJA (no es un parámetro por downlink, a propósito: es una
+ * protección mecánica). Limita qué tan rápido puede cambiar el pulso
+ * aplicado (evita golpes en la varilla del acelerador ante una corrección
+ * brusca del PID). Distinto de la rampa de bajada de RPM de main.c (esa
+ * limita el setpoint de RPM, no el pulso del servo).
  *
- * PROBADO en 200 µs/s (2026-09-08) para ver si actuaba como filtro
- * extra sobre correcciones bruscas/ruido de medicion -- revertido a
- * 1250 el mismo dia: dejaba el barrido/calibracion manual (=1/=2)
- * demasiado lento para uso practico (un ciclo completo del barrido
- * pasaba de ~2.4s a ~9s con el rango real de ~526us), y no se llegó a
- * confirmar ninguna mejora real sobre la oscilacion lenta observada en
- * el PID (esa prueba se interrumpio por un reset de la calibracion en
- * flash, no relacionado a este valor -- ver README seccion 9). */
-#define SERVO_VELOCIDAD_MAX_US_S    1250U
+ * 1000 µs/s desde 2026-10-02 (antes 1250): el limitador viejo perdía los
+ * decimales en cada vuelta y en la práctica iba a ~1000 µs/s con el loop a
+ * 1-3 ms por vuelta -- que es lo que vio el PID#1 cuando se sintonizó en
+ * campo (0.047/0.11). Ahora el limitador es exacto, y se fijó en el valor
+ * con el que de verdad se trabajó, para no cambiarle la dinámica al lazo.
+ * Con el rango real (~526 µs), un barrido MIN->MAX de CALIB=2 tarda ~0.5 s.
+ *
+ * Historia: PROBADO en 200 µs/s (2026-09-08) como filtro extra sobre
+ * correcciones bruscas -- revertido el mismo día: dejaba el barrido y la
+ * calibración manual (CALIB 1/2) demasiado lentos, y no se confirmó
+ * ninguna mejora sobre la oscilación del PID (ver README sección 9). */
+#define SERVO_VELOCIDAD_MAX_US_S    1000U
 
 /* Pausa en cada extremo del barrido de calibración (main.c,
  * CALIB=2), en ms. El pulso PWM comandado llega exacto a
@@ -99,8 +102,9 @@ uint16_t Servo_SetPulsoUs(uint16_t microsegundos);
  * (cadencia irregular; el paso se calcula por tiempo transcurrido
  * real vía HAL_GetTick(), no por conteo de llamadas). Cada llamada
  * avanza como máximo lo que permite SERVO_VELOCIDAD_MAX_US_S desde la
- * llamada anterior; si el destino ya se alcanzó, no hace nada más que
- * mantenerlo.
+ * llamada anterior, guardando la fracción de µs que sobra para la
+ * siguiente: la velocidad es exacta sin importar lo rápido que gire el
+ * loop. Si el destino ya se alcanzó, no hace nada más que mantenerlo.
  *
  * Único camino de movimiento del servo mientras hay un lazo activo:
  * tanto el barrido de calibración (main.c) como la salida de pid.c
