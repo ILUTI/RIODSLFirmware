@@ -66,12 +66,10 @@
  * de su ralenti real y tardar en subir (ej. ~500 -> ~800 observado en
  * campo); de esa ventana total solo se promedian los ultimos segundos
  * (RALENTI_CAL_VENTANA_PROMEDIO_MS), descartando la rampa de calentamiento
- * de los primeros ~90s. RALENTI_CAL_MARGEN_RPM se suma al promedio antes de
- * aplicarlo como RPM_MIN, para que el ruido normal de medicion (+-10-15 RPM,
- * ver hallazgos de PID) no cruce el umbral por accidente. */
+ * de los primeros ~90s. El promedio se aplica tal cual como RPM_MIN, sin
+ * margen (2026-10-08: se quito el +30 RPM que se le sumaba). */
 #define RALENTI_CAL_DURACION_TOTAL_MS     120000U
 #define RALENTI_CAL_VENTANA_PROMEDIO_MS    30000U
-#define RALENTI_CAL_MARGEN_RPM                30.0f
 
 /* Auto-calibracion de SERVO_PULSO_MIN (CALIB=4) -- barre el
  * pulso hacia arriba en pasos chicos desde el SERVO_PULSO_MIN actual,
@@ -144,8 +142,13 @@
  * solo comando (ver AT+JOIN=1:0:10:8 en RAK3172_Join(), ~80s en total),
  * pero si esas 8 fallan (o el modulo se queda sin cobertura un rato)
  * nada volvia a pedir el join de nuevo -- el nodo quedaba sin unirse
- * para siempre. 2 min da margen sobre esos ~80s antes de reintentar. */
-#define INTERVALO_REINTENTO_JOIN_MS  (120UL * 1000UL)
+ * para siempre. 2 min da margen sobre esos ~80s antes de reintentar.
+ * ⚠️ TEMPORAL (2026-10-07, pedido del usuario en campo): bajado a 30 s
+ * porque el RAK3172 se reinicia en cada AT+JOIN (brownout al transmitir) y
+ * pierde sus 8 intentos internos. Con el RAK sano, 30 s corta esa
+ * secuencia de ~80 s a la mitad -- volver a 120 s cuando se arregle la
+ * alimentacion. */
+#define INTERVALO_REINTENTO_JOIN_MS  (30UL * 1000UL)
 /* ⚠️ SUPUESTO / placeholder: por ahora hardcodeado a 1 (equivale a
  * "DSL-0001"). Cuando exista mas de un nodo motor, resolver esto desde
  * el DevEUI/nombre del dispositivo (habia un parametro NODE_ID, se elimino
@@ -509,22 +512,35 @@ int main(void)
   	   * lograr nada y puede resetear/extender la restriccion. Se
   	   * pausa el reintento entero (incluida la reafirmacion de
   	   * AT+MASK) hasta que pase. */
+  	  /* Paso 0 (2026-10-07): antes de reintentar, preguntar AT+NJS=? -- en
+  	   * campo el modulo podia estar unido pero el +EVT:JOINED se perdia por
+  	   * ruido en la linea, y el firmware seguia sin mandar uplinks y pidiendo
+  	   * join cada 2 min. Si contesta AT+NJS=1, rak3172.c marca el join y los
+  	   * pasos siguientes no corren. */
   	  static uint32_t ultimoIntentoJoinTick = 0;
-  	  static bool reenviandoMaskAntesDeJoin = false;
+  	  static uint8_t pasoReintentoJoin = 0U; /* 0 = nada, 1 = mandado AT+NJS=?, 2 = mandado AT+MASK */
   	  if (RAK3172_EstaRestringido()) {
-  		  /* no tocar reenviandoMaskAntesDeJoin -- si ya se habia mandado
-  		   * el MASK, se completa el paso 2 (JOIN) en cuanto la
+  		  /* no tocar pasoReintentoJoin -- se completa en cuanto la
   		   * restriccion se levante, en vez de perder ese progreso. */
-  	  } else if (reenviandoMaskAntesDeJoin && RAK3172_ComandoListo()) {
-  		  reenviandoMaskAntesDeJoin = false;
+  	  } else if (pasoReintentoJoin == 1U && RAK3172_ComandoListo()) {
+  		  if (RAK3172_EstaUnido()) {
+  			  pasoReintentoJoin = 0U; /* ya estaba unido -- el aviso de flanco de arriba lo imprime */
+  		  } else {
+  			  printf("RAK3172: aun no unido a la red -- reafirmando AT+MASK=0002 antes de reintentar join\r\n");
+  			  RAK3172_EnviarComandoAT("AT+MASK=0002");
+  			  pasoReintentoJoin = 2U;
+  		  }
+  	  } else if (pasoReintentoJoin == 2U && RAK3172_ComandoListo()) {
+  		  pasoReintentoJoin = 0U;
   		  printf("RAK3172: aun no unido a la red -- reintentando join (AT+JOIN)\r\n");
   		  RAK3172_Join();
-  	  } else if (!RAK3172_EstaUnido() && !reenviandoMaskAntesDeJoin && RAK3172_ComandoListo() &&
+  	  } else if (!RAK3172_EstaUnido() && pasoReintentoJoin == 0U && RAK3172_ComandoListo() &&
   			  (HAL_GetTick() - ultimoIntentoJoinTick >= INTERVALO_REINTENTO_JOIN_MS)) {
   		  ultimoIntentoJoinTick = HAL_GetTick();
-  		  printf("RAK3172: aun no unido a la red -- reafirmando AT+MASK=0002 antes de reintentar join\r\n");
-  		  RAK3172_EnviarComandoAT("AT+MASK=0002");
-  		  reenviandoMaskAntesDeJoin = true;
+  		  printf("RAK3172: aun no unido -- consultando estado de join (AT+NJS=?), errores UART=%lu\r\n",
+  				 (unsigned long)RAK3172_GetErroresUart());
+  		  RAK3172_EnviarComandoAT("AT+NJS=?");
+  		  pasoReintentoJoin = 1U;
   	  }
 
   	  /* ================== Sincronizacion de hora: GPS (primaria) + LoRaWAN (respaldo) ==================
@@ -534,6 +550,7 @@ int main(void)
   	  static uint32_t ultimoResyncExitosoTick = 0;
   	  static bool huboResyncAlgunaVez = false;
   	  bool relojFueCorregidoEsteCiclo = false;
+  	  const bool relojEstabaSincronizado = Reloj_EstaSincronizado();
 
   	  /* --- Fuente primaria: GPS. Antes del primer sync (de cualquier
   	   * fuente) se intenta en CADA vuelta del loop, no cada 10 min, para
@@ -712,14 +729,15 @@ int main(void)
 		  estadoAnterior = estadoActual;
 		  inicioEstadoLocal = fechaHoraLocalIterActual;
 		  estadoInicializado = true;
-	  } else if (relojFueCorregidoEsteCiclo) {
-		  /* El reloj se acaba de corregir (primer sync desde un valor
-		   * aproximado/placeholder, o resync periodico contra la deriva
-		   * del LSI) -- si el estado NO cambio, desplazar el ancla por
-		   * el mismo salto en vez de reiniciarla a "ahora", para no
-		   * perder el tiempo ya transcurrido en el estado actual (ej.
-		   * el motor llevaba apagado un rato desde el arranque, y la
-		   * sincronizacion no deberia reiniciar ese conteo a cero). */
+	  } else if (relojFueCorregidoEsteCiclo && !relojEstabaSincronizado) {
+		  /* Primer sync desde el arranque (el RTC venia del ano 2000) --
+		   * si el estado NO cambio, desplazar el ancla por el mismo salto
+		   * en vez de reiniciarla a "ahora", para no perder el tiempo ya
+		   * transcurrido en el estado actual.
+		   * SOLO el primero (2026-10-05): en los resync periodicos el salto
+		   * es la deriva del LSI (~1 s cada 30 s), tiempo real que SI paso.
+		   * Desplazar el ancla ahi hacia que segundos_transcurridos contara
+		   * segundos del LSI y inicio_operacion avanzara 1 s por uplink. */
 		  inicioEstadoLocal += (fechaHoraLocalIterActual - fechaHoraLocalIterAnterior);
 	  }
 	  fechaHoraLocalIterAnterior = fechaHoraLocalIterActual;
@@ -749,12 +767,13 @@ int main(void)
   		  uint32_t fechaHoraLocal = sinHora ? 0U : fechaHoraLocalIterActual;
   		  uint32_t inicioOperacionUplink = sinHora ? 0U : inicioEstadoLocal;
 
-  		  /* "Sin posicion" (2026-10-01): sin fix GPS vivo se manda 0/0 (el
-  		   * decoder lo interpreta) -- ya no hay posicion guardada en flash
-  		   * ni coordenada fija de respaldo, mismo criterio que "Sin hora". */
-  		  bool hayFix = GPS_TieneFix();
-  		  float latitudActual = hayFix ? GPS_GetLatitud() : 0.0f;
-  		  float longitudActual = hayFix ? GPS_GetLongitud() : 0.0f;
+  		  /* Posicion (2026-10-05): sin fix GPS vivo se manda la ultima
+  		   * conocida desde el arranque (gps.c la conserva en RAM; si no, GIO
+  		   * movia el motor a otro lado en cada perdida de fix). 0/0 ("Sin
+  		   * posicion", el decoder lo interpreta) solo hasta el primer fix
+  		   * tras arrancar -- en flash no se guarda (desgaste). */
+  		  float latitudActual = GPS_GetLatitud();
+  		  float longitudActual = GPS_GetLongitud();
 
   		  bool encolado = RAK3172_EnviarUplinkLive(
   			  MOTOR_ID_NUMERIC,
@@ -898,6 +917,17 @@ int main(void)
   			  PresionV_GetPresionPsi(),
   			  PresionV_GetVoltaje(),
   			  PresionV_SensorValido() ? "" : ",FALLA_SENSOR");
+
+  		  /* Transitorios de PresionV mas cortos que el log de 1 s (ver
+  		   * PRESIONV_FALLA_CONFIRMAR_MS): solo se imprime si hubo al
+  		   * menos una tanda fuera de rango en este segundo. */
+  		  uint16_t tandasInvalidas;
+  		  float vMinTanda, vMaxTanda;
+  		  PresionV_TomarDiagnostico(&tandasInvalidas, &vMinTanda, &vMaxTanda);
+  		  if (tandasInvalidas > 0U) {
+  			  printf("PRESIONV_GLITCH,tandas_invalidas=%u,vmin=%.3f,vmax=%.3f\r\n",
+  				  (unsigned)tandasInvalidas, vMinTanda, vMaxTanda);
+  		  }
   	  }
 
   	  /* Log de alta frecuencia para identificar el modelo de la planta
@@ -1216,7 +1246,14 @@ int main(void)
   	  static float presionLlenadoInicioPsi = 0.0f;
   	  static uint32_t presionLlenadoInicioMs = 0U;
   	  if (presionLocalActivoAhora && !presionLocalActivoAntes) {
-  		  PresionPid_Init();
+  		  /* MODO=3: arranque sin salto desde la RPM real (el motor puede venir
+  		   * acelerado por SET_RPM). Los demas casos (MODO=1/2 desde ralenti,
+  		   * autotunes) siguen arrancando en RPM_MIN como se validaron. */
+  		  if (modoMotor == CALIB_MODO_MANUAL_BANCO) {
+  			  PresionPid_InitDesdeRpm(Tacometro_GetRPMFiltrada());
+  		  } else {
+  			  PresionPid_Init();
+  		  }
   		  presionLlenadoInicioPsi = PresionV_GetPresionPsi();
   		  presionLlenadoInicioMs = HAL_GetTick();
   		  if (s_codigoAlertaActual != ALERTA_ENLACE_PERDIDO) {
@@ -1704,7 +1741,7 @@ int main(void)
   					  if (transcurridoMs >= RALENTI_CAL_DURACION_TOTAL_MS) {
   						  if (ralentiCalMuestras > 0U) {
   							  float promedio = ralentiCalSuma / (float)ralentiCalMuestras;
-  							  float nuevoRpmMin = promedio + RALENTI_CAL_MARGEN_RPM;
+  							  float nuevoRpmMin = promedio;
   							  bool ok = CalibFlash_SetRpmMin(nuevoRpmMin);
   							  printf("RALENTI_CAL,COMPLETO,promedio=%.1f,RPM_MIN_nuevo=%.1f,muestras=%lu,ok=%d\r\n",
   								  promedio, nuevoRpmMin, (unsigned long)ralentiCalMuestras, (int)ok);

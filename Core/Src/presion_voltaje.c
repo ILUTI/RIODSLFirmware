@@ -7,6 +7,15 @@ static float s_voltaje = 0.0f;
 static float s_presionPsiFiltrada = 0.0f;
 static bool  s_sensorValido = false;
 
+/* Confirmacion de falla -- ver PRESIONV_FALLA_CONFIRMAR_MS. */
+static bool     s_fallaPendiente = false;
+static uint32_t s_inicioFallaMs = 0;
+
+/* Acumuladores de diagnostico -- ver PresionV_TomarDiagnostico(). */
+static uint16_t s_diagTandasInvalidas = 0;
+static float    s_diagVMin = 99.0f;
+static float    s_diagVMax = 0.0f;
+
 /* Ancla de tiempo del limitador de velocidad de cambio -- ver
  * PRESIONV_TASA_MAX_CAMBIO_PSI_S en presion_voltaje.h. */
 static uint32_t s_ultimaTandaMs = 0;
@@ -57,10 +66,34 @@ static void ProcesarTanda(void)
     /* Fallo del sensor se evalua sobre el voltaje CRUDO (sin offset),
      * para no confundir un cable suelto/corto con un simple desfase de
      * calibracion. */
-    s_sensorValido = (s_voltaje >= PRESIONV_FALLA_BAJA_V)
-                   && (s_voltaje <= PRESIONV_FALLA_ALTA_V);
+    bool tandaValida = (s_voltaje >= PRESIONV_FALLA_BAJA_V)
+                    && (s_voltaje <= PRESIONV_FALLA_ALTA_V);
+    uint32_t ahora = HAL_GetTick();
 
-    if (s_sensorValido) {
+    if (s_voltaje < s_diagVMin) {
+        s_diagVMin = s_voltaje;
+    }
+    if (s_voltaje > s_diagVMax) {
+        s_diagVMax = s_voltaje;
+    }
+
+    if (tandaValida) {
+        s_sensorValido = true;
+        s_fallaPendiente = false;
+    } else {
+        if (s_diagTandasInvalidas < UINT16_MAX) {
+            s_diagTandasInvalidas++;
+        }
+        if (!s_fallaPendiente) {
+            s_fallaPendiente = true;
+            s_inicioFallaMs = ahora;
+        }
+        if ((ahora - s_inicioFallaMs) >= PRESIONV_FALLA_CONFIRMAR_MS) {
+            s_sensorValido = false;
+        }
+    }
+
+    if (tandaValida) {
         float voltajeCalibrado = s_voltaje - PRESIONV_OFFSET_V;
         float pendiente = (PRESIONV_PSI_EN_VOLTAJE_MAX - PRESIONV_PSI_EN_VOLTAJE_MIN)
                          / (PRESIONV_VOLTAJE_MAX - PRESIONV_VOLTAJE_MIN);
@@ -70,7 +103,6 @@ static void ProcesarTanda(void)
             presionInstantanea = 0.0f;
         }
 
-        uint32_t ahora = HAL_GetTick();
         if (!s_primeraTandaProcesada || !PRESIONV_FILTROS_ACTIVOS) {
             /* Primera tanda desde el arranque -- no hay referencia previa
              * contra la cual limitar, se acepta tal cual (mismo criterio
@@ -91,8 +123,9 @@ static void ProcesarTanda(void)
         }
         s_ultimaTandaMs = ahora;
     }
-    /* Si el sensor esta en falla, se conserva la ultima presion filtrada
-     * valida en vez de contaminarla con una lectura fuera de rango. */
+    /* Si la tanda salio fuera de rango (falla confirmada o todavia
+     * pendiente), se conserva la ultima presion filtrada valida en vez de
+     * contaminarla con una lectura fuera de rango. */
 }
 
 void PresionV_Init(ADC_HandleTypeDef *hadc)
@@ -136,4 +169,14 @@ float PresionV_GetVoltaje(void)
 bool PresionV_SensorValido(void)
 {
     return s_sensorValido;
+}
+
+void PresionV_TomarDiagnostico(uint16_t *tandasInvalidas, float *vMin, float *vMax)
+{
+    *tandasInvalidas = s_diagTandasInvalidas;
+    *vMin = s_diagVMin;
+    *vMax = s_diagVMax;
+    s_diagTandasInvalidas = 0;
+    s_diagVMin = 99.0f;
+    s_diagVMax = 0.0f;
 }

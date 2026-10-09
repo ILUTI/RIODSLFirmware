@@ -28,6 +28,10 @@
  * presion nunca sube mas rapido que ese ritmo, sin importar la ganancia real
  * de la instalacion. Es una regla de seguridad de la tuberia (decision del
  * usuario) -- NO se acelera aunque este llena. */
+/* Con TIEMPO_LLENADO_S = 0 (sin rampa en MODO=1) la subida no aborta: usa
+ * este llenado interno (2026-10-08, a pedido del usuario). 300 s es el que se
+ * uso en la primera corrida completa de CALIB 14 en campo. */
+#define AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S 300.0f
 #define AUTOTUNE2_SUBIDA_TIMEOUT_MARGEN  1.5f    /* timeout de ultimo recurso = duracion esperada de la subida ((objetivo - base) / TASA_LLENADO_PSI_S) x esto */
 #define AUTOTUNE2_SUBIDA_ESPERA_TECHO_MS 30000U  /* al tocar RPM_MAX_CARGA, esperar ~3 tiempos muertos a que la presion llegue antes de rendirse */
 #define AUTOTUNE2_CURVA_PASO_LOG_PSI     1.0f    /* PRESION_GANANCIA_CAL,PASO cada vez que la PSI avanza esto */
@@ -56,6 +60,12 @@
  * puede tardar mas en declarar estable -- revisar en la primera prueba. */
 #define AUTOTUNE2_ESTABLE_TOL_PSI        0.5f
 #define AUTOTUNE2_VOLVER_TIMEOUT_MS    300000U
+/* Ademas de "estable", al volver a ralenti la presion debe quedar a menos de
+ * esto sobre la base medida al inicio (2026-10-08): con la tuberia aun
+ * despresurizandose despacio (o lecturas congeladas por fallas cortas del
+ * sensor) el detector declaro estable 24 PSI con base 19.4, el escalon de ID
+ * arranco mientras la presion seguia bajando y la identificacion fallo. */
+#define AUTOTUNE2_VOLVER_MARGEN_BASE_PSI 1.5f
 
 /* Escalon de IDENTIFICACION (2026-10-01): el metodo de campo -- escalon
  * CERRADO de +5 PSI desde ralenti con la Kp de prueba y Ki=0 (log
@@ -480,10 +490,14 @@ void AutotunePsi_Paso(bool motorOperando, bool modoCalibracion)
             /* Ritmo de subida = el MISMO que usa la rampa de MODO=1
              * (PRESION_OBJETIVO_LOCAL / TIEMPO_LLENADO_S, ver
              * CalibFlash_GetTasaLlenadoPsiS): duracion dinamica, y nunca mas
-             * rapido que el ritmo elegido por el operador. */
-            float tasaPsiS = CalibFlash_GetTasaLlenadoPsiS();
-            if (tiempoLlenadoS <= 0.0f || tasaPsiS <= 0.0f || rpmMaxCarga <= rpmMin) {
-                abortar("config_invalida_TIEMPO_LLENADO_S_o_RPM_MAX_CARGA");
+             * rapido que el ritmo elegido por el operador. Sin ritmo elegido
+             * (TIEMPO_LLENADO_S = 0) se usa AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S. */
+            if (tiempoLlenadoS <= 0.0f) {
+                tiempoLlenadoS = AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S;
+            }
+            float tasaPsiS = objetivo / tiempoLlenadoS;
+            if (tasaPsiS <= 0.0f || rpmMaxCarga <= rpmMin) {
+                abortar("config_invalida_RPM_MAX_CARGA");
                 break;
             }
             s_tasaPsiS = tasaPsiS;
@@ -499,8 +513,8 @@ void AutotunePsi_Paso(bool motorOperando, bool modoCalibracion)
             s_tramosCruzados = 1U;
             s_kpPruebaValida = false; /* se recalcula con esta subida */
             s_estado = ST_SUBIDA;
-            printf("AUTOTUNE_PID2,SUBIDA,tasa_psi_s=%.4f,tasa_rpm_s=%.4f,rpm_max_carga=%.1f,timeout_s=%.0f\r\n",
-                   s_tasaPsiS, s_tasaRpmS, rpmMaxCarga, s_timeoutSubidaS);
+            printf("AUTOTUNE_PID2,SUBIDA,llenado_s=%.0f,tasa_psi_s=%.4f,tasa_rpm_s=%.4f,rpm_max_carga=%.1f,timeout_s=%.0f\r\n",
+                   tiempoLlenadoS, s_tasaPsiS, s_tasaRpmS, rpmMaxCarga, s_timeoutSubidaS);
         }
         break;
 
@@ -561,7 +575,12 @@ void AutotunePsi_Paso(bool motorOperando, bool modoCalibracion)
     case ST_VOLVER: {
         float prom = 0.0f;
         if (estableActualizar(ahora, &prom)) {
-            if (s_siguienteTrasVolver == ST_ID) {
+            if (prom > s_psiBase + AUTOTUNE2_VOLVER_MARGEN_BASE_PSI) {
+                /* Estable pero todavia lejos de la base: seguir esperando
+                 * (ventana nueva); el timeout de arriba sigue corriendo. */
+                printf("AUTOTUNE_PID2,ESPERANDO_BASE,psi=%.2f,base=%.2f\r\n", prom, s_psiBase);
+                Autotune_EstableIniciar(&s_estable, ahora);
+            } else if (s_siguienteTrasVolver == ST_ID) {
                 empezarIdentificacion(ahora, prom);
             } else {
                 empezarValidacion(ahora, prom);

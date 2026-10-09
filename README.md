@@ -350,16 +350,20 @@ circular "sin uplink no hay hora, sin hora no hay uplink". Desde
 2026-10-01 ya no se guarda ninguna hora en flash (se eliminó
 `CalibFlash_GetUltimaHoraUtcConocida()`/`Reloj_CargarHoraAproximada()`).
 
-**Preservación del contador de estado al (re)sincronizar** (bug
-corregido 2026-08-18, generalizado a todo resync 2026-08-26): cada vez
-que el reloj se corrige — el primer sync desde el placeholder de
-flash, o cualquier resync periódico posterior, por GPS o por red — el
-código en `main.c` **desplaza** el ancla de `inicio_operacion`
-(`inicioEstadoLocal`) por el mismo salto (bandera
-`relojFueCorregidoEsteCiclo`), en vez de reiniciarla a "ahora". Si no,
-cada corrección (incluido un resync rutinario cada 30s por GPS)
-borraría el tiempo ya transcurrido en el estado actual, aunque el
-motor llevara horas sin cambiar de estado.
+**Preservación del contador de estado al sincronizar** (bug corregido
+2026-08-18): en el **primer** sync desde el arranque (el RTC venía del
+año 2000), por GPS o por red, el código en `main.c` **desplaza** el ancla
+de `inicio_operacion` (`inicioEstadoLocal`) por el mismo salto (banderas
+`relojFueCorregidoEsteCiclo` y `relojEstabaSincronizado`), en vez de
+reiniciarla a "ahora". Si no, el sync borraría el tiempo ya transcurrido
+en el estado actual.
+
+⚠️ **Solo el primero (2026-10-05).** Desde 2026-08-26 se desplazaba
+también en cada resync periódico, y eso era un bug: el salto de un
+resync es la deriva del LSI (~1 s cada 30 s), tiempo real que sí pasó.
+Visto en banco: con GPS, `inicio_operacion` avanzaba 1 s por uplink y
+`segundos_transcurridos` contaba 29 por cada 30 s reales (en 2 días,
+~1.5 h de error).
 
 ⚠️ **No confundir latencia de pipeline con imprecisión del RTC**
 (observado en campo, 2026-08-26): comparar `fecha_hora` del payload
@@ -657,11 +661,13 @@ a la PC, no el firmware ni el módulo** → ver hardware, sección 6.2 para
 el análisis completo (prueba A/B, hipótesis del mecanismo, y las vías
 descartadas antes de encontrar la causa real).
 
-**Posición en el uplink LIVE** (`main.c`, desde 2026-10-01): si el GPS
-tiene fix vivo (`GPS_TieneFix()`) se manda su posición; si no, se manda
-`0/0` ("Sin posición", lo interpreta el decoder de AWS). Ya no se guarda
-posición en flash ni hay coordenada fija de respaldo — mismo criterio
-que "Sin hora", y una escritura de flash menos por arranque.
+**Posición en el uplink LIVE** (`main.c`, desde 2026-10-05): se manda
+siempre la última posición conocida desde el arranque (`gps.c` la
+conserva en RAM aunque se pierda el fix). Antes, sin fix vivo se mandaba
+`0/0` y GIO movía el motor a otro lado en cada pérdida de fix (visto en
+banco tras ~2 días encendido). `0/0` ("Sin posición", lo interpreta el
+decoder de AWS) solo sale desde el arranque hasta el primer fix. Ya no se
+guarda posición en flash ni hay coordenada fija de respaldo (desgaste).
 
 **Disciplina del RTC**: `GPS_GetFechaHoraUtc()` expone la fecha/hora
 UTC del último `+CGPSINFO:` con fix (campos `fecha ddmmyy`/`hora
@@ -678,8 +684,8 @@ solo se apagaba con un reporte vacío: si el módulo dejaba de hablar
 (colgado, cable, reinicio propio), el último fix quedaba válido para
 siempre y el RTC se re-seteaba cada 30 s con esa hora vieja. Ahora, si no
 llega **ningún** `+CGPSINFO:` en `GPS_REPORTE_VIGENCIA_MS` (30 s = 3
-reportes perdidos), el fix se da por vencido: el LIVE manda `0/0` y la hora
-pasa al respaldo LoRaWAN.
+reportes perdidos), el fix se da por vencido: el LIVE sigue con la última
+posición conocida y la hora pasa al respaldo LoRaWAN.
 
 **Buffers (2026-10-02):** el DMA bajó de 512 a 128 bytes y la cola de 8 a
 4 líneas (~760 bytes de RAM): el módulo solo manda una línea de ~80
@@ -698,26 +704,39 @@ del `main()` (incluida la impresión de `Frecuencia`), no solo al GPS.
 Corregido acotando `Size` a `0` cuando llega igual al tamaño del
 buffer.
 
-**Reintento automático tras reportes vacíos seguidos**: si llegan
-`GPS_REPORTES_VACIOS_ANTES_DE_REENVIAR` (10, `gps.h`) reportes
-`+CGPSINFO: ,,,,,,,,` **seguidos** (~100s sin fix a razón de uno cada
-10s), `GPS_ProcesarCGPSInfo()` reenvía `AT+CGPS=1` por su cuenta y
-reinicia el contador. Es una red de seguridad barata, no una solución
-al bug de arriba (ese ya se resolvió y no era del módulo) — si el GPS
-está sano y solo tarda en conseguir fix (mal clima, sin vista al
-cielo), el reenvío es inofensivo: con el GPS ya encendido, `AT+CGPS=1`
-solo contesta `ERROR` sin interrumpir la adquisición en curso. El
-contador se reinicia también en cuanto llega un fix real.
+**Errores leves de UART sin desfasar el lector (2026-10-05).** Con
+errores de ruido/trama/paridad, HAL llama a `GPS_ErrorCallback()` pero
+**no** detiene el DMA circular. Antes el callback volvía
+`s_ultimaPosLeida` a 0 y rearrancaba igual: el rearranque fallaba en
+silencio (`HAL_BUSY`) y el lector quedaba desfasado del DMA, releyendo
+datos viejos. Ahora solo descarta la línea a medio armar (un dígito
+cambiado por ruido quedaría como "última posición conocida") y, si
+`RxState` sigue ocupado, no toca nada más. Solo con errores graves
+(desborde, error de DMA), en que HAL deja `RxState` en `READY`, limpia
+banderas, lee `RDR` y rearranca desde 0.
 
-**Re-armado si el módulo se queda mudo (2026-10-02).** El reintento de
+**Reinicio del GNSS tras reportes vacíos seguidos (2026-10-05)**: si
+llegan `GPS_REPORTES_VACIOS_ANTES_DE_REINICIAR` (30, `gps.h`) reportes
+`+CGPSINFO: ,,,,,,,,` **seguidos** (~5 min sin fix a razón de uno cada
+10s), `GPS_ProcesarCGPSInfo()` reinicia el GNSS: `AT+CGPS=0`, `AT+CGPS=1`
+y `AT+CGPSINFO=10`, separados por 3 s (`GPS_REARMAR_PAUSA_MS`, sin
+bloquear el loop, lo maneja `GPS_Update()`). Antes solo se reenviaba
+`AT+CGPS=1` cada ~100 s, que con el GNSS ya encendido contesta `ERROR` y
+no hace nada: en banco (2026-10-05) el GPS estuvo yendo y viniendo tras
+~2 días encendido y solo se arregló al reiniciar el nodo. Apagar y
+encender el GNSS conserva los satélites en la memoria del módulo
+(arranque en caliente). 5 min y no menos para no cortar un arranque en
+frío que tarde en enganchar. Log: `GPS: 30 reportes seguidos sin fix --
+reiniciando GNSS`. El contador se reinicia en cuanto llega un fix real.
+
+**Re-armado si el módulo se queda mudo (2026-10-02).** El reinicio de
 arriba solo cuenta reportes *vacíos*: si el SIM7600X se reinicia solo,
 olvida `AT+CGPS=1` y `AT+CGPSINFO=10` y deja de mandar reportes por
 completo, así que ese contador nunca sube. Ahora, si no llega **ningún**
-`+CGPSINFO:` en `GPS_REARMAR_SIN_REPORTES_MS` (60 s), `GPS_Update()` vuelve
-a mandar las dos órdenes del arranque separadas por 1.5 s
-(`GPS_REARMAR_PAUSA_MS`, sin bloquear el loop), y lo repite como mucho una
-vez por minuto mientras siga mudo. Log: `GPS: sin reportes hace Ns --
-re-armando`.
+`+CGPSINFO:` en `GPS_REARMAR_SIN_REPORTES_MS` (60 s), `GPS_Update()` hace
+el mismo reinicio del GNSS de arriba, y lo repite como mucho una vez por
+minuto mientras siga mudo. Log: `GPS: sin reportes hace Ns -- reiniciando
+GNSS`.
 
 ### 2.7 `comando_serial.c/h` — consola por serial (permanente)
 
@@ -2079,6 +2098,42 @@ igual (−2.0 PSI cada 5 s).
   para rechazar ruido en el lazo externo — revisar ambos motivos antes
   de aflojarlos.
 
+**Confirmación de falla de 1 s + log `PRESIONV_GLITCH` (agregado
+2026-10-08, compila, probado en campo ese mismo día)**
+
+- **Problema encontrado en campo:** `CALIB 14` abortaba con
+  `sensor_invalido` sin que el log de 1 s mostrara ningún `FALLA_SENSOR`,
+  y en `MODO=1` el aviso "sensor de presion en falla -- forzando
+  ralenti" se repetía 51 veces en ~5 s. Causa: una tanda de 21 muestras
+  dura solo unos ms (una muestra por vuelta del loop, ~2 000 vueltas/s),
+  así que un transitorio corto contamina la tanda completa (el promedio
+  recortado no alcanza), y `PresionV_SensorValido()` caía a `false` con
+  **una sola** tanda fuera de 0.2–3.0 V.
+- **Cambio en `presion_voltaje.c/h`:** la falla ahora se declara solo si
+  el voltaje sigue fuera de rango **`PRESIONV_FALLA_CONFIRMAR_MS = 1000`
+  ms seguidos**. Una tanda mala aislada no la declara, y mientras tanto
+  la presión conserva el último valor bueno. Volver a "válido" sigue
+  siendo inmediato. Como el cambio está en el módulo, beneficia a todo lo
+  que usa `PresionV_SensorValido()`: `CALIB 9-14` y `autotune_asp.c`, el
+  paso a ralentí de `MODO=1` y la alerta 3
+  `SENSOR_PRESION_LOCAL_FALLA`. Un cable de verdad suelto sigue dando
+  `FALLA_SENSOR` después de ~1 s.
+- **Diagnóstico nuevo:** `PresionV_TomarDiagnostico()` acumula cuántas
+  tandas salieron fuera de rango y el voltaje mínimo y máximo de las
+  tandas. `main.c` lo lee junto al log de 1 s y, **solo si hubo al menos
+  una tanda inválida en ese segundo**, imprime:
+  ```
+  PRESIONV_GLITCH,tandas_invalidas=<n>,vmin=<V>,vmax=<V>
+  ```
+- **Lo visto en campo el 2026-10-08:** cada `PRESIONV_GLITCH` va de 0 V
+  al tope (~3.26–3.31 V) en el mismo segundo. Al principio eran ~34
+  tandas (~0.3 s) cada varios minutos y aparecían también en ralentí,
+  con el servo quieto y sin coincidir con la radio. Hacia la tarde
+  aparecían casi cada segundo, con hasta 330 tandas. Apunta a hardware
+  (conector, cable o tierra del sensor, o ruido); **sin resolver**. Con
+  la falla tan seguida, las lecturas se congelan a menudo y ningún
+  autotune ni comparación de PID es confiable hasta corregirlo.
+
 ---
 
 ## 6. Integración con AWS IoT Core for LoRaWAN
@@ -2190,8 +2245,9 @@ Debe coincidir byte a byte entre `RAK3172_EnviarUplinkLive()`
 | 28 | 1 | `bateria_pct` | uint8, 0–100 % de la batería propia del nodo (Li-ion 1S); `0xFF` = sin medición (hoy siempre: falta el divisor al ADC en el hardware) |
 | 29–31 | 3 | `horometro` | uint24 BE, en décimas de hora (máx. 1 677 721.5 h) — ver 2.10 |
 
-`latitud`/`longitud` vienen del GPS en vivo cuando hay fix; sin fix se
-mandan en `0` ("Sin posición") — ver 2.6.
+`latitud`/`longitud` son la última posición del GPS desde el arranque
+(se mantiene aunque se pierda el fix); `0` ("Sin posición") solo hasta el
+primer fix tras arrancar — ver 2.6.
 
 ⚠️ **Subido de 28 a 32 bytes el 2026-10-02** (batería y horómetro). En el decoder:
 si el payload trae 28 bytes (firmware anterior), dejar `bateria_pct` y `horometro` vacíos.
@@ -2465,9 +2521,11 @@ escribir `SET_RATIO 17.5` y Enter.
       deja de recibir `PRESION_REMOTO` fresca. ⚠️ **Historia: superado.**
       La fórmula lineal (`PRESION_GANANCIA_RPM`/`OFFSET_RPM`) se reemplazó
       por un PID (2026-09-23) y luego por la **triple cascada** (PID#3,
-      2026-09-30, `PID_ASP_KP/KI`, IDs 26/27); el watchdog ahora degrada
+      2026-09-30, `PID_ASP_KP/KI`, IDs 25/26 desde la renumeración del 2026-10-02); el watchdog ahora degrada
       `MODO=2` → `MODO=1` (2026-10-01). Lo que queda pendiente es
-      calibrar el PID#3 en campo (`CALIB=12`, sin probar).
+      calibrar el PID#3 en campo (`CALIB=12`: 4 corridas el 2026-10-08,
+      ninguna terminó por fallas del aspersor y ruido eléctrico; candidata
+      Ki≈0.009 se veía bien, ver sección 9).
 - [x] Construcción física del circuito de presión (LM358) y `presion.c/h`
       — implementado 2026-09-09, compilado limpio (0 errores/0
       warnings), ver sección 5. **Pendiente real que queda**: prueba en
@@ -3372,8 +3430,11 @@ los dos casos el log de la subida queda. `11` exige `PID_PSI_KP > 0` y no
 necesita `TIEMPO_LLENADO_S`.
 
 **`CALIB=14` — lazo de presión local** (bomba embragada). Requiere el
-PID#1 ya sintonizado, `TIEMPO_LLENADO_S`, y `PRESION_OBJETIVO_LOCAL` al
-menos 5 PSI sobre la presión en ralentí. Todo en `autotune_psi.c`. Dura
+PID#1 ya sintonizado y `PRESION_OBJETIVO_LOCAL` al menos 5 PSI sobre la
+presión en ralentí. `TIEMPO_LLENADO_S` ya no es obligatorio (2026-10-08):
+con `0` la subida usa un llenado interno de 300 s
+(`AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S`); el log `AUTOTUNE_PID2,SUBIDA`
+muestra `llenado_s` con el valor usado. Todo en `autotune_psi.c`. Dura
 **lo que tarde la subida + 10 a 15 min** si aprueba al primer intento.
 La subida tarda como MODO 1: `(objetivo − presión actual) / TASA_LLENADO_PSI_S`,
 así que con la tubería ya presurizada es mucho menos que `TIEMPO_LLENADO_S`:
@@ -3385,12 +3446,16 @@ así que con la tubería ya presurizada es mucho menos que `TIEMPO_LLENADO_S`:
    menor que cuando se configuró). Es la
    regla de seguridad de la tubería (la presión nunca sube más rápido que
    lo que definió el operador), así que **esta parte no se acelera** →
-   3. **Asentar** en ese RPM → 4. **Identificación en lazo abierto**:
-   escalón de SET_RPM **hacia abajo** del 15 % durante 180 s, muestreando
-   cada **0.3 s**. Con 0.5 s el tiempo muerto se medía mal: pasando el log
-   real del 21/09 por el mismo cálculo, 0.2 a 0.3 s da Kp 1.60 a 1.82 y
-   Ki 0.34 a 0.41, y 0.4 a 0.5 s da Kp 2.4 a 2.8. Bajar no arriesga la
-   tubería, y no hace falta elegir una Kp de prueba →
+   3. **Volver a ralentí** (`SET_RPM = RPM_MIN`) y esperar presión
+   estable **y** a ≤ `AUTOTUNE2_VOLVER_MARGEN_BASE_PSI` (1.5 PSI) de la
+   base del paso 1. Si se ve estable pero sigue alta, imprime
+   `AUTOTUNE_PID2,ESPERANDO_BASE,psi=..,base=..` y sigue esperando, con
+   el mismo límite de 5 min (agregado 2026-10-08) → 4. **Identificación
+   en lazo cerrado**: escalón de +5 PSI desde esa presión con la Kp de
+   prueba y Ki=0, durante 180 s, muestreando cada **0.3 s**. Con 0.5 s el
+   tiempo muerto se medía mal: pasando el log real del 21/09 por el mismo
+   cálculo, 0.2 a 0.3 s da Kp 1.60 a 1.82 y Ki 0.34 a 0.41, y 0.4 a 0.5 s
+   da Kp 2.4 a 2.8 →
    5. **SIMC "Medio"** con la K del escalón, igual que tu 1.72/0.39, que
    también salió de un escalón (log `COM3_2026_09_21`, objetivo de 15 a
    20 PSI con Kp=5, sin curva) → 6. **Validación en la cascada real**
@@ -3413,10 +3478,69 @@ así que con la tubería ya presurizada es mucho menos que `TIEMPO_LLENADO_S`:
   la regla de `TIEMPO_LLENADO_S` prohíbe). Se valida solo con +5 PSI desde
   ralentí; la zona alta de presión no queda validada por el autotune.
 
+**Prueba de campo `CALIB=14` — 2026-10-08** (logs
+`COM3_2026_10_08.12.05.08.248`, `.13.18.25.931`, `.14.28.23.597`)
+
+1. **Primeros intentos (12:05):** abortaron por `config_invalida`
+   (`TIEMPO_LLENADO_S` = 0) y después por `sensor_invalido` sin que el
+   log mostrara falla. Se resolvió con la confirmación de falla de 1 s
+   (ver sección 5, `PRESIONV_GLITCH`) y quitando la obligación de
+   `TIEMPO_LLENADO_S` (llenado interno de 300 s).
+2. **Primera corrida completa (13:18, `RPM_MIN` = 760.6, objetivo 25 PSI,
+   llenado 300 s):** subida 18.3 → 25 PSI en 85 s; `CURVA` k 0.057–0.121
+   → Kp de prueba 3.55; `ID` K=0.259, tau=10.95 s, L=5.10 s, G_cl=0.48 →
+   candidata **Kp 2.7607 / Ki 0.2521**; validación aprobada (0 %
+   sobrepico, 0 cruces, error final −0.15 PSI) → **guardada**. En total
+   ~10 min.
+3. **Comparación en `MODO=1`, mismo día, `TIEMPO_LLENADO_S` = 0:**
+   2.76/0.25 resultó **más lenta** que 1.72/0.39. Llegó al 90 % del
+   escalón en 112 s contra ~68 s, y quedó dentro de ±0.5 PSI en 160 s
+   contra ~100–108 s. Arranca algo más rápido, pero cierra el último PSI
+   mucho más despacio. Ruido ya asentado prácticamente igual (desv. est.
+   0.07–0.10 PSI). **Se volvió a 1.72/0.39.**
+4. **Causa encontrada — K sobrestimada ~4 veces:**
+   `Autotune_IdentificarLazoCerrado()` supone que la entrada de la planta
+   cambió solo `Kp × error`. Pero la salida del PID#2 es
+   `RPM_MIN + Kp × error` (`presion_pid.c`), y en ralentí el motor estaba
+   a ~733 RPM, unas 27 por debajo de `RPM_MIN` (760.6 = ralentí + el
+   margen de +30 que sumaba `CALIB=8`). El cambio real fue ~39 RPM y no
+   los 9.3 supuestos. K real ≈ 0.062–0.07 PSI/RPM, que coincide con la
+   curva (0.057–0.12), con la prueba del 21/09 (0.0746) y con `MODO=1`
+   (~0.08). Un modelo con K≈0.065–0.07, tau 6–8 s, L 4–5 s y ese salto
+   de 27 RPM reproduce en simulación las dos corridas de `MODO=1`. El de
+   K=0.259 no.
+5. **Mitigación aplicada:** `CALIB=8` ya no suma +30 (ver la sección de
+   `CALIB=8`). Se recalibró: **`RPM_MIN` = 729.2** (promedio del
+   ralentí). Con `RPM_MIN` ≈ ralentí real, el salto escondido desaparece
+   y la fórmula vuelve a ser válida. La identificación sigue suponiendo
+   que no hay salto: si en otra máquina `RPM_MIN` queda lejos del
+   ralentí, la K vuelve a salir mal. Arreglo de fondo pendiente: medir el
+   cambio real de RPM (promedio en ralentí contra promedio final) y
+   corregir tau con `tau = tau_cl·(1 + K·Kp)`.
+6. **Segunda corrida (14:28, `RPM_MIN` = 729.2):** la curva dio
+   **k = 0.0746** (Kp de prueba 5.74), igual que en campo el 21/09, lo
+   que confirma la causa. Abortó por `ID_FALLIDA` /
+   `gcl_fuera_de_rango`: el escalón arrancó a 24.06 PSI (base 19.36)
+   con la presión todavía bajando, porque el detector de estabilidad se
+   engañó (fallas del sensor casi cada segundo, lecturas congeladas).
+   Nada se guardó. De aquí sale la condición nueva de volver a ≤ base +
+   1.5 PSI (paso 3).
+7. **Qué esperar con la K correcta:** SIMC "Medio" daría del orden de
+   **Kp ≈ 7–8 / Ki ≈ 1.0–1.3** en el primer intento. La planta no es
+   lineal (K hasta ~0.12 cerca de ralentí), y ahí esas ganancias se
+   pasarían 3–5 PSI en simulación. La validación debería rechazarlas y
+   el segundo intento (tau_c×2) daría ~4.6/0.77. Comparar siempre en
+   `MODO=1` contra 1.72/0.39 antes de quedarse con el resultado. Opción
+   manual intermedia sugerida, sin probar: **3.0 / 0.5** (simulación: 90 %
+   en ~48 s contra 63 s, sin sobrepico con K=0.07).
+8. **Pendiente:** corregir primero el ruido del sensor y repetir
+   `CALIB=14` con el firmware que tiene la espera de la base.
+
 
 **`CALIB=12` — PID#3, aspersor remoto (MODO=2, triple cascada)** —
 agregado 2026-09-30, **reemplaza al viejo auto-escalón remoto de `CALIB=12`**,
-que no estaba terminado. ⚠️ No probado con motobomba ni aspersor. Todo en
+que no estaba terminado. ⚠️ Probado en campo el 2026-10-08 pero **sin
+terminar ninguna corrida** (ver "Prueba de campo 2026-10-08" abajo). Todo en
 `autotune_asp.c`.
 
 **No identifica la bomba** (eso ya es el PID#2), sino la relación **presión
@@ -3438,10 +3562,15 @@ aspersor reportando.
 
 **Secuencia:**
 1. **Presión local estable** en la base.
-2. **Base remota:** 3 reportes seguidos del aspersor dentro de 1 PSI.
+2. **Base remota:** **1 reporte nuevo** del aspersor (que llegue después de
+   que la presión local quedó estable). Cambiado 2026-10-08: antes eran 3
+   reportes seguidos dentro de 1 PSI y tardaba ~1:45 min en arrancar el
+   escalón; como la base viene de un MODO 1 ya estable, con 1 basta.
 3. **Escalón del objetivo local:** +5 PSI, o −5 si no cabe bajo
-   `PRESION_MAX`, al ritmo de llenado. Mueve el aspersor más de 2 PSI, así que
-   reporta cada 20 s. Se espera a que el aspersor se estabilice.
+   `PRESION_MAX`, al ritmo de llenado (directo si `TIEMPO_LLENADO_S=0`).
+   Mueve el aspersor más de 2 PSI, así que reporta más seguido. Termina
+   cuando la presión local llegó y **3 reportes seguidos** del aspersor
+   quedan dentro de 1 PSI (esta parte sigue con 3).
    - K = cambio del aspersor / cambio local.
    - L = desde que el **objetivo** local cruza la mitad de su cambio hasta
      el primer reporte que cruza la mitad del suyo, con mínimo 20 s. Se mide
@@ -3453,7 +3582,9 @@ aspersor reportando.
 5. **Validación:** vuelve a la base y activa la **triple cascada real** con la
    candidata (en RAM), persiguiendo `PRESION_OBJETIVO_REMOTO`.
    - Aprueba cuando los últimos 3 reportes quedan dentro de
-     ±max(0.5 PSI, 5 %).
+     ±max(1 PSI, 5 %) del objetivo remoto.
+   - El ajuste del PID#3 sube como máximo ~1 PSI por reporte (ventana
+     anti-windup de ±1 PSI), aun con `TIEMPO_LLENADO_S=0`.
    - Se rechaza con más de 2 cruces de la banda, o si no asienta en 40
      reportes o 20 min.
 6. **Resultado:**
@@ -3465,7 +3596,32 @@ aspersor reportando.
    - Resultado por LoRa: código 10 (bien) u 11 (falló).
 
 **Log serie:** `AUTOTUNE_PID3,...` (`BASE_LOCAL`, `ESCALON`, `REPORTE`, `ID`,
-`CANDIDATA`, `VALIDANDO`, `VAL_REPORTE`, `OK`/`FALLO`).
+`CANDIDATA`, `VALIDANDO`, `VAL_REPORTE`, `OK`/`FALLO`). Entre `CANDIDATA` y
+`VALIDANDO` no imprime nada mientras vuelve a la base (es normal). Los códigos
+10/11 todavía **no** están en el decoder de AWS: seguir el resultado por serie.
+
+**Prueba de campo 2026-10-08** (logs `COM3_2026_10_08.12.49.46.588` y
+`.14.28.23.597`, siempre desde MODO 1, `PRESION_OBJETIVO_REMOTO=45`):
+- **Corrida 1 (base local 30):** aspersor en 37 (lee más que la bomba; el
+  integral del PID#3 absorbe esa diferencia). **K=0.892, L=41 s** → candidata
+  **Ki=0.00911, Kp=0**. En la validación el aspersor subió 37→43 sin
+  sobrepaso (ya dentro de la banda). Se cortó porque el aspersor dejó de
+  transmitir (>4 min sin downlinks) → `MODO=0` a mano.
+- **Corrida 2 (base 25):** el aspersor no asentaba (35/37/36) y bajó a
+  reportes cada ~90 s → abortada a mano.
+- **Corrida 3:** `ABORTADO,motivo=motor_se_detuvo` **falso**: el motor iba a
+  ~880 RPM pero el tacómetro pasó >500 ms sin pulso válido, junto con una
+  ráfaga de `PRESIONV_GLITCH` (ruido eléctrico, pendiente de hallar). La
+  protección de apagado también pasó a `MODO=0`.
+- **Corrida 4:** el aspersor cayó 37→13 PSI sin cambio de RPM ni de presión
+  local → falla del nodo aspersor (confirmada).
+- **Resultado: no se guardó nada, `PID_ASP_KP/KI` siguen en 0.** Datos
+  útiles: K≈0.9–1.1; el aspersor reporta PSI enteros; `PID_ASP_KI` se guarda
+  ×1000 (0.00911 → 0.009); para objetivo remoto 45 con base 25–30 el objetivo
+  local llega a ~39–41 PSI → `PRESION_MAX` debe ser ≥ ~43 (techo 95 %).
+- **Siguiente:** repetir con el aspersor reparado y sin ruido. Alternativa:
+  `PID_ASP_KP=0`, `PID_ASP_KI=0.009` a mano (`MODO=4`, `CALIB=0`) y probar
+  `MODO=2` directo.
 
 **Cómo prueba sin riesgo**: las candidatas se aplican como ganancias
 **temporales en RAM** (`PID_SetGananciasTemporales` /
@@ -3575,9 +3731,8 @@ permanece en modo `8` esperando a que vuelva a arrancar — no hace
 falta reenviar el downlink, la ventana de 2 minutos arranca de nuevo
 sola apenas el motor esté operando otra vez.
 
-**Resultado**: `RPM_MIN` = promedio de los últimos 30s + margen fijo
-de 30 RPM (para que el ruido normal de medición, ±10-15 RPM, no cruce
-el umbral por accidente y dispare el PID solo por ruido). Al aplicar
+**Resultado**: `RPM_MIN` = promedio de los últimos 30s, sin margen
+(2026-10-08: se quitó el +30 RPM que se sumaba antes). Al aplicar
 el resultado, el firmware vuelve solo a `CALIB=0` — no
 hace falta un downlink extra para salir del modo `8`.
 

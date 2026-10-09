@@ -50,6 +50,7 @@ static RAK3172_Resultado_t s_ultimoResultado = RAK3172_OK;
 static char     s_ultimaRespuesta[RAK3172_RX_BUFFER_SIZE];
 static bool     s_hayRespuestaNueva = false;
 static volatile bool s_estaUnido = false;
+static volatile uint32_t s_erroresUart = 0; /* diagnostico: errores de UART (ruido/trama/desborde) desde el arranque */
 
 /* Tick hasta el cual el modulo pidio no intentar transmitir (join ni
  * uplink) -- ver "Restricted_Wait_<ms>_ms" en RAK3172_ProcesarLinea().
@@ -169,8 +170,19 @@ void RAK3172_ErrorCallback(UART_HandleTypeDef *huart)
         return;
     }
 
-    /* (El printf de diagnostico con HAL ErrorCode se quito 2026-10-02: ya
-     * funciona bien. Si vuelven los TIMEOUT repetidos, reponerlo aqui.) */
+    s_erroresUart++;
+
+    /* Errores leves (ruido/trama/paridad) -- mismo arreglo que
+     * GPS_ErrorCallback() (2026-10-05): HAL avisa pero NO detiene el DMA
+     * (RxState sigue ocupado). Antes se descartaba la linea a medio armar y
+     * se leia RDR con el DMA andando (le robaba un byte) -- con el motor
+     * encendido en campo (2026-10-07) se perdian asi el OK de AT+JOIN y el
+     * +EVT:JOINED. Solo con errores graves (desborde, error de DMA) HAL
+     * detiene la recepcion: ahi si hay que limpiar y rearrancar. */
+    if (s_huart->RxState != HAL_UART_STATE_READY) {
+        return;
+    }
+
     __HAL_UART_CLEAR_OREFLAG(s_huart);
     __HAL_UART_CLEAR_FEFLAG(s_huart);
     __HAL_UART_CLEAR_NEFLAG(s_huart);
@@ -271,6 +283,11 @@ bool RAK3172_GetUltimaRespuesta(char *destino, uint32_t tamDestino)
 bool RAK3172_EstaUnido(void)
 {
     return s_estaUnido;
+}
+
+uint32_t RAK3172_GetErroresUart(void)
+{
+    return s_erroresUart;
 }
 
 bool RAK3172_EstaRestringido(void)
@@ -450,9 +467,16 @@ static void RAK3172_EncolarLinea(const char *linea, uint16_t len)
 
 static void RAK3172_ProcesarLinea(const char *linea)
 {
-    /* (El printf "RAK3172 RX crudo" de cada linea se quito 2026-10-02: era
-     * diagnostico de unos TIMEOUT repetidos y ya funciona bien. Si vuelven,
-     * reponerlo aqui.) */
+    /* Diagnostico repuesto 2026-10-07 (en campo AT+JOIN termina en TIMEOUT
+     * y nunca se ve +EVT:JOINED). Quitar cuando se confirme el arreglo. */
+    printf("RAK3172 RX crudo: '%s'\r\n", linea);
+
+    /* Respuesta de AT+NJS=? (estado de join, ver main.c): si el modulo ya
+     * esta unido pero el +EVT:JOINED se perdio (ruido en la linea), esto
+     * lo recupera sin pedir otro join. */
+    if (strcmp(linea, "AT+NJS=1") == 0) {
+        s_estaUnido = true;
+    }
 
     if (strcmp(linea, "+EVT:JOINED") == 0) {
         s_estaUnido = true;

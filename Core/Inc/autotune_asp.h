@@ -20,7 +20,7 @@
  *
  * Secuencia:
  *   1. LLENADO   : presion local estable en PRESION_OBJETIVO_LOCAL (PID#2).
- *   2. BASE      : 3 reportes seguidos del aspersor dentro de 1 PSI -> R0.
+ *   2. BASE      : 1 reporte nuevo del aspersor -> R0 (era 3; 2026-10-08).
  *   3. ESCALON   : objetivo local +5 PSI (-5 si no cabe bajo PRESION_MAX), al
  *                  ritmo de llenado; se espera a que el aspersor se estabilice.
  *                  K = cambio aspersor / cambio local; L = retardo entre que el

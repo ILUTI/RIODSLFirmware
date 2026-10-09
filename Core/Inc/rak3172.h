@@ -106,6 +106,9 @@ bool RAK3172_EstaUnido(void);
  */
 bool RAK3172_EstaRestringido(void);
 
+/** Diagnostico: errores de UART (ruido/trama/desborde) desde el arranque. */
+uint32_t RAK3172_GetErroresUart(void);
+
 /**
  * Inicia el proceso de join a la red LoRaWAN, usando el comando
  * recomendado por RAK (join=1, auto=0, intervalo=10s, 8 intentos).

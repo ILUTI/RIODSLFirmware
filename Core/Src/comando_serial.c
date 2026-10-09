@@ -168,6 +168,10 @@ static uint32_t          s_atTickInicio;
  * rechaza -- en particular AT+FACTORY, AT+NWM, AT+BOOT, AT+JOIN, etc. */
 static const char *const AT_ESCRITURAS_PERMITIDAS[] = {
     "AT+NJM=", "AT+BAND=", "AT+MASK=", "AT+CLASS=",
+    /* 2026-10-07 (campo): lejos del gateway el ADR deja el RAK en DR2, donde
+     * AU915 (dwell time) solo acepta 11 bytes -- el LIVE (32) y el reporte
+     * (28) salian con AT_PARAM_ERROR. Permite fijar AT+ADR=0 + AT+DR=3. */
+    "AT+DR=", "AT+ADR=",
 };
 
 /* Escrituras de PROVISIONAMIENTO de identidad LoRaWAN (DevEUI/JoinEUI/
@@ -225,7 +229,7 @@ static void ProcesarLinea(char *linea)
                 printf("[AT] DEVEUI/APPEUI/APPKEY solo con MODO=4 (CALIBRACION) y el motor detenido\r\n");
                 return;
             }
-            printf("[AT] no permitido -- solo consultas 'AT+XXX=?', AT+NJM/BAND/MASK/CLASS=<v>, AT+DEVEUI/APPEUI/APPKEY=<v> (MODO=4, motor detenido) y ATZ\r\n");
+            printf("[AT] no permitido -- solo consultas 'AT+XXX=?', AT+NJM/BAND/MASK/CLASS/DR/ADR=<v>, AT+DEVEUI/APPEUI/APPKEY=<v> (MODO=4, motor detenido) y ATZ\r\n");
         } else if (s_atPorEnviar || s_atEsperando) {
             printf("[AT] ocupado, espera la respuesta anterior\r\n");
         } else {

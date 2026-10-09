@@ -55,10 +55,10 @@ static volatile bool  s_tieneFix = false;
 static uint32_t s_ultimoReporteMs = 0;
 static bool     s_huboReporte = false;
 
-/* Re-armado del auto-reporte (ver GPS_REARMAR_* en gps.h). */
+/* Reinicio del GNSS (ver GPS_REARMAR_* en gps.h). */
 static uint32_t s_inicioMs = 0;        /* referencia mientras nunca hubo reporte */
-static uint32_t s_rearmeMs = 0;        /* ultimo paso del re-armado */
-static bool     s_rearmeEnCurso = false; /* ya se mando AT+CGPS=1, falta AT+CGPSINFO=10 */
+static uint32_t s_rearmeMs = 0;        /* ultimo paso del reinicio */
+static uint8_t  s_reinicioPaso = 0U;   /* 0 = nada, 1 = mandado AT+CGPS=0, 2 = mandado AT+CGPS=1 */
 static float           s_latitud = 0.0f;
 static float           s_longitud = 0.0f;
 
@@ -76,7 +76,7 @@ static uint8_t  s_fhSegundo = 0;
 
 /* Cuenta reportes "+CGPSINFO:" vacíos (sin fix) SEGUIDOS -- se reinicia
  * a 0 en cuanto llega un fix real. Al llegar a
- * GPS_REPORTES_VACIOS_ANTES_DE_REENVIAR, se reenvía "AT+CGPS=1" (ver
+ * GPS_REPORTES_VACIOS_ANTES_DE_REINICIAR, se reinicia el GNSS (ver
  * GPS_ProcesarCGPSInfo()). */
 static uint16_t s_reportesVaciosSeguidos = 0;
 
@@ -87,6 +87,7 @@ static void GPS_ProcesarSentencia(const char *linea);
 static void GPS_ProcesarCGPSInfo(char *linea);
 static uint8_t GPS_DividirCampos(char *sentencia, char *campos[], uint8_t maxCampos);
 static float GPS_NmeaACoordenadaDecimal(const char *campo, uint8_t digitosGrados);
+static void GPS_IniciarReinicioGnss(void);
 
 /* true si llego un "+CGPSINFO:" hace menos de GPS_REPORTE_VIGENCIA_MS. Sin
  * esto, si el modulo dejaba de hablar (colgado, cable, reinicio propio), el
@@ -129,7 +130,7 @@ void GPS_Init(UART_HandleTypeDef *huart)
     s_huboReporte = false;
     s_inicioMs = HAL_GetTick();
     s_rearmeMs = s_inicioMs;
-    s_rearmeEnCurso = false;
+    s_reinicioPaso = 0U;
 
     /* Igual que en RAK3172_Init(): limpiar flags de error y vaciar el
      * registro de datos antes de arrancar, por si quedó algo colgado
@@ -222,16 +223,33 @@ void GPS_ErrorCallback(UART_HandleTypeDef *huart)
 
     /* (El printf de diagnostico con HAL ErrorCode se quito 2026-10-02, igual
      * que en RAK3172_ErrorCallback(). Si hace falta, reponerlo aqui.) */
+
+    /* Descartar la sentencia a medio construir -- pudo quedar corrupta
+     * o incompleta por el mismo error que disparo este callback (un digito
+     * de lat/lon cambiado por ruido quedaria guardado como "ultima
+     * posicion conocida"). El resto de esa linea llega sin el prefijo
+     * "+CGPSINFO:" y se ignora. */
+    s_lineaLen = 0;
+
+    /* Errores leves (ruido/trama/paridad): HAL avisa pero NO detiene el DMA,
+     * que sigue escribiendo donde iba (RxState sigue ocupado). Antes se
+     * volvia s_ultimaPosLeida a 0 y se intentaba rearrancar igual -- el
+     * rearranque fallaba en silencio (HAL_BUSY) y el lector quedaba
+     * desfasado del DMA, releyendo datos viejos (2026-10-05). Solo con
+     * errores graves (desborde, error de DMA) HAL detiene la recepcion y
+     * deja RxState en READY: ahi si hay que rearrancar. Las banderas de
+     * los errores leves ya las limpio HAL, y leer RDR con el DMA andando
+     * le robaria un byte -- por eso va despues de este chequeo. */
+    if (s_huart->RxState != HAL_UART_STATE_READY) {
+        return;
+    }
+
     __HAL_UART_CLEAR_OREFLAG(s_huart);
     __HAL_UART_CLEAR_FEFLAG(s_huart);
     __HAL_UART_CLEAR_NEFLAG(s_huart);
     __HAL_UART_CLEAR_PEFLAG(s_huart);
     volatile uint32_t dummy = s_huart->Instance->RDR;
     (void)dummy;
-
-    /* Descartar la sentencia a medio construir -- pudo quedar corrupta
-     * o incompleta por el mismo error que disparo este callback. */
-    s_lineaLen = 0;
 
     /* Rearrancar el DMA en modo Circular reinicia su puntero interno
      * de escritura a 0 -- s_ultimaPosLeida debe volver a 0 junto con
@@ -254,28 +272,45 @@ void GPS_Update(void)
         GPS_ProcesarSentencia(linea);
     }
 
-    /* Re-armado si el modulo se quedo mudo: el reintento por "10 reportes
-     * vacios" no cubre el caso en que NO llega ningun reporte (el SIM7600X
-     * se reinicio solo y olvido AT+CGPSINFO=10), porque ese contador solo
-     * sube con reportes vacios. Dos pasos sin bloquear el loop. */
+    /* Reinicio del GNSS en 3 pasos sin bloquear el loop (AT+CGPS=0 ya se
+     * mando en GPS_IniciarReinicioGnss()): AT+CGPS=1, despues AT+CGPSINFO=10.
+     * Si no hay reinicio en curso, se dispara si el modulo se quedo mudo: el
+     * de "reportes vacios" no cubre el caso en que NO llega ningun reporte
+     * (el SIM7600X se reinicio solo y olvido AT+CGPSINFO=10), porque ese
+     * contador solo sube con reportes vacios. */
     uint32_t ahora = HAL_GetTick();
-    if (s_rearmeEnCurso) {
+    if (s_reinicioPaso != 0U) {
         if (ahora - s_rearmeMs >= GPS_REARMAR_PAUSA_MS) {
-            GPS_EnviarComandoAT("AT+CGPSINFO=10");
-            s_rearmeEnCurso = false;
+            if (s_reinicioPaso == 1U) {
+                GPS_EnviarComandoAT("AT+CGPS=1");
+                s_reinicioPaso = 2U;
+            } else {
+                GPS_EnviarComandoAT("AT+CGPSINFO=10");
+                s_reinicioPaso = 0U;
+            }
             s_rearmeMs = ahora;
         }
     } else {
         uint32_t ref = s_huboReporte ? s_ultimoReporteMs : s_inicioMs;
         if (ahora - ref >= GPS_REARMAR_SIN_REPORTES_MS
                 && ahora - s_rearmeMs >= GPS_REARMAR_SIN_REPORTES_MS) {
-            printf("GPS: sin reportes hace %lus -- re-armando (AT+CGPS=1 + AT+CGPSINFO=10)\r\n",
+            printf("GPS: sin reportes hace %lus -- reiniciando GNSS\r\n",
                    (unsigned long)((ahora - ref) / 1000UL));
-            GPS_EnviarComandoAT("AT+CGPS=1");
-            s_rearmeEnCurso = true;
-            s_rearmeMs = ahora;
+            GPS_IniciarReinicioGnss();
         }
     }
+}
+
+/* Paso 1 del reinicio del GNSS: apagarlo. AT+CGPS=1 solo, con el GNSS ya
+ * encendido, contesta ERROR y no hace nada (2026-10-05: en banco el GPS
+ * estuvo yendo y viniendo tras ~2 dias y solo se arreglo al reiniciar el
+ * nodo). Apagar y encender conserva los satelites en la memoria del modulo
+ * (arranque en caliente, fix en segundos). Los pasos 2 y 3 en GPS_Update(). */
+static void GPS_IniciarReinicioGnss(void)
+{
+    GPS_EnviarComandoAT("AT+CGPS=0");
+    s_reinicioPaso = 1U;
+    s_rearmeMs = HAL_GetTick();
 }
 
 bool GPS_EnviarComandoAT(const char *comando)
@@ -400,18 +435,16 @@ static void GPS_ProcesarCGPSInfo(char *linea)
         s_fechaHoraValida = false;
 
         s_reportesVaciosSeguidos++;
-        if (s_reportesVaciosSeguidos >= GPS_REPORTES_VACIOS_ANTES_DE_REENVIAR) {
+        if (s_reportesVaciosSeguidos >= GPS_REPORTES_VACIOS_ANTES_DE_REINICIAR
+                && s_reinicioPaso == 0U) {
             s_reportesVaciosSeguidos = 0;
-            /* No es un problema conocido de timing/USB (ver README 2.6) --
-             * esto es solo para reintentar el encendido del motor GNSS por
-             * si el modulo quedo en un estado raro que un simple AT+CGPS=1
-             * pueda destrabar. Si el modulo esta bien y solo le esta
-             * costando conseguir fix (mal clima, sin vista al cielo), este
-             * reenvio es inofensivo -- AT+CGPS=1 con el GPS ya encendido
-             * solo contesta "ERROR" y sigue igual. */
-            printf("GPS: %u reportes seguidos sin fix -- reenviando AT+CGPS=1\r\n",
-                   (unsigned int)GPS_REPORTES_VACIOS_ANTES_DE_REENVIAR);
-            GPS_EnviarComandoAT("AT+CGPS=1");
+            /* Por si el GNSS quedo en un estado raro tras muchas horas
+             * encendido (ver GPS_IniciarReinicioGnss()). Si solo le esta
+             * costando conseguir fix (mal clima, sin vista al cielo), el
+             * reinicio en caliente no le hace perder lo ya adquirido. */
+            printf("GPS: %u reportes seguidos sin fix -- reiniciando GNSS\r\n",
+                   (unsigned int)GPS_REPORTES_VACIOS_ANTES_DE_REINICIAR);
+            GPS_IniciarReinicioGnss();
         }
         return;
     }

@@ -25,6 +25,31 @@ void PresionPid_Init(void)
     Pi_Init(&s_pid2);
 }
 
+void PresionPid_InitDesdeRpm(float rpmActual)
+{
+    Pi_Init(&s_pid2);
+
+    /* Arranque sin salto (bumpless, 2026-10-07): bug real en campo -- en
+     * MODO=3 con SET_RPM 900 y la bomba dando ~30 PSI, mandar SET_PRESION 32
+     * arrancaba el PID#2 con integral 0, o sea pidiendo RPM_MIN: el motor
+     * caia a ralenti y la presion se iba a ~19 PSI. Precargar el integral
+     * para que base + Ki*integral = rpmActual: el primer calculo sale desde
+     * la RPM real y P+I solo corrige la diferencia de presion. Recortado al
+     * mismo rango del anti-windup [0, RPM_MAX_CARGA - RPM_MIN]. */
+    float ki = CalibFlash_GetPidPsiKi();
+    if (ki <= 0.0f) {
+        return; /* sin termino integral no hay donde precargar */
+    }
+    float correccion = rpmActual - CalibFlash_GetRpmMin();
+    float maxCorreccion = CalibFlash_GetRpmMaxCarga() - CalibFlash_GetRpmMin();
+    if (correccion < 0.0f) {
+        correccion = 0.0f;
+    } else if (correccion > maxCorreccion) {
+        correccion = maxCorreccion;
+    }
+    s_pid2.integral = correccion / ki;
+}
+
 float PresionPid_CalcularSetpointRpm(float setpointPresionPsi, float presionMedidaPsi)
 {
     /* Piso de arranque (feedforward) = RPM_MIN, mismo patron que pid.c

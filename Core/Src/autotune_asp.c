@@ -329,8 +329,10 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
         break;
 
     case ST_BASE:
-        if (nuevoReporte(&v) && remotaEstable(v, &prom)) {
-            s_r0 = prom;
+        /* Base con 1 solo reporte nuevo (2026-10-08, pedido del usuario: con
+         * 3 tardaba ~1:45 min). El MODO 1 ya venia estable. */
+        if (nuevoReporte(&v)) {
+            s_r0 = v;
             s_l0 = psi;
             s_delta = (s_base + AUTOTUNE3_ESCALON_PSI <= s_techo) ? AUTOTUNE3_ESCALON_PSI : -AUTOTUNE3_ESCALON_PSI;
             s_deseado = s_base + s_delta;

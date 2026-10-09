@@ -65,22 +65,25 @@ extern "C" {
 #define GPS_TX_BUFFER_SIZE            64U
 
 /* Cantidad de reportes "+CGPSINFO:" vacíos (sin fix) SEGUIDOS antes de
- * volver a mandar "AT+CGPS=1" -- a un reporte cada 10s (ver
- * AT+CGPSINFO=10 en main.c), 10 seguidos equivalen a ~100s sin fix. */
-#define GPS_REPORTES_VACIOS_ANTES_DE_REENVIAR   10U
+ * reiniciar el GNSS (AT+CGPS=0, AT+CGPS=1, AT+CGPSINFO=10) -- a un reporte
+ * cada 10s, 30 seguidos equivalen a ~5 min sin fix (2026-10-05, antes 10 con
+ * solo AT+CGPS=1, que con el GNSS encendido contesta ERROR y no hace nada).
+ * 5 min y no menos para no cortar un arranque en frio que tarde en enganchar. */
+#define GPS_REPORTES_VACIOS_ANTES_DE_REINICIAR  30U
 
 /* Si no llega NINGUN "+CGPSINFO:" (ni vacio) en este tiempo, el fix se da
  * por vencido (GPS_TieneFix() = false): 3 reportes perdidos a uno cada 10 s. */
 #define GPS_REPORTE_VIGENCIA_MS      30000U
 
 /* Re-armado (2026-10-02): si no llega NINGUN reporte en este tiempo (ej. el
- * SIM7600X se reinicio solo y olvido AT+CGPS=1 / AT+CGPSINFO=10), se le
- * vuelven a mandar las dos ordenes del arranque, separadas por
- * GPS_REARMAR_PAUSA_MS (sin pausa el modulo deja de contestar, ver main.c).
+ * SIM7600X se reinicio solo y olvido AT+CGPS=1 / AT+CGPSINFO=10), se hace el
+ * mismo reinicio del GNSS que con reportes vacios: AT+CGPS=0, AT+CGPS=1 y
+ * AT+CGPSINFO=10, separados por GPS_REARMAR_PAUSA_MS (sin pausa el modulo
+ * deja de contestar, ver main.c; AT+CGPS=0 tarda un poco en apagar el GNSS).
  * Se repite como mucho una vez por GPS_REARMAR_SIN_REPORTES_MS mientras siga
  * mudo. No bloquea: lo maneja GPS_Update(). */
 #define GPS_REARMAR_SIN_REPORTES_MS  60000U
-#define GPS_REARMAR_PAUSA_MS          1500U
+#define GPS_REARMAR_PAUSA_MS          3000U
 
 /* ==================== API PÚBLICA ==================== */
 

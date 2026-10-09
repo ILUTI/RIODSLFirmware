@@ -83,6 +83,16 @@ extern "C" {
 #define PRESIONV_FALLA_BAJA_V         0.2f
 #define PRESIONV_FALLA_ALTA_V         3.0f
 
+/* Tiempo que una falla debe sostenerse antes de declararla (2026-10-08).
+ * Una tanda de 21 muestras dura solo unos ms (una muestra por vuelta
+ * del loop), asi que un transitorio corto (sospecha: arranque/movimiento
+ * del servo) contamina la tanda entera y la saca de rango por un
+ * instante -- en campo eso abortaba CALIB 14 con "sensor_invalido" y
+ * mandaba MODO 1 a ralenti decenas de veces, sin que el log de 1 s lo
+ * llegara a mostrar. Un cable suelto/corto real se sostiene mucho mas
+ * que esto. La recuperacion (volver a valido) sigue siendo inmediata. */
+#define PRESIONV_FALLA_CONFIRMAR_MS   1000U
+
 /* Interruptor de los filtros de ruido posteriores al promedio recortado
  * (limitador de velocidad + EMA, definidos mas abajo). DESACTIVADOS
  * (2026-09-29, a pedido del usuario): se pusieron cuando la lectura no
@@ -90,8 +100,10 @@ extern "C" {
  * el cambio maximo a 0.4 PSI/s (ver README seccion 5). Con 0 la salida
  * es directamente el resultado del promedio recortado. Poner en 1 si
  * vuelve a aparecer ruido significativo en PresionV. El promedio
- * recortado de 21 muestras NO se desactiva. */
-#define PRESIONV_FILTROS_ACTIVOS      0
+ * recortado de 21 muestras NO se desactiva.
+ * REACTIVADOS (2026-10-07, a pedido del usuario): en campo volvio a
+ * aparecer mucho ruido en PresionV. */
+#define PRESIONV_FILTROS_ACTIVOS      1
 
 /* Mismo criterio de suavizado que presion.c/tacometro.c -- se aplica
  * DESPUES del promedio recortado de abajo, no sobre la muestra cruda.
@@ -163,10 +175,18 @@ float PresionV_GetPresionPsi(void);
 /** Voltaje crudo leido en PA4 (diagnostico/depuracion). */
 float PresionV_GetVoltaje(void);
 
-/** true si el ultimo voltaje leido cae dentro de 0.5-2.5V (con margen,
- * ver PRESIONV_FALLA_BAJA_V/ALTA_V). Mientras sea false,
- * PresionV_GetPresionPsi() conserva el ultimo valor filtrado valido. */
+/** false solo si el voltaje lleva fuera de 0.5-2.5V (con margen, ver
+ * PRESIONV_FALLA_BAJA_V/ALTA_V) al menos PRESIONV_FALLA_CONFIRMAR_MS
+ * seguidos; una tanda fuera de rango aislada no lo apaga. Mientras sea
+ * false, PresionV_GetPresionPsi() conserva el ultimo valor filtrado
+ * valido (tambien durante una falla aun no confirmada). */
 bool PresionV_SensorValido(void);
+
+/** Diagnostico de transitorios: devuelve cuantas tandas salieron fuera
+ * de rango y el voltaje minimo/maximo de todas las tandas desde la
+ * llamada anterior, y reinicia esos acumuladores. Pensado para llamarse
+ * una vez por segundo junto al log de estado. */
+void PresionV_TomarDiagnostico(uint16_t *tandasInvalidas, float *vMin, float *vMax);
 
 #ifdef __cplusplus
 }

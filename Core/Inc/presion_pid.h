@@ -41,6 +41,14 @@ extern "C" {
 void PresionPid_Init(void);
 
 /**
+ * Como PresionPid_Init(), pero precarga el integral para que el primer
+ * setpoint salga en rpmActual en vez de RPM_MIN (arranque sin salto). Para
+ * MODO=3 al pasar de SET_RPM a SET_PRESION con el motor ya acelerado
+ * (bug de campo 2026-10-07: el motor caia a ralenti).
+ */
+void PresionPid_InitDesdeRpm(float rpmActual);
+
+/**
  * Calcula el setpoint de RPM para este ciclo, ya recortado a
  * [0, RPM_MAX_CARGA] (2026-10-02, antes RPM_MAX). El paso de integracion
  * se calcula por tiempo real transcurrido (HAL_GetTick()).
