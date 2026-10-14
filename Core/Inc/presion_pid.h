@@ -32,6 +32,16 @@
 extern "C" {
 #endif
 
+/* Tope de velocidad de SUBIDA del objetivo de presion local (2026-10-12,
+ * usuario): nunca sube mas rapido que esto, aunque TIEMPO_LLENADO_S sea 0 o
+ * pida algo mas rapido. Sale de la subida 18 -> 35 PSI con PID#2 1.72/0.39
+ * que le gusta al usuario (pico ~0.39 PSI/s; 18 -> 45 llegaba a ~0.62 y se
+ * sentia brusco) y queda debajo del limite de 0.4 PSI/s de la lectura
+ * filtrada, asi que el PID siempre ve la presion real. Lo usan MODO=1,
+ * SET_PRESION (MODO=3), la subida de MODO=2 (main.c) y la subida de CALIB
+ * 9/14 (autotune_psi.c, desde 2026-10-13). */
+#define PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S       0.35f
+
 /**
  * Resetea el estado interno (integral, ancla de tiempo). Llamar en el
  * flanco de entrada a la cascada (presionLocalActivoAhora en main.c), mismo

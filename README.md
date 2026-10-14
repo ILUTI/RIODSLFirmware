@@ -419,6 +419,14 @@ Valores fijos (2026-10-01, ya no son parámetros): `TIMEOUT_SIN_COMANDO_S` =
 360 s, `HISTERESIS_MODO_S` = 30 s, rampa de bajada = 10 RPM/s. Sus getters
 siguen existiendo y devuelven la constante, así que `main.c` no cambió.
 
+**Valores por defecto de los PID (2026-10-13):** PID#1 `0.047 / 0.11` y
+PID#2 `1.72 / 0.39`, los validados en campo (antes eran `1.0 / 0.0` y
+`0 / 0`). PID#3 sigue en `0 / 0`: depende de cada aspersor y se saca con
+`CALIB=12`. Los defaults solo se usan si la página de calibración no tiene
+el magic (equipo nuevo, borrado total del chip o cambio de layout), así que
+cambiarlos **no borra** lo guardado. Programar sin "Full chip erase" para
+conservar la calibración.
+
 Candados: `MODO=4` (`SET_RATIO`, `SET_RATIO_AUTO`, `RPM_MAX`, `RPM_MIN`,
 `RPM_MAX_CARGA`, `PRESION_MAX`); `MODO=4` y `CALIB=0` (las 6 ganancias
 PID); `CALIB=1/2` (`SERVO_PULSO_MIN/MAX`, que en esa sesión quedan en RAM y
@@ -434,9 +442,9 @@ se puede cambiar con el motor operando:
 | Categoría | Se permite con el motor operando | Parámetros |
 |---|---|---|
 | CALIBRACION | Sí por categoría; cada uno tiene su candado propio (ver arriba) | `SET_RATIO`, `SET_RATIO_AUTO`, `ALPHA`, `PID_RPM_KP/KI`, `PID_ASP_KP/KI`, `PID_PSI_KP/KI`, `CALIB` (rechaza `1`/`2` con el motor operando), `MODO` (reglas de `modo_fsm.c`) |
-| PROCESO | Sí, siempre (es su función) | `SET_RPM`, `SET_PRESION`, `PRESION_REMOTO`, `PRESION_OBJETIVO_LOCAL`, `PRESION_OBJETIVO_REMOTO`, `TIEMPO_LLENADO_S` |
+| PROCESO | Sí, siempre (es su función) | `SET_RPM`, `SET_PRESION`, `PRESION_REMOTO`, `PRESION_OBJETIVO_LOCAL` (solo `MODO=4`, 2026-10-12), `PRESION_OBJETIVO_REMOTO`, `TIEMPO_LLENADO_S`, `PRESION_MAX` (desde 2026-10-13; sigue pidiendo `MODO=4`) |
 | COMANDO | Evaluado aparte (byte `0xA5`) | `REPORTAR_PARAMETROS`, `FORZAR_REPORTE`, `RESET_REMOTO` |
-| CONFIGURACION | **No** — se rechaza | `RPM_MAX`, `RPM_MIN`, `RPM_MAX_CARGA`, `PRESION_MAX`, `SERVO_PULSO_MIN/MAX`, `INTERVALO_ENVIO_*`, y cualquier ID desconocido |
+| CONFIGURACION | **No** — se rechaza | `RPM_MAX`, `RPM_MIN`, `RPM_MAX_CARGA`, `SERVO_PULSO_MIN/MAX`, `INTERVALO_ENVIO_*`, y cualquier ID desconocido |
 
 **`RESTAURAR_DEFAULTS` eliminado (2026-10-01):** nunca se usó (y tenía un
 bug: respondía `OK` sin restaurar nada). Su ID 19 pasó a ser
@@ -951,16 +959,16 @@ GIO manda los parámetros por **nombre**, así que no se entera del cambio.
 | 2 | 13 | `CALIB` | 0–14 | 1B | Calibración | ver sección 4.4 / hoja CALIB | ≠0 exige `MODO=4` (salvo `12`, que también arranca desde `MODO=1`); `1`/`2` exigen el motor detenido (`REJECTED_ENGINE_RUNNING`); `3`–`14` solo desde `CALIB=0`. Entrar a cualquier ≠0 limpia `SET_RPM`. Solo RAM, el arranque lo deja en `0` |
 | | | **Proceso** (se aceptan con el motor operando) | | | | | |
 | 3 | 3 | `SET_RPM` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM. Setpoint directo; limpia `SET_PRESION`. Sin rango propio (el control lo recorta a `RPM_MIN`/`RPM_MAX_CARGA`) |
-| 4 | 31 | `SET_PRESION` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM, `< PRESION_MAX`. Arma la cascada de `MODO=1` sin rampa; limpia `SET_RPM`. Sección 4.3.1 |
-| 5 | 23 | `PRESION_OBJETIVO_LOCAL` | x10 | uint16 | Proceso | — | (0, `PRESION_MAX`). Objetivo del lazo de presión de `MODO=1` |
+| 4 | 31 | `SET_PRESION` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM, `< PRESION_MAX`. Arma la cascada de `MODO=1` sin la rampa de `TIEMPO_LLENADO_S`, pero desde 2026-10-12 el objetivo sube como máximo a 0.35 PSI/s (`PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S`) y baja directo; limpia `SET_RPM`. Sección 4.3.1 |
+| 5 | 23 | `PRESION_OBJETIVO_LOCAL` | x10 | uint16 | Proceso | `MODO=4` | (0, `PRESION_MAX`). Objetivo del lazo de presión de `MODO=1`. Solo en `MODO=4` (2026-10-12): la rampa de llenado arranca al entrar a `MODO=1`, así que cambiarlo en `MODO=1/2` saltaba directo sin rampa. Se acepta con el motor andando |
 | 6 | 30 | `PRESION_OBJETIVO_REMOTO` | x10 | uint16 | Proceso | — | [0, 500]. Setpoint del PID de `MODO=2`; `0` = sin configurar (`MODO=2` se rechaza con `7`) |
 | 7 | 17 | `PRESION_REMOTO` | x10 | uint16 | Proceso | — | Solo RAM. Lectura que manda el aspersor; refresca el watchdog de `TIMEOUT_SIN_COMANDO_S` (fijo, 360 s) |
-| 8 | 8 | `TIEMPO_LLENADO_S` | directo (s) | uint16 | Proceso | — | `0` (sin rampa) o ≥ 60 s. Segundos para llenar la tubería de 0 PSI a `PRESION_OBJETIVO_LOCAL`. La velocidad de la rampa de `MODO=1/2` se calcula al usarla (`objetivo / segundos`), así que cambiar el objetivo después la ajusta sola. También lo usan `CALIB=9/14`. El ACK devuelve los segundos. (Hasta 2026-10-01 el 8 era `TASA_LLENADO_PSI_S`, y antes `PID_KD`; el mínimo de 60 s rechaza un valor viejo de PSI/s.) |
+| 8 | 8 | `TIEMPO_LLENADO_S` | directo (s) | uint16 | Proceso | — | `0` o ≥ 60 s. Segundos para llenar la tubería de 0 PSI a `PRESION_OBJETIVO_LOCAL`. La velocidad de la rampa de `MODO=1/2` se calcula al usarla (`objetivo / segundos`), así que cambiar el objetivo después la ajusta sola. En `MODO=1` (2026-10-12) la rampa nunca sube más rápido que 0.35 PSI/s (`PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S`): con `0`, o con un tiempo que pida más rápido, se usa ese tope. **Desde 2026-10-13, en `MODO=1` el tiempo es lo que tarda la rampa desde la presión con la que se entra hasta el objetivo** (ej. 18 → 35 PSI con 600 s dura 600 s; antes eran ~290 s porque contaba desde 0 PSI); la presión queda a 0.5 PSI del objetivo ~1–1.5 min después (lo que el PID#2 va atrás de la rampa). La bajada de `MODO=2` y los `CALIB` siguen usando `objetivo / segundos` (la subida de `CALIB=9/14`, desde 2026-10-13, también con el tope de 0.35 PSI/s: si el tiempo pide más rápido se alarga, y el `llenado_s` del log muestra el tiempo efectivo). La subida de `MODO=2` usa solo el tope de 0.35 PSI/s. También lo usan `CALIB=9/14`. El ACK devuelve los segundos. (Hasta 2026-10-01 el 8 era `TASA_LLENADO_PSI_S`, y antes `PID_KD`; el mínimo de 60 s rechaza un valor viejo de PSI/s.) |
 | | | **Configuración** (solo con el motor detenido) | | | | | |
 | 9 | 5 | `RPM_MIN` | x10 | uint16 | Configuración | `MODO=4` | [0, `RPM_MAX`). Ralentí. `CALIB=8` lo calcula solo |
 | 10 | 4 | `RPM_MAX` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, 6000]. Techo MECÁNICO del motor, fijo por modelo |
 | 11 | 32 | `RPM_MAX_CARGA` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, `RPM_MAX`]. Techo con carga (hidráulico) de la instalación |
-| 12 | 34 | `PRESION_MAX` | x10 | uint16 | Configuración | `MODO=4` | (0, 500] y mayor que `PRESION_OBJETIVO_LOCAL` y `SET_PRESION`. Guarda dura: si se supera, ralentí + alerta `5` (se libera al 90 %). Exenta en `MODO=0` |
+| 12 | 34 | `PRESION_MAX` | x10 | uint16 | Configuración (desde 2026-10-13 se acepta **también con el motor encendido**) | `MODO=4` | (0, 500] y mayor que `PRESION_OBJETIVO_LOCAL` y `SET_PRESION`. Guarda dura: si se supera, ralentí + alerta `5` (se libera al 90 %). Exenta en `MODO=0`. Desde 2026-10-12 también salta si la lectura rápida (promedio de 0.5 s sin el limitador de 0.4 PSI/s del filtro, columna `Rapida` del log) la pasa 1 s seguido |
 | 13 | 9 | `SERVO_PULSO_MIN` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | [500, `SERVO_PULSO_MAX`). En sesión 1/2 queda en RAM y se guarda al salir. `CALIB=4` lo calcula solo |
 | 14 | 10 | `SERVO_PULSO_MAX` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | (`SERVO_PULSO_MIN`, 2500] |
 | 15 | 14 | `INTERVALO_ENVIO_OPERATIVO_S` | directo (s) | uint16 | Configuración | — | 5–3600, default 30. Cada cuánto sale el uplink LIVE con el motor encendido (estado `ENCENDIDO`/`ACTIVO`). Conectado 2026-10-01 |
@@ -1270,12 +1278,34 @@ PSI aspersor --PID#3--> objetivo local --PID#2--> RPM --PID#1--> servo
   en PSI** (positivo o negativo) que se suma a la base. Es evento-driven: solo
   recalcula con cada reporte nuevo del aspersor.
 - **El objetivo local resultante:**
-  - cambia al **ritmo de llenado** (`TASA_LLENADO_PSI_S`) en las dos
-    direcciones, respetando la regla de la tubería;
-  - queda entre 0 y `PRESION_MAX × 0.95`;
+  - **sube como máximo a 0.35 PSI/s** (`PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S`,
+    el mismo tope de `MODO=1`) y **baja al ritmo de llenado** (golpe de
+    ariete). Historia: hasta 2026-10-09 subía con la rampa de llenado; del
+    09 al 13 subió directo; desde 2026-10-13 con el tope, porque en campo
+    (2026-10-12) el salto de entrada de +22.4 PSI aceleró el motor a ~15 RPM/s.
+    Los pasos de cada reporte (≤3 PSI cada ~28 s) casi no cambian. Efecto
+    secundario: mientras el objetivo aplicado va subiendo, la ventana de ±3 PSI
+    del PID#3 recorta el ajuste, así que el salto de entrada rinde menos que
+    cuando era directo;
+  - queda entre 0 y `PRESION_MAX` (hasta 2026-10-12 era `PRESION_MAX × 0.95`;
+    ahora el techo es el 100 %, decisión del usuario: trabajando en el techo,
+    un sobrepaso chico dispara la guarda y el motor va a ralentí hasta que la
+    presión baje al 90 %);
   - **`PRESION_OBJETIVO_LOCAL` nunca se modifica.**
-- **Anti-windup contra la rampa:** el PID#3 nunca pide más de ±1 PSI por
-  delante del objetivo que la rampa ya alcanzó. Su integral se recorta a ese
+- **Salto inicial (feedforward, 2026-10-09):** al entrar a MODO=2 (si el
+  último reporte del aspersor tiene menos de 5 min) y cada vez que cambia
+  `PRESION_OBJETIVO_REMOTO`, el ajuste salta de una vez a
+  **0.8 × (cambio pedido en el aspersor) / K**, sin esperar reportes. K es la
+  que midió CALIB 12 (se guarda junto con `PID_ASP_KI`; 1.0 si nunca se midió).
+  El 0.8 lo deja corto a propósito (K baja con el caudal: ~0.97 cerca de la
+  base, ~0.8 a 55 PSI en campo) y el integral completa. Log:
+  `MODO_REMOTO,SALTO,motivo=entrada|objetivo,...`. Solo si hay `PID_ASP_KI/KP`.
+  La K no es parámetro de downlink: vive en un hueco reservado de la flash
+  (con etiqueta), así que agregarla no cambió el magic ni borró calibraciones.
+- **Anti-windup contra la rampa:** el PID#3 nunca pide más de **±3 PSI** por
+  delante del objetivo que la rampa ya alcanzó (era ±1 hasta el 2026-10-09:
+  subía exactamente +1 PSI por reporte y MODO 2 tardaba ~8 min en llegar;
+  ahora hasta +3 por reporte). Su integral se recorta a ese
   límite; no se congela, porque congelarlo trababa el lazo. Sin esto, cuando
   la rampa frena un cambio grande el integral se carga y la presión se pasa
   al llegar. En la simulación, con las **mismas ganancias** tras alargar o
@@ -2658,6 +2688,97 @@ Ideas ya conversadas; se implementan cuando el hardware esté definido.
       en ese caso las direcciones de las páginas de calibración/horómetro
       (`CALIB_FLASH_ADDRESS`, `HOROMETRO_FLASH_ADDRESS`) y el `.ld`.
 
+### 8.2 Bitácora de pruebas de campo (2026-10-09 → 2026-10-13)
+
+Resumen de lo que ya corrió en el equipo real (motobomba + aspersor). El
+detalle de cada cambio está en su sección; aquí solo qué se probó, qué dio y
+qué quedó pendiente. Logs en `logs/`.
+
+**Estado del equipo al 2026-10-13:** PID#1 `0.047/0.11`, PID#2 `1.72/0.39`
+(se queda como principal), PID#3 `Kp=0 / Ki=0.01198`, `RPM_MIN=729.2`,
+`RPM_MAX_CARGA=1700`, `PRESION_MAX=100` (aprobado por los operadores),
+`TIEMPO_LLENADO_S=0`, filtro de presión activo (no se quita: sin él el ruido
+es de ±5 PSI).
+
+**2026-10-09**
+- **Sensor de presión:** el ruido y los `PRESIONV_GLITCH` del 8 y 9 eran un
+  **falso contacto en el cable del sensor**; arreglado por el usuario, desde
+  entonces sin glitches. La validación por muestra que se probó ese día se
+  revirtió.
+- **`CALIB=12` primera corrida OK** (log `COM3_2026_10_09.12.54.09`, desde
+  `MODO=1`, base local 35, aspersor 28): K=0.966, L=28.8 s →
+  **`PID_ASP_KI=0.01198` guardado**. Validación 28→33 sin sobrepaso ni
+  cruces. Antes (11:37) una corrida dio Ki=0.00653 pero no se guardó
+  (techo local insuficiente + glitches del sensor → `PRESION_MAX` falso).
+- **`MODO=2` a 45** con la ventana de ±3 PSI: llegó en ~8.5 min **sin
+  sobrepaso** (local 55, ~1200 RPM).
+- **`CALIB=14` primera corrida completa** (log `COM3_2026_10_09.15.23.28`):
+  K=0.0457, tau=6.46 s, L=5.70 s → guardó **8.27/1.28** (validación limpia,
+  3 veces más rápida que 1.72/0.39). Probada desde la dashboard en `MODO=1`
+  se sintió demasiado rápida (sin rampa); con 5 min de llenado funcionaba,
+  pero ese rato no quedó en log. A las 16:24 se regresó a **1.72/0.39**. De
+  aquí salió el cambio a tau_c = 8·L (sección 9).
+
+**2026-10-12**
+- **`MODO=1`** con 1.72/0.39 y sin rampa: de ~18 a 35 PSI en 1.5–2 min,
+  sobrepaso ≤0.3 PSI, estable ±0.15. La subida a 45 se sintió **más
+  brusca** (el motor ~100 RPM más alto a la misma presión, lectura pegada al
+  límite de 0.4 PSI/s del filtro) → origen del tope de 0.35 PSI/s.
+- **Aspersor movido a uno mucho más lejano:** la pérdida local→aspersor pasó
+  de ~10 PSI a ~35 PSI (local 75 → aspersor 40). K aspersor/local ≈ 0.5–0.8
+  (era ~0.97). Para 45 en el aspersor hacen falta ~85 PSI locales.
+- **`MODO=2` a 45** (log `COM3_2026_10_12.16.27.46`): el PID#3 subió el
+  objetivo local hasta el techo (76 = 0.95 × 80) y el aspersor se quedó en
+  40 → el **supervisor** hizo el retroceso de 20 s a ralentí
+  (`intento 1/4`), sin salir de `MODO=2` (parecía que bajaba a `MODO=1`). El
+  siguiente reporte contó `intento 2/4` de inmediato porque el ajuste seguía
+  en el techo → corregido con el rearme del supervisor. Funcionó como está
+  diseñado: no era fuga, el objetivo no cabía bajo el techo.
+- `PRESION_MAX=100` por downlink con el motor andando → rechazado
+  (`STATUS=5`) → desde el 13 se acepta con el motor encendido (en `MODO=4`).
+- El evento "se fue el enlace, bajó a `MODO=1` y volvió a `MODO=2`" que vio
+  el usuario no quedó en ningún log (rato sin grabar 14:14–16:27).
+
+**Cambios hechos con esos datos (2026-10-12/13, sin probar todos):** lectura
+rápida para la guarda de `PRESION_MAX`; `PRESION_OBJETIVO_LOCAL` solo en
+`MODO=4`; rearme del supervisor de `MODO=2`; tope de subida 0.35 PSI/s en
+`MODO=1`, `SET_PRESION`, `MODO=2` y la subida de `CALIB=9/14`;
+`TIEMPO_LLENADO_S` en `MODO=1` cuenta desde la presión actual; techo de
+`MODO=2` y `CALIB=12` al 100 % de `PRESION_MAX`; `CALIB=14` con tau_c = 8·L;
+defaults de PID#1/#2 = valores de campo; `PRESION_MAX` aceptado con el motor
+encendido. El supervisor de `MODO=2` sigue terminando en `MODO=0` al 4.º
+intento (decisión del usuario).
+
+**2026-10-13**
+- **Lectura rápida vs. filtrada** (log `COM3_2026_10_13.10.59.01`, ~33 min):
+  estable, diferencia media +0.14 PSI, σ 0.23, máx. 1.5 PSI un instante →
+  sin riesgo de disparo falso. Subiendo va hasta 3.4 PSI adelante; bajando
+  rápido hasta 14.5 PSI abajo (la filtrada se atrasa). Decisión: el PID#2
+  sigue con la filtrada; la rápida solo para la guarda. ✅
+- **`CALIB=12` desde `MODO=1` (base local 45, techo 80 porque
+  `PRESION_MAX` todavía era 80):**
+  el aspersor se quedó en **7 PSI** mientras la local subía 45→50 durante
+  >3 min → cortado a mano con `MODO=0`. Sin resultado; revisar el nodo
+  aspersor / su ubicación antes de repetir.
+- `SET_PRESION 80` → `OUT_OF_RANGE` (debe ser < `PRESION_MAX`, que aún era
+  80); `SET_PRESION 75` OK.
+- **Firmware con `PRESION_MAX` en categoría PROCESO cargado** (11:46):
+  `PRESION_MAX=100` rechazado fuera de `MODO=4` (`APPLY_ERROR`) y aceptado
+  en `MODO=4` ✅. A las 11:57 se corrió `CALIB=2` (hubo un reset `PIN(NRST) BOR` en
+  medio).
+- **`MODO=1` a 50 con el tope de 0.35 PSI/s** (log
+  `COM3_2026_10_13.12.17.40`, 1.72/0.39, `TIEMPO_LLENADO_S=0`): 24→45 PSI a
+  ~0.34 PSI/s, motor ~4–5 RPM/s, a 0.5 PSI de 50 en ~2.2 min, sin sobrepaso
+  (un pico de 50.7 un instante). ✅ El tope se comporta como en la
+  simulación.
+
+**Pendiente de probar en campo:** `CALIB=14` con tau_c = 8·L (debería dar
+Kp ~2–4 / Ki ~0.3–0.6); `CALIB=12` con el aspersor lejano (esperado
+Ki ~0.008–0.015); `MODO=2` con el tope de subida, el rearme del supervisor
+y el techo al 100 %; `TIEMPO_LLENADO_S` > 0 contando desde la presión
+actual; subida de `CALIB=14` con tope; disparo real de la guarda por lectura
+rápida.
+
 ---
 
 ## 9. Sintonización del PID en el motor real (sin MATLAB)
@@ -3408,6 +3529,18 @@ de campo** con el que salió la 1.72/0.39 (log `COM3_2026_09_21`: escalón
 cerrado del objetivo 15→20 PSI con Kp=5, Ki=0, `identify-presion`, SIMC
 Medio). El escalón abierto hacia abajo del diseño del 30/09 se quitó.
 
+**Cambio 2026-10-12 — SIMC con tau_c = 8·L en vez de 2·L ("Medio").** La
+primera corrida completa de `CALIB=14` (2026-10-09, log
+`COM3_2026_10_09.15.23.28`: K=0.0457, tau=6.46 s, L=5.70 s) guardó
+**8.27/1.28**: validó bien, pero respondía ~3 veces más rápido que la
+1.72/0.39 y en saltos grandes se sentía brusco. Con 8·L la misma
+identificación da **2.76/0.43**, que en simulación responde casi igual que
+1.72/0.39 (escalón de +5 PSI, t90: 109 vs 117 s con K=0.0457; 68 vs 72 s con
+K=0.07; 56 vs 59 s con la planta del 21/09) y sin sobrepaso. No salen los
+mismos números porque SIMC fija Ki = Kp/tau y la tau medida varía entre
+corridas; lo que se iguala es el comportamiento. Los reintentos siguen
+duplicando tau_c (16·L, 32·L).
+
 | `CALIB` | Qué corre | Termina con | Log |
 |---|---|---|---|
 | `9` | base + subida pausada por PSI hasta `PRESION_OBJETIVO_LOCAL`; K por 4 tramos anchos → **Kp de prueba** = 0.3/(K·0.7) (G_cl=0.3, fórmula de `sugerir-kp-presion`, con la K del 1er tramo) que queda en RAM | `AUTOTUNE_PID2,CURVA,...,kp_prueba=..` | `PRESION_GANANCIA_CAL,PASO` |
@@ -3550,8 +3683,8 @@ local → presión del aspersor**:
   mientras no está en su objetivo, cada 90 s en su objetivo, y cada 25 min sin
   presión.
 
-**Requisitos:** PID#2 calibrado, `PRESION_OBJETIVO_REMOTO` configurado y el
-aspersor reportando.
+**Requisitos:** PID#2 calibrado y el aspersor reportando.
+`PRESION_OBJETIVO_REMOTO` ya **no** se usa en CALIB 12 (2026-10-09).
 
 **Dos formas de arrancarlo:**
 
@@ -3580,17 +3713,31 @@ aspersor reportando.
    reportes cada 20 s. Eso da **control integral puro**: Kp = 0,
    Ki = 1 / (K × (tau_c + L)), con tau_c = max(2L, 40 s).
 5. **Validación:** vuelve a la base y activa la **triple cascada real** con la
-   candidata (en RAM), persiguiendo `PRESION_OBJETIVO_REMOTO`.
+   candidata (en RAM), persiguiendo un **escalón fijo del aspersor:
+   aspersor_base +5 PSI** (−5 si el cambio local 5/K no cabe bajo el techo),
+   redondeado a entero. Cambiado 2026-10-09: antes perseguía
+   `PRESION_OBJETIVO_REMOTO` (45), que quedaba 21 PSI arriba de la base y
+   fuera del techo local (0.95 × `PRESION_MAX` = 47.5): el aspersor no pasó de
+   38 y la validación iba a durar 20 min para nada.
    - Aprueba cuando los últimos 3 reportes quedan dentro de
-     ±max(1 PSI, 5 %) del objetivo remoto.
-   - El ajuste del PID#3 sube como máximo ~1 PSI por reporte (ventana
-     anti-windup de ±1 PSI), aun con `TIEMPO_LLENADO_S=0`.
+     ±max(1 PSI, 5 %) del objetivo de validación.
+   - El ajuste del PID#3 sube como máximo ~3 PSI por reporte (ventana
+     anti-windup de ±3 PSI, era ±1 hasta el 2026-10-09), aun con
+     `TIEMPO_LLENADO_S=0`.
    - Se rechaza con más de 2 cruces de la banda, o si no asienta en 40
-     reportes o 20 min.
+     reportes o en el **timeout del intento = 3·(tau_c+L) + 3×90 s + 2 min**
+     (candidata 1 de campo: ~15 min; antes 20 min fijos).
+   - **Aborta** (no reintenta) si: el objetivo local queda pegado al techo
+     (o al piso) 3 reportes sin que el aspersor llegue
+     (`objetivo_no_alcanzable_en_el_techo_local`); el aspersor salta más de
+     6 PSI entre dos reportes con la local moviéndose menos de 2 PSI
+     (`salto_del_aspersor_sin_cambio_local`, también en el escalón y la
+     vuelta); o salta `PRESION_MAX_EXCEDIDA` (`presion_max_excedida`, desde
+     main.c — antes seguía validando con el motor en ralentí forzado).
 6. **Resultado:**
    - Aprobada: guarda `PID_ASP_KP=0` y `PID_ASP_KI`.
-   - Rechazada: reintenta con tau_c ×2, hasta 3 intentos. Si ninguna pasa,
-     las ganancias quedan como estaban.
+   - Rechazada: reintenta con tau_c ×2, hasta **2 intentos** (eran 3). Si
+     ninguna pasa, las ganancias quedan como estaban.
    - Si arrancó desde MODO=1, al terminar regresa el objetivo local a la base
      al ritmo de llenado antes de soltar.
    - Resultado por LoRa: código 10 (bien) u 11 (falló).
@@ -3618,7 +3765,8 @@ aspersor reportando.
 - **Resultado: no se guardó nada, `PID_ASP_KP/KI` siguen en 0.** Datos
   útiles: K≈0.9–1.1; el aspersor reporta PSI enteros; `PID_ASP_KI` se guarda
   ×1000 (0.00911 → 0.009); para objetivo remoto 45 con base 25–30 el objetivo
-  local llega a ~39–41 PSI → `PRESION_MAX` debe ser ≥ ~43 (techo 95 %).
+  local llega a ~39–41 PSI → `PRESION_MAX` debe ser ≥ ~43 (techo 95 %; desde
+  2026-10-13 el techo de `CALIB=12` y de `MODO=2` es el 100 % de `PRESION_MAX`).
 - **Siguiente:** repetir con el aspersor reparado y sin ruido. Alternativa:
   `PID_ASP_KP=0`, `PID_ASP_KI=0.009` a mano (`MODO=4`, `CALIB=0`) y probar
   `MODO=2` directo.

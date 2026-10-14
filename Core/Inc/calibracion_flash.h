@@ -66,7 +66,8 @@ extern "C" {
 #define CALIB_ID_RPM_MAX_CARGA                    11U
 /* 12: guarda dura de presión local. Si la presión medida la supera, el
  * setpoint cae a ralentí (histéresis 90 %) y sale la alerta 5. Exenta en
- * MODO=0. */
+ * MODO=0. Excepción del bloque: desde 2026-10-13 se acepta también con el
+ * motor encendido (solo MODO=4), ver k_params en calibracion_flash.c. */
 #define CALIB_ID_PRESION_MAX                      12U
 #define CALIB_ID_SERVO_PULSO_MIN                  13U
 #define CALIB_ID_SERVO_PULSO_MAX                  14U
@@ -241,7 +242,12 @@ bool CalibFlash_SetModo(CalibFlash_Modo_t nuevoModo);       /* solo RAM */
 /** Kp+Ki en una sola escritura de flash (autotunes). */
 bool CalibFlash_SetPidRpmGanancias(float kp, float ki);
 bool CalibFlash_SetPidPsiGanancias(float kp, float ki);
-bool CalibFlash_SetPidAspGanancias(float kp, float ki);
+/** PID#3: Kp, Ki y la K de la planta (PSI aspersor / PSI local) que midio
+ *  CALIB 12, en una sola escritura. kPlanta <= 0 la borra ("sin medir"). */
+bool CalibFlash_SetPidAspGanancias(float kp, float ki, float kPlanta);
+/** K de la planta del PID#3 guardada por CALIB 12; 0 = sin medir. La usa el
+ *  salto inicial de MODO=2 (main.c). No es parametro de downlink. */
+float CalibFlash_GetPidAspKPlanta(void);
 
 /* ==================== NO PERSISTENTES (solo RAM) ==================== */
 

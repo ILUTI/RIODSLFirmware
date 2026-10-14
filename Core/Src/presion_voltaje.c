@@ -21,6 +21,12 @@ static float    s_diagVMax = 0.0f;
 static uint32_t s_ultimaTandaMs = 0;
 static bool     s_primeraTandaProcesada = false;
 
+/* Lectura rapida -- ver PRESIONV_VENTANA_RAPIDA_MS en presion_voltaje.h. */
+static float    s_presionRapidaPsi = 0.0f;
+static float    s_rapidaSuma = 0.0f;
+static uint32_t s_rapidaTandas = 0;
+static uint32_t s_rapidaInicioMs = 0;
+
 /* Buffer del promedio recortado -- ver PRESIONV_MUESTRAS_POR_PROMEDIO/
  * PRESIONV_RECORTE_EXTREMOS en presion_voltaje.h. Cada llamada a
  * PresionV_Update() agrega una cuenta cruda del ADC; cuando el buffer se
@@ -103,6 +109,10 @@ static void ProcesarTanda(void)
             presionInstantanea = 0.0f;
         }
 
+        /* Lectura rapida: se acumula ANTES del limitador. */
+        s_rapidaSuma += presionInstantanea;
+        s_rapidaTandas++;
+
         if (!s_primeraTandaProcesada || !PRESIONV_FILTROS_ACTIVOS) {
             /* Primera tanda desde el arranque -- no hay referencia previa
              * contra la cual limitar, se acepta tal cual (mismo criterio
@@ -122,6 +132,14 @@ static void ProcesarTanda(void)
                                   + ((1.0f - PRESIONV_ALPHA_FILTRO) * s_presionPsiFiltrada);
         }
         s_ultimaTandaMs = ahora;
+    }
+    if ((ahora - s_rapidaInicioMs) >= PRESIONV_VENTANA_RAPIDA_MS) {
+        if (s_rapidaTandas > 0U) {
+            s_presionRapidaPsi = s_rapidaSuma / (float)s_rapidaTandas;
+        }
+        s_rapidaSuma = 0.0f;
+        s_rapidaTandas = 0U;
+        s_rapidaInicioMs = ahora;
     }
     /* Si la tanda salio fuera de rango (falla confirmada o todavia
      * pendiente), se conserva la ultima presion filtrada valida en vez de
@@ -159,6 +177,11 @@ void PresionV_Update(void)
 float PresionV_GetPresionPsi(void)
 {
     return s_presionPsiFiltrada;
+}
+
+float PresionV_GetPresionRapidaPsi(void)
+{
+    return s_presionRapidaPsi;
 }
 
 float PresionV_GetVoltaje(void)

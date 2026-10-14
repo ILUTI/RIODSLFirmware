@@ -30,11 +30,22 @@
 #define AUTOTUNE3_TAU_C_MIN_S           40.0f    /* ~2 intervalos de reporte */
 #define AUTOTUNE3_TAU_C_FACTOR_L         2.0f
 #define AUTOTUNE3_TAU_C_ESCALA           2.0f
-#define AUTOTUNE3_INTENTOS_MAX             3U
+#define AUTOTUNE3_INTENTOS_MAX             2U    /* era 3 (2026-10-09): la 3a candidata (tau_c x4) es tan lenta que en campo no aporta */
 #define AUTOTUNE3_GANANCIA_MAX          30.0f
-#define AUTOTUNE3_TECHO_FRAC             0.95f   /* el objetivo local nunca pasa de este % de PRESION_MAX */
-#define AUTOTUNE3_VAL_TIMEOUT_MS      1200000U   /* 20 min */
+#define AUTOTUNE3_TECHO_FRAC             1.0f    /* el objetivo local nunca pasa de este % de PRESION_MAX. Era 0.95; 1.0 desde 2026-10-13, igual que REMOTO_TECHO_FRAC de MODO 2 (decision del usuario) */
+/* Validacion (2026-10-09): escalon fijo sobre el aspersor en vez de ir hasta
+ * PRESION_OBJETIVO_REMOTO. En campo ese objetivo (45) quedaba 21 PSI arriba
+ * de la base y fuera del techo local (0.95*PRESION_MAX=47.5): el ajuste se
+ * trabo en el techo, el aspersor no paso de 38 y la validacion iba a durar
+ * 20 min para nada. Con un escalon fijo la duracion queda acotada. */
+#define AUTOTUNE3_VAL_ESCALON_PSI        5.0f    /* aspersor_base +5 (o -5 si no cabe) */
+#define AUTOTUNE3_VAL_TAUS               3.0f    /* ~95 % de la subida: 3*(tau_c+L) */
+#define AUTOTUNE3_REPORTE_LENTO_S       90.0f    /* cadencia del aspersor ya en su objetivo */
+#define AUTOTUNE3_VAL_MARGEN_S         120.0f
 #define AUTOTUNE3_VAL_REPORTES_MAX        40U
+#define AUTOTUNE3_TECHO_REPORTES           3U    /* reportes con el objetivo local pegado al techo/piso sin llegar -> abortar */
+#define AUTOTUNE3_SALTO_ASPERSOR_PSI     6.0f    /* salto entre 2 reportes del aspersor... */
+#define AUTOTUNE3_SALTO_LOCAL_PSI        2.0f    /* ...con la presion local casi quieta -> abortar (campo: 38 -> 14) */
 #define AUTOTUNE3_BANDA_MIN_PSI          1.0f    /* con 0.5 el ruido del aspersor contaba como cruces (simulado) */
 #define AUTOTUNE3_BANDA_FRAC             0.05f
 #define AUTOTUNE3_CRUCES_MAX               2U
@@ -81,6 +92,11 @@ static float     s_banda = 0.0f;
 static int8_t    s_lado = 0;
 static uint8_t   s_cruces = 0U;
 static uint8_t   s_nRepVal = 0U;
+static uint8_t   s_nTecho = 0U;
+
+/* Ultimo reporte del aspersor y presion local en ese momento (ver saltoSinCausa). */
+static bool      s_hayPrev = false;
+static float     s_vPrev = 0.0f, s_psiPrev = 0.0f;
 static Autotune_Resultado_t s_pendiente = AUTOTUNE_SIN_RESULTADO;
 static Autotune_Resultado_t s_ultimo = AUTOTUNE_SIN_RESULTADO;
 
@@ -130,6 +146,24 @@ static bool nuevoReporte(float *valor)
     s_ultimoTick = tick;
     *valor = CalibFlash_GetPresionRemoto();
     return true;
+}
+
+/* true si el aspersor salto mucho entre dos reportes sin que la presion
+ * local se moviera: el reporte no es creible (sensor/nodo del aspersor) o
+ * paso algo que la local filtrada todavia no muestra. */
+static bool saltoSinCausa(float v, float psi)
+{
+    bool salto = s_hayPrev
+              && absf(v - s_vPrev) > AUTOTUNE3_SALTO_ASPERSOR_PSI
+              && absf(psi - s_psiPrev) < AUTOTUNE3_SALTO_LOCAL_PSI;
+    if (salto) {
+        printf("AUTOTUNE_PID3,SALTO_ASPERSOR,antes=%.2f,ahora=%.2f,local_antes=%.2f,local_ahora=%.2f\r\n",
+               s_vPrev, v, s_psiPrev, psi);
+    }
+    s_hayPrev = true;
+    s_vPrev = v;
+    s_psiPrev = psi;
+    return salto;
 }
 
 /* Agrega un reporte a la ventana de 3; true cuando los 3 caben en la tolerancia. */
@@ -230,18 +264,37 @@ static void analizarEscalon(uint32_t ahora)
 
 static void empezarValidacion(uint32_t ahora, float rInicio)
 {
-    s_objRem = CalibFlash_GetPresionObjetivoRemoto();
+    /* Escalon fijo sobre el aspersor (ver AUTOTUNE3_VAL_ESCALON_PSI): +5 si
+     * el cambio local que pide (5/K) cabe bajo el techo, si no -5. */
+    float dLocal = AUTOTUNE3_VAL_ESCALON_PSI / s_k;
+    float paso;
+    if (s_base + dLocal <= s_techo) {
+        paso = AUTOTUNE3_VAL_ESCALON_PSI;
+    } else if (s_base - dLocal >= 0.0f) {
+        paso = -AUTOTUNE3_VAL_ESCALON_PSI;
+    } else {
+        abortar("escalon_de_validacion_no_cabe");
+        return;
+    }
+    /* Redondeado a entero: el aspersor reporta PSI enteros. */
+    s_objRem = (float)(int32_t)(rInicio + paso + 0.5f);
     s_banda = s_objRem * AUTOTUNE3_BANDA_FRAC;
     if (s_banda < AUTOTUNE3_BANDA_MIN_PSI) s_banda = AUTOTUNE3_BANDA_MIN_PSI;
     float e = rInicio - s_objRem;
     s_lado = (e > s_banda) ? 1 : ((e < -s_banda) ? -1 : 0);
     s_cruces = 0U;
     s_nRepVal = 0U;
+    s_nTecho = 0U;
     PresionPidRemoto_Init();
     PresionPidRemoto_SetGananciasTemporales(0.0f, s_ki);
-    irA(ST_VALIDAR, ahora, AUTOTUNE3_VAL_TIMEOUT_MS);
-    printf("AUTOTUNE_PID3,VALIDANDO,intento=%u,aspersor_inicio=%.2f,objetivo_remoto=%.2f,ki=%.5f%s\r\n",
-           (unsigned)(s_intento + 1U), rInicio, s_objRem, s_ki,
+    /* Timeout segun la candidata: subida ~95 % + 3 reportes estables a la
+     * cadencia lenta + margen. Candidata 1 de campo (tau_c 113, L 56): ~15 min. */
+    float timeoutS = AUTOTUNE3_VAL_TAUS * (s_tauC + s_l)
+                   + (float)AUTOTUNE3_REPORTES_ESTABLES * AUTOTUNE3_REPORTE_LENTO_S
+                   + AUTOTUNE3_VAL_MARGEN_S;
+    irA(ST_VALIDAR, ahora, (uint32_t)(timeoutS * 1000.0f));
+    printf("AUTOTUNE_PID3,VALIDANDO,intento=%u,aspersor_inicio=%.2f,objetivo_validacion=%.2f,ki=%.5f,timeout_s=%.0f%s\r\n",
+           (unsigned)(s_intento + 1U), rInicio, s_objRem, s_ki, timeoutS,
            (s_lado == 0) ? ",nota=ya_estaba_en_el_objetivo_sin_excitacion" : "");
 }
 
@@ -277,6 +330,11 @@ void AutotuneAsp_Limpiar(void)
     s_estado = ST_ESPERA;
 }
 
+void AutotuneAsp_Abortar(const char *motivo)
+{
+    if (s_estado != ST_ESPERA) abortar(motivo);
+}
+
 Autotune_Resultado_t AutotuneAsp_UltimoResultado(void) { return s_ultimo; }
 bool  AutotuneAsp_CascadaActiva(void) { return s_estado != ST_ESPERA; }
 float AutotuneAsp_ObjetivoLocal(void) { return s_aplicado; }
@@ -294,7 +352,8 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
         if (!PresionV_SensorValido())  { abortar("sensor_invalido"); return; }
         /* El objetivo local aplicado sigue al deseado al ritmo de llenado,
          * en las dos direcciones (regla de la tuberia). */
-        s_aplicado = PresionPidRemoto_ObjetivoAplicado(s_deseado, CalibFlash_GetTasaLlenadoPsiS());
+        s_aplicado = PresionPidRemoto_ObjetivoAplicado(s_deseado, CalibFlash_GetTasaLlenadoPsiS(),
+                                                       CalibFlash_GetTasaLlenadoPsiS());
         if (s_estado != ST_FINALIZANDO && ahora - s_t0Ms >= s_timeoutMs) {
             if (s_estado == ST_VALIDAR) {
                 rechazar("no_asienta", ahora);   /* candidata mas suave, no abortar */
@@ -308,8 +367,8 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
     switch (s_estado) {
     case ST_ESPERA:
         if (!(motorOperando && (modo == CALIB_MODO_CALIBRACION || modo == CALIB_MODO_PRESION_LOCAL))) break;
-        if (CalibFlash_GetPresionObjetivoRemoto() <= 0.0f) { abortar("PRESION_OBJETIVO_REMOTO_sin_configurar"); break; }
         if (CalibFlash_GetPidPsiKp() <= 0.0f) { abortar("pid2_sin_calibrar_correr_CALIB_14_primero"); break; }
+        s_hayPrev = false;
         s_desdeModo1 = (modo == CALIB_MODO_PRESION_LOCAL);
         s_base = CalibFlash_GetPresionObjetivoLocal();
         s_techo = CalibFlash_GetPresionMax() * AUTOTUNE3_TECHO_FRAC;
@@ -317,8 +376,8 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
         PresionPidRemoto_ReiniciarRampa(psi);
         s_aplicado = psi;
         irA(ST_LLENADO, ahora, tiempoParaCambio(s_base - psi));
-        printf("AUTOTUNE_PID3,INICIO_CORRIDA,desde=%s,base_local=%.2f,presion_local=%.2f,objetivo_remoto=%.2f\r\n",
-               s_desdeModo1 ? "MODO1" : "MODO4", s_base, psi, CalibFlash_GetPresionObjetivoRemoto());
+        printf("AUTOTUNE_PID3,INICIO_CORRIDA,desde=%s,base_local=%.2f,presion_local=%.2f,techo_local=%.2f\r\n",
+               s_desdeModo1 ? "MODO1" : "MODO4", s_base, psi, s_techo);
         break;
 
     case ST_LLENADO:
@@ -332,6 +391,7 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
         /* Base con 1 solo reporte nuevo (2026-10-08, pedido del usuario: con
          * 3 tardaba ~1:45 min). El MODO 1 ya venia estable. */
         if (nuevoReporte(&v)) {
+            (void)saltoSinCausa(v, psi);   /* solo fija la referencia */
             s_r0 = v;
             s_l0 = psi;
             s_delta = (s_base + AUTOTUNE3_ESCALON_PSI <= s_techo) ? AUTOTUNE3_ESCALON_PSI : -AUTOTUNE3_ESCALON_PSI;
@@ -359,6 +419,7 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
             s_lf = prom;
         }
         if (nuevoReporte(&v)) {
+            if (saltoSinCausa(v, psi)) { abortar("salto_del_aspersor_sin_cambio_local"); break; }
             if (s_nHist < AUTOTUNE3_HISTORIAL_MAX) {
                 float *h = Autotune_Buffer();
                 h[2U * s_nHist] = tS;
@@ -377,13 +438,17 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
 
     case ST_VOLVER:
         if (!s_localLlego && localLlego(ahora, psi, &prom)) s_localLlego = true;
-        if (nuevoReporte(&v) && s_localLlego && remotaEstable(v, &prom)) {
-            empezarValidacion(ahora, prom);
+        if (nuevoReporte(&v)) {
+            if (saltoSinCausa(v, psi)) { abortar("salto_del_aspersor_sin_cambio_local"); break; }
+            if (s_localLlego && remotaEstable(v, &prom)) {
+                empezarValidacion(ahora, prom);
+            }
         }
         break;
 
     case ST_VALIDAR:
         if (nuevoReporte(&v)) {
+            if (saltoSinCausa(v, psi)) { abortar("salto_del_aspersor_sin_cambio_local"); break; }
             s_nRepVal++;
             float ajuste = PresionPidRemoto_CalcularAjustePsi(s_objRem, v, s_base, s_techo);
             s_deseado = s_base + ajuste;
@@ -394,6 +459,16 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
             printf("AUTOTUNE_PID3,VAL_REPORTE,n=%u,aspersor=%.2f,ajuste=%.2f,objetivo_local=%.2f\r\n",
                    (unsigned)s_nRepVal, v, ajuste, s_deseado);
 
+            /* Objetivo local pegado al techo (o al piso) y el aspersor sin
+             * llegar: una candidata mas suave tampoco llega -> abortar. */
+            bool pegado = (s_deseado >= s_techo - 0.01f && e < -s_banda)
+                       || (s_deseado <= 0.01f && e > s_banda);
+            s_nTecho = pegado ? (uint8_t)(s_nTecho + 1U) : 0U;
+            if (s_nTecho >= AUTOTUNE3_TECHO_REPORTES) {
+                abortar("objetivo_no_alcanzable_en_el_techo_local");
+                break;
+            }
+
             bool dentro = true;
             (void)remotaEstable(v, &prom);
             for (uint8_t i = 0U; i < s_nRep; i++) {
@@ -402,7 +477,7 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
             if (s_cruces > AUTOTUNE3_CRUCES_MAX) {
                 rechazar("oscila", ahora);
             } else if (dentro && s_nRep >= AUTOTUNE3_REPORTES_ESTABLES) {
-                bool okGan = CalibFlash_SetPidAspGanancias(0.0f, s_ki);
+                bool okGan = CalibFlash_SetPidAspGanancias(0.0f, s_ki, s_k);
                 PresionPidRemoto_LimpiarGananciasTemporales();
                 if (!okGan) { abortar("error_al_guardar_en_flash"); break; }
                 printf("AUTOTUNE_PID3,OK,PID_ASP_KP=0.0000,PID_ASP_KI=%.5f,K=%.3f,L=%.1f,intentos=%u\r\n",

@@ -31,9 +31,10 @@
  *
  * El objetivo local que realmente se aplica al PID#2 cambia a ritmo
  * limitado (PRESION_OBJETIVO_LOCAL / TIEMPO_LLENADO_S, ver
- * CalibFlash_GetTasaLlenadoPsiS()), en las dos direcciones -- regla de la
- * tuberia del usuario: la presion nunca cambia mas rapido que el ritmo de
- * llenado que valido el operador (ver PresionPidRemoto_ObjetivoAplicado()).
+ * CalibFlash_GetTasaLlenadoPsiS() y PresionPidRemoto_ObjetivoAplicado()).
+ * En MODO=2, desde 2026-10-09, solo al BAJAR (golpe de ariete): la subida es
+ * directa porque MODO=2 viene de MODO=1 con la tuberia llena. CALIB 12 sigue
+ * con rampa en las dos direcciones (puede arrancar desde MODO=4).
  */
 
 #ifndef PRESION_PID_REMOTO_H
@@ -50,7 +51,7 @@ void PresionPidRemoto_Init(void);
 /**
  * Ajuste (PSI) a sumar a basePsi (PRESION_OBJETIVO_LOCAL). Llamar SOLO con un
  * reporte nuevo del aspersor. Salida = Kp*error + Ki*integral, limitada a que
- * el objetivo local quede en [0, techoPsi] Y a no mas de 1 PSI por delante del
+ * el objetivo local quede en [0, techoPsi] Y a no mas de 3 PSI por delante del
  * objetivo que la rampa ya alcanzo (integrador saturado a esos limites -- ver
  * el .c). Ganancias PID_ASP_KP (PSI local por PSI remoto) y PID_ASP_KI (1/s).
  * Con ambas en 0 (sin calibrar) el ajuste es 0: MODO=2 sostiene la base, como MODO=1.
@@ -64,14 +65,23 @@ void PresionPidRemoto_LimpiarGananciasTemporales(void);
 
 /**
  * Rampa del objetivo local APLICADO: cada llamada lo acerca a
- * 'objetivoDeseadoPsi' como mucho tasaPsiS * (tiempo desde la llamada
- * anterior), en cualquier direccion. Llamar en cada vuelta del loop.
+ * 'objetivoDeseadoPsi' como mucho tasa * (tiempo desde la llamada
+ * anterior), con tasa distinta para subir y para bajar (<= 0 = directo en
+ * ese sentido). Llamar en cada vuelta del loop.
  * PresionPidRemoto_ReiniciarRampa() lo ancla a un valor (tipicamente la
  * presion medida en ese instante) -- al entrar a MODO=2, al volver de un
  * retroceso, al empezar la autosintonia.
  */
 void  PresionPidRemoto_ReiniciarRampa(float valorPsi);
-float PresionPidRemoto_ObjetivoAplicado(float objetivoDeseadoPsi, float tasaPsiS);
+float PresionPidRemoto_ObjetivoAplicado(float objetivoDeseadoPsi, float tasaSubidaPsiS,
+                                        float tasaBajadaPsiS);
+
+/**
+ * Salto (feedforward) de MODO=2: deja el ajuste en 'ajustePsi' cargando el
+ * integral (con el error actual 'errorPsi' para el termino P), y reinicia el
+ * ancla de tiempo. El proximo reporte sigue corrigiendo desde ahi.
+ */
+void  PresionPidRemoto_PrecargarAjuste(float ajustePsi, float errorPsi);
 
 #ifdef __cplusplus
 }

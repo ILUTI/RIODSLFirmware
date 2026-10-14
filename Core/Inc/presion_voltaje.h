@@ -158,6 +158,17 @@ extern "C" {
  * piso, asi que un cambio real nunca lo toca. */
 #define PRESIONV_TASA_MAX_CAMBIO_PSI_S   5.0f
 
+/* Lectura RAPIDA (2026-10-12, pedido del usuario): promedio simple de las
+ * tandas validas de cada ventana de este largo, SIN el limitador ni el EMA
+ * de arriba. Solo la usa la guarda de PRESION_MAX (main.c): el limitador +
+ * EMA dejan cambiar la lectura filtrada a 0.4 PSI/s como maximo, y en campo
+ * (2026-10-12, MODO 2 a 75 PSI) se quedo hasta ~23 PSI atras de la presion
+ * real. Una tanda suelta trae ±5 PSI de ruido electrico (aun con el cable
+ * arreglado); promediar todas las tandas de la ventana lo baja sin agregar
+ * ese limite. NO alimenta a ningun PID -- PresionV_GetPresionPsi() sigue
+ * igual. */
+#define PRESIONV_VENTANA_RAPIDA_MS       500U
+
 /* ==================== API PUBLICA ==================== */
 
 /** Inicializa el modulo: guarda el handle del ADC2 y corre la
@@ -171,6 +182,12 @@ void PresionV_Update(void);
 
 /** Presion filtrada, en PSI. */
 float PresionV_GetPresionPsi(void);
+
+/** Presion rapida, en PSI: promedio de las tandas validas de la ultima
+ * ventana de PRESIONV_VENTANA_RAPIDA_MS, sin limitador ni EMA. Solo para
+ * la guarda de PRESION_MAX. Si una ventana entera sale invalida conserva
+ * el valor anterior. */
+float PresionV_GetPresionRapidaPsi(void);
 
 /** Voltaje crudo leido en PA4 (diagnostico/depuracion). */
 float PresionV_GetVoltaje(void);

@@ -13,8 +13,13 @@
 #include <stdbool.h>
 
 /* Ventana del ajuste alrededor del objetivo que la rampa ya alcanzo (ver
- * PresionPidRemoto_CalcularAjustePsi). */
-#define PRESION_PID_REMOTO_VENTANA_PSI   1.0f
+ * PresionPidRemoto_CalcularAjustePsi). Subida de 1.0 a 3.0 (2026-10-09,
+ * pedido del usuario): con 1.0 el ajuste subia exactamente +1 PSI por
+ * reporte (~28 s) aunque la Ki pedia ~4 -- MODO 2 tardaba ~8 min en ir de
+ * la base al objetivo y la validacion de CALIB 12 media la ventana, no la
+ * Ki. En campo la presion local sigue al objetivo en ~20-30 s, asi que el
+ * sobrepaso que motivo el 1.0 (simulado, con la rampa frenando) no se vio. */
+#define PRESION_PID_REMOTO_VENTANA_PSI   3.0f
 
 /* ==================== ESTADO INTERNO ==================== */
 
@@ -100,21 +105,33 @@ void PresionPidRemoto_ReiniciarRampa(float valorPsi)
     s_ultimaRampaMs = HAL_GetTick();
 }
 
-float PresionPidRemoto_ObjetivoAplicado(float objetivoDeseadoPsi, float tasaPsiS)
+float PresionPidRemoto_ObjetivoAplicado(float objetivoDeseadoPsi, float tasaSubidaPsiS,
+                                        float tasaBajadaPsiS)
 {
     uint32_t ahora = HAL_GetTick();
     float dtS = (ahora - s_ultimaRampaMs) / 1000.0f;
     s_ultimaRampaMs = ahora;
 
-    if (tasaPsiS <= 0.0f) {
-        /* Sin ritmo de llenado (TIEMPO_LLENADO_S = 0, tasa 0): directo, igual que
-         * MODO=1 sin rampa. */
-        s_aplicado = objetivoDeseadoPsi;
-        return s_aplicado;
+    /* Tasa <= 0 en un sentido = directo en ese sentido (TIEMPO_LLENADO_S = 0,
+     * o la subida de MODO=2, que ya viene con la tuberia llena). */
+    if (objetivoDeseadoPsi > s_aplicado) {
+        float paso = tasaSubidaPsiS * dtS;
+        s_aplicado = (tasaSubidaPsiS > 0.0f && objetivoDeseadoPsi > s_aplicado + paso)
+                   ? s_aplicado + paso : objetivoDeseadoPsi;
+    } else {
+        float paso = tasaBajadaPsiS * dtS;
+        s_aplicado = (tasaBajadaPsiS > 0.0f && objetivoDeseadoPsi < s_aplicado - paso)
+                   ? s_aplicado - paso : objetivoDeseadoPsi;
     }
-    float paso = tasaPsiS * dtS;
-    if (objetivoDeseadoPsi > s_aplicado + paso)      s_aplicado += paso;
-    else if (objetivoDeseadoPsi < s_aplicado - paso) s_aplicado -= paso;
-    else                                             s_aplicado = objetivoDeseadoPsi;
     return s_aplicado;
+}
+
+void PresionPidRemoto_PrecargarAjuste(float ajustePsi, float errorPsi)
+{
+    float kp = s_gananciasTemporalesActivas ? s_kpTemporal : CalibFlash_GetPidAspKp();
+    float ki = s_gananciasTemporalesActivas ? s_kiTemporal : CalibFlash_GetPidAspKi();
+    /* El integral queda tal que kp*error + ki*integral = ajuste: el proximo
+     * reporte sigue corrigiendo desde ahi, sin escalon. */
+    if (ki > 0.0f) s_integral = (ajustePsi - kp * errorPsi) / ki;
+    s_ultimoCalculoMs = HAL_GetTick();
 }

@@ -31,10 +31,15 @@
  *                  reporte) -> control INTEGRAL: Kp = 0, Ki = 1/(K*(tau_c+L)),
  *                  tau_c = max(2L, 40 s).
  *   5. VALIDACION: vuelve a la base y activa la triple cascada real con la
- *                  candidata (RAM) buscando PRESION_OBJETIVO_REMOTO; aprueba si
- *                  los ultimos 3 reportes quedan dentro de la banda sin oscilar.
- *   6. Aprobada -> guarda PID_ASP_KP/KI. Si no, tau_c x2 (hasta 3 intentos).
+ *                  candidata (RAM) buscando aspersor_base +5 PSI (-5 si no
+ *                  cabe bajo el techo) -- NO PRESION_OBJETIVO_REMOTO
+ *                  (2026-10-09); aprueba si los ultimos 3 reportes quedan
+ *                  dentro de la banda sin oscilar. Timeout por intento =
+ *                  3*(tau_c+L) + 3 reportes lentos + margen.
+ *   6. Aprobada -> guarda PID_ASP_KP/KI. Si no, tau_c x2 (hasta 2 intentos).
  *      Si ninguna pasa, deja las ganancias como estaban.
+ *   Aborta antes: objetivo local pegado al techo 3 reportes sin llegar,
+ *   salto del aspersor sin cambio local, o PRESION_MAX_EXCEDIDA (main.c).
  */
 
 #ifndef AUTOTUNE_ASP_H
@@ -53,6 +58,9 @@ void AutotuneAsp_Iniciar(void);
 void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo);
 void AutotuneAsp_Limpiar(void);
 Autotune_Resultado_t AutotuneAsp_UltimoResultado(void);
+/** Aborta la corrida en curso (FALLO, CALIB=0) -- p.ej. main.c al forzar
+ *  ralenti por PRESION_MAX_EXCEDIDA. */
+void AutotuneAsp_Abortar(const char *motivo);
 
 /** true mientras la rutina corre (main.c activa la cascada de presion local). */
 bool  AutotuneAsp_CascadaActiva(void);

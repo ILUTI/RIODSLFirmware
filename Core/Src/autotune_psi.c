@@ -85,9 +85,16 @@
 #define AUTOTUNE2_VENTANA_FINAL_S        20.0f
 #define AUTOTUNE2_UMBRAL_MOV_PSI         0.3f    /* mismo piso que identify-presion */
 
-/* SIMC "Medio" (tau_c = 2L), igual que la 1.72/0.39 de campo. L de este lazo
- * es de ~10 s; el piso solo protege de una L mal medida. */
-#define AUTOTUNE2_TAU_C_FACTOR_L         2.0f
+/* tau_c = 8L (2026-10-12, pedido del usuario: que el autotune llegue a algo
+ * equivalente a la 1.72/0.39 validada en campo). Con 2L ("Medio") la corrida
+ * del 2026-10-09 (K=0.0457 tau=6.46 L=5.70) dio 8.27/1.28: valida pero ~3x
+ * mas rapida, brusca en saltos grandes y con poco margen porque K sube con
+ * las RPM. Con 8L esa misma ID da 2.76/0.43, que en simulacion responde casi
+ * igual que 1.72/0.39 (t90 +5 PSI: 109 vs 117 s con K 0.0457, 68 vs 72 s con
+ * K 0.07, 56 vs 59 s con la planta del 09-21) y sin sobrepaso. No da los
+ * mismos NUMEROS: SIMC fija Ki = Kp/tau y la tau medida cambia de corrida a
+ * corrida. El piso solo protege de una L mal medida. */
+#define AUTOTUNE2_TAU_C_FACTOR_L         8.0f
 #define AUTOTUNE2_TAU_C_MIN_S            4.0f
 #define AUTOTUNE2_TAU_C_ESCALA_REINTENTO 2.0f
 #define AUTOTUNE2_INTENTOS_MAX           3U
@@ -494,6 +501,13 @@ void AutotunePsi_Paso(bool motorOperando, bool modoCalibracion)
              * (TIEMPO_LLENADO_S = 0) se usa AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S. */
             if (tiempoLlenadoS <= 0.0f) {
                 tiempoLlenadoS = AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S;
+            }
+            /* Tope de velocidad (2026-10-13, usuario): la subida tampoco pasa
+             * de PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S. Se alarga el tiempo
+             * efectivo, asi el ritmo de RPM de abajo baja en la misma
+             * proporcion (con 60 s y objetivo 45 pedia 0.75 PSI/s, ~16 RPM/s). */
+            if (objetivo / tiempoLlenadoS > PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S) {
+                tiempoLlenadoS = objetivo / PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S;
             }
             float tasaPsiS = objetivo / tiempoLlenadoS;
             if (tasaPsiS <= 0.0f || rpmMaxCarga <= rpmMin) {

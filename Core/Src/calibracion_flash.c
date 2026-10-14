@@ -39,8 +39,13 @@
 #define DEFAULT_RPM_MAX_CARGA             2500.0f  /* = RPM_MAX hasta que se configure el limite hidraulico real de la instalacion */
 #define DEFAULT_PRESION_MAX               100.0f   /* PSI -- conservador hasta configurar el limite real de la tuberia */
 #define DEFAULT_RPM_MIN                   700.0f
-#define DEFAULT_PID_RPM_KP                1.0f
-#define DEFAULT_PID_RPM_KI                0.0f
+/* PID#1 y PID#2 por defecto = los validados en campo (2026-10-13, usuario).
+ * Antes eran 1.0/0.0 (PID#1, ~20x la Kp validada) y 0/0 (PID#2 sin
+ * calibrar). Solo se usan si la pagina de calibracion no tiene el MAGIC
+ * (equipo nuevo, borrado total del chip o cambio de estructura): cambiarlos
+ * no toca lo que ya esta guardado en flash. */
+#define DEFAULT_PID_RPM_KP                0.047f
+#define DEFAULT_PID_RPM_KI                0.11f
 #define DEFAULT_SERVO_PULSO_MIN_US        1000U
 #define DEFAULT_SERVO_PULSO_MAX_US        2000U
 #define DEFAULT_INTERVALO_OPERATIVO_S     30U      /* uplink con el motor encendido */
@@ -50,8 +55,8 @@
 #define DEFAULT_PRESION_OBJETIVO_REMOTO    0.0f    /* sin configurar */
 #define DEFAULT_PID_ASP_KP                 0.0f    /* sin calibrar (MODO=2) */
 #define DEFAULT_PID_ASP_KI                 0.0f
-#define DEFAULT_PID_PSI_KP                 0.0f    /* sin calibrar (MODO=1) */
-#define DEFAULT_PID_PSI_KI                 0.0f
+#define DEFAULT_PID_PSI_KP                 1.72f   /* validados en campo (MODO=1), ver DEFAULT_PID_RPM_KP */
+#define DEFAULT_PID_PSI_KI                 0.39f
 
 /* ==================== VALORES FIJOS ==================== */
 /* Eran parámetros por downlink (TIMEOUT_SIN_COMANDO_S, HISTERESIS_MODO_S y
@@ -61,6 +66,14 @@
 #define FIJO_TIMEOUT_SIN_COMANDO_S          360U   /* 4x el reporte del aspersor en MODO=2 activo (90 s, campo 2026-09-09) */
 #define FIJO_HISTERESIS_MODO_S               30U   /* enlace malo antes de degradar MODO */
 #define FIJO_TASA_MAX_CAMBIO_RPM_LLENADO_S  10.0f  /* rampa de bajada: 2000->700 RPM en ~2 min */
+
+/* pidAspKPlanta se guarda como (etiqueta | K*10000) y no como float: el hueco
+ * que reutiliza puede traer basura de un firmware viejo (antes era
+ * tasaMaxCambioRpmS y el magic no se subio). Sin la etiqueta se toma como
+ * "sin medir". 20 bits alcanzan para K hasta 104. */
+#define K_PLANTA_ETIQUETA        0x4B500000UL
+#define K_PLANTA_ETIQUETA_MASCARA 0xFFF00000UL
+#define K_PLANTA_ESCALA          10000.0f
 
 /* ==================== ESTRUCTURA GUARDADA EN FLASH ==================== */
 /* Debe quedar en múltiplo de 8 bytes (double word). Los campos
@@ -79,7 +92,10 @@ typedef struct {
     float    rpmMin;                   /* RPM_MIN */
     float    pidRpmKp;                 /* PID_RPM_KP */
     float    pidRpmKi;                 /* PID_RPM_KI */
-    uint32_t reservado4;               /* antes tasaMaxCambioRpmS (eliminado 2026-10-01) */
+    uint32_t pidAspKPlanta;            /* K de la planta del PID#3 (PSI aspersor / PSI local) que
+                                        * midio CALIB 12, con etiqueta -- ver K_PLANTA_ETIQUETA.
+                                        * Ocupa el hueco de reservado4 (antes tasaMaxCambioRpmS,
+                                        * 2026-10-01) sin subir el magic (2026-10-09). */
     float    presionObjetivoLocal;     /* PRESION_OBJETIVO_LOCAL */
     uint32_t reservado5;               /* antes tasaMaxCambioRpmLlenadoS (ahora fijo 2026-10-01) */
     uint32_t reservado1;               /* antes ultimaLatitudConocida (eliminada 2026-10-01) */
@@ -205,14 +221,20 @@ static const Param_t k_params[] = {
     { CALIB_ID_CALIB,                         CAT_CAL,  T_U8,      C_NINGUNO,         CAMPO(calib),                1,    1.0f },
     { CALIB_ID_SET_RPM,                       CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
     { CALIB_ID_SET_PRESION,                   CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
-    { CALIB_ID_PRESION_OBJETIVO_LOCAL,        CAT_PROC, T_F_U16,   C_NINGUNO,         CAMPO(presionObjetivoLocal), 1,   10.0f },
+    /* PRESION_OBJETIVO_LOCAL: solo en MODO=4 (2026-10-12, usuario). La rampa
+     * de llenado se ancla al ENTRAR a MODO=1, asi que un cambio en MODO=1/2
+     * saltaba directo al objetivo nuevo, sin rampa. */
+    { CALIB_ID_PRESION_OBJETIVO_LOCAL,        CAT_PROC, T_F_U16,   C_MODO_CAL,        CAMPO(presionObjetivoLocal), 1,   10.0f },
     { CALIB_ID_PRESION_OBJETIVO_REMOTO,       CAT_PROC, T_F_U16,   C_NINGUNO,         CAMPO(presionObjetivoRemoto),1,   10.0f },
     { CALIB_ID_PRESION_REMOTO,                CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
     { CALIB_ID_TIEMPO_LLENADO_S,              CAT_PROC, T_U16,     C_NINGUNO,         CAMPO(tiempoLlenadoS),       1,    1.0f },
     { CALIB_ID_RPM_MIN,                       CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMin),               1,   10.0f },
     { CALIB_ID_RPM_MAX,                       CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMax),               1,   10.0f },
     { CALIB_ID_RPM_MAX_CARGA,                 CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMaxCarga),          1,   10.0f },
-    { CALIB_ID_PRESION_MAX,                   CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(presionMax),           1,   10.0f },
+    /* PRESION_MAX: CAT_PROC desde 2026-10-13 (usuario) -- se acepta con el
+     * motor encendido o apagado; sigue exigiendo MODO=4. Si se baja por
+     * debajo de la presion actual, la guarda corta a ralenti en el acto. */
+    { CALIB_ID_PRESION_MAX,                   CAT_PROC, T_F_U16,   C_MODO_CAL,        CAMPO(presionMax),           1,   10.0f },
     { CALIB_ID_SERVO_PULSO_MIN,               CAT_CONF, T_U16,     C_SESION_SERVO,    CAMPO(servoPulsoMinUs),      1,    1.0f },
     { CALIB_ID_SERVO_PULSO_MAX,               CAT_CONF, T_U16,     C_SESION_SERVO,    CAMPO(servoPulsoMaxUs),      1,    1.0f },
     { CALIB_ID_INTERVALO_ENVIO_OPERATIVO_S,   CAT_CONF, T_U16,     C_NINGUNO,         CAMPO(intervaloOperativoS),  1,    1.0f },
@@ -661,6 +683,13 @@ float    CalibFlash_GetPresionObjetivoRemoto(void)    { return s_datos.presionOb
 float    CalibFlash_GetTasaMaxCambioRpmLlenadoS(void) { return FIJO_TASA_MAX_CAMBIO_RPM_LLENADO_S; }
 float    CalibFlash_GetPidAspKp(void)                 { return s_datos.pidAspKp; }
 float    CalibFlash_GetPidAspKi(void)                 { return s_datos.pidAspKi; }
+
+float CalibFlash_GetPidAspKPlanta(void)
+{
+    uint32_t v = s_datos.pidAspKPlanta;
+    if ((v & K_PLANTA_ETIQUETA_MASCARA) != K_PLANTA_ETIQUETA) return 0.0f;
+    return (float)(v & ~K_PLANTA_ETIQUETA_MASCARA) / K_PLANTA_ESCALA;
+}
 float    CalibFlash_GetPidPsiKp(void)                 { return s_datos.pidPsiKp; }
 float    CalibFlash_GetPidPsiKi(void)                 { return s_datos.pidPsiKi; }
 uint32_t CalibFlash_GetPresionRemotoUltimoTickMs(void) { return s_presionRemotoUltimoTickMs; }
@@ -759,10 +788,13 @@ bool CalibFlash_SetPidPsiGanancias(float kp, float ki)
     return CalibFlash_EscribirEnFlash();
 }
 
-bool CalibFlash_SetPidAspGanancias(float kp, float ki)
+bool CalibFlash_SetPidAspGanancias(float kp, float ki, float kPlanta)
 {
     s_datos.pidAspKp = kp;
     s_datos.pidAspKi = ki;
+    s_datos.pidAspKPlanta = (kPlanta > 0.0f)
+        ? (K_PLANTA_ETIQUETA | ((uint32_t)(kPlanta * K_PLANTA_ESCALA + 0.5f) & ~K_PLANTA_ETIQUETA_MASCARA))
+        : 0U;
     return CalibFlash_EscribirEnFlash();
 }
 
