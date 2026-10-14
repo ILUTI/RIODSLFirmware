@@ -25,14 +25,16 @@
 
 /* SUBIDA al punto de operacion: rampa de SET_RPM en lazo abierto PAUSADA
  * POR PSI REAL al ritmo que el operador define con TIEMPO_LLENADO_S: la
- * presion nunca sube mas rapido que ese ritmo, sin importar la ganancia real
- * de la instalacion. Es una regla de seguridad de la tuberia (decision del
+ * presion nunca sube mas rapido que ese ritmo (objetivo / TIEMPO_LLENADO_S,
+ * desde 0 PSI; MODO=1 cuenta desde la presion de entrada) ni que
+ * PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S, sin importar la ganancia real de la
+ * instalacion. Es una regla de seguridad de la tuberia (decision del
  * usuario) -- NO se acelera aunque este llena. */
-/* Con TIEMPO_LLENADO_S = 0 (sin rampa en MODO=1) la subida no aborta: usa
+/* Con TIEMPO_LLENADO_S = 0 la subida no aborta: usa
  * este llenado interno (2026-10-08, a pedido del usuario). 300 s es el que se
  * uso en la primera corrida completa de CALIB 14 en campo. */
 #define AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S 300.0f
-#define AUTOTUNE2_SUBIDA_TIMEOUT_MARGEN  1.5f    /* timeout de ultimo recurso = duracion esperada de la subida ((objetivo - base) / TASA_LLENADO_PSI_S) x esto */
+#define AUTOTUNE2_SUBIDA_TIMEOUT_MARGEN  1.5f    /* timeout de ultimo recurso = duracion esperada de la subida ((objetivo - base) / tasa de llenado) x esto */
 #define AUTOTUNE2_SUBIDA_ESPERA_TECHO_MS 30000U  /* al tocar RPM_MAX_CARGA, esperar ~3 tiempos muertos a que la presion llegue antes de rendirse */
 #define AUTOTUNE2_CURVA_PASO_LOG_PSI     1.0f    /* PRESION_GANANCIA_CAL,PASO cada vez que la PSI avanza esto */
 
@@ -40,8 +42,8 @@
  * prueba del escalon cerrado (como `sugerir-kp-presion`), NO entra en SIMC.
  * El rango base->objetivo se parte en N tramos iguales y se registra el RPM
  * al que se cruza cada umbral. Entre puntos cercanos no sirve: con ~11 s de
- * tiempo muerto, cuando la rampa pausa la presion sigue subiendo, y sin el
- * EMA de PresionV (PRESIONV_FILTROS_ACTIVOS=0) el ruido pesa mas. En un tramo
+ * tiempo muerto, cuando la rampa pausa la presion sigue subiendo, y el ruido
+ * del sensor pesa mas que la diferencia. En un tramo
  * ancho ese desfase mueve los dos extremos por igual y se cancela. */
 #define AUTOTUNE2_CURVA_TRAMOS           4U
 #define AUTOTUNE2_CURVA_MIN_DRPM         3.0f
@@ -56,8 +58,8 @@
 
 /* Detector de "presion estable" (compartido, Autotune_Estable_t en autotune.c):
  * muestras a 1 Hz, promedio de las 5 mas nuevas contra las 5 mas viejas de 20 s.
- * ⚠️ 0.5 PSI se eligio con el ruido del log del 21/09 (con EMA); sin filtros
- * puede tardar mas en declarar estable -- revisar en la primera prueba. */
+ * 0.5 PSI se eligio con el ruido del log del 21/09 (con EMA); con los filtros
+ * activos (desde 2026-10-07) CALIB 14 lo declaro estable bien en campo (10-09). */
 #define AUTOTUNE2_ESTABLE_TOL_PSI        0.5f
 #define AUTOTUNE2_VOLVER_TIMEOUT_MS    300000U
 /* Ademas de "estable", al volver a ralenti la presion debe quedar a menos de
@@ -427,6 +429,11 @@ void AutotunePsi_Limpiar(void)
     }
 }
 
+void AutotunePsi_Abortar(const char *motivo)
+{
+    if (s_estado != ST_ESPERA) abortar(motivo);
+}
+
 Autotune_Resultado_t AutotunePsi_UltimoResultado(void) { return s_ultimo; }
 bool  AutotunePsi_CascadaActiva(void) { return s_cascada; }
 float AutotunePsi_ObjetivoPsi(void)   { return s_objetivoVal; }
@@ -494,9 +501,9 @@ void AutotunePsi_Paso(bool motorOperando, bool modoCalibracion)
                 break;
             }
 
-            /* Ritmo de subida = el MISMO que usa la rampa de MODO=1
-             * (PRESION_OBJETIVO_LOCAL / TIEMPO_LLENADO_S, ver
-             * CalibFlash_GetTasaLlenadoPsiS): duracion dinamica, y nunca mas
+            /* Ritmo de subida = PRESION_OBJETIVO_LOCAL / TIEMPO_LLENADO_S
+             * (CalibFlash_GetTasaLlenadoPsiS; MODO=1 desde 2026-10-13 cuenta
+             * desde la presion de entrada, aca sigue desde 0 PSI): duracion dinamica, y nunca mas
              * rapido que el ritmo elegido por el operador. Sin ritmo elegido
              * (TIEMPO_LLENADO_S = 0) se usa AUTOTUNE2_TIEMPO_LLENADO_DEFECTO_S. */
             if (tiempoLlenadoS <= 0.0f) {

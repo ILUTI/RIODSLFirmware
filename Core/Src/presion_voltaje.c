@@ -1,3 +1,6 @@
+/* -Os tambien en Debug (2026-10-14), mismo motivo que main.c. */
+#pragma GCC optimize ("Os")
+
 #include "presion_voltaje.h"
 #include "presion.h"
 

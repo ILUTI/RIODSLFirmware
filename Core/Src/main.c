@@ -21,6 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* -Os tambien en Debug (2026-10-14): a -O0 main() solo ocupaba ~14.7 KB y
+ * el binario quedaba a ~4.6 KB del limite de 126 KB. Mismo criterio que los
+ * autotune*.c. Lo que se pierde es depurar main.c paso a paso con todas las
+ * variables visibles. Va dentro de USER CODE para que CubeMX lo conserve. */
+#pragma GCC optimize ("Os")
 #include "tacometro.h"
 #include "calibracion_flash.h"
 #include "modo_fsm.h"
@@ -194,11 +199,26 @@
  * todavia bajando. */
 #define PRESION_SUPERVISOR_REMOTO_REARME_PSI         2.0f
 
-/* Guarda PRESION_MAX: ademas de la lectura filtrada, salta si la lectura
- * RAPIDA (PresionV_GetPresionRapidaPsi, sin limitador de 0.4 PSI/s) pasa
+/* Guarda PRESION_MAX: salta si la lectura filtrada O la RAPIDA
+ * (PresionV_GetPresionRapidaPsi, sin limitador de 0.4 PSI/s) pasan
  * PRESION_MAX durante este tiempo seguido. El tiempo evita que una ventana
- * con ruido la dispare en falso. */
-#define PRESION_MAX_RAPIDA_CONFIRMAR_MS           1000U
+ * con ruido la dispare en falso. Hasta 2026-10-14 la filtrada saltaba sin
+ * confirmar: con el techo de MODO=2 en el 100 % de PRESION_MAX, el ruido
+ * de +-0.5 PSI trabajando en el techo la disparaba en ciclo. */
+#define PRESION_MAX_CONFIRMAR_MS                  1000U
+
+/* MODO=1 solo deja pasar a MODO=2 con el llenado terminado: la rampa del
+ * objetivo ya llego a PRESION_OBJETIVO_LOCAL y la presion medida esta a
+ * esta distancia o menos (2026-10-14). Antes MODO=2 podia entrar a mitad
+ * de un llenado lento y subir al tope de 0.35 PSI/s. */
+#define MODO1_LLENADO_COMPLETO_TOL_PSI             2.0f
+
+/* Al entrar a la cascada con el motor ya acelerado (mas de este margen
+ * sobre RPM_MIN), el PID#2 arranca desde la RPM real (bumpless), no desde
+ * RPM_MIN. Antes solo se hacia en MODO=3; la degradacion por enlace 3->1
+ * arrancaba en RPM_MIN y tiraba el motor a ralenti con la bomba cargada.
+ * Desde ralenti (MODO 0 -> 1, el caso validado en campo) no cambia nada. */
+#define PRESION_PID_BUMPLESS_MARGEN_RPM           30.0f
 
 /* Tope de velocidad de subida del objetivo local: PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S
  * (presion_pid.h), compartido con la subida de CALIB 9/14. */
@@ -225,7 +245,7 @@
 #define REMOTO_SALTO_K_SIN_MEDIR                 1.0f
 
 /* Codigos de alerta mandados por LoRa en el byte 27 del uplink LIVE
- * (ver RAK3172_EnviarUplinkLive(), payload de 28 bytes).
+ * (ver RAK3172_EnviarUplinkLive(), payload de 32 bytes).
  * s_codigoAlertaActual es un SNAPSHOT del estado actual (0 = sin alerta)
  * y va en CADA uplink LIVE. Para saber CUANDO ocurrio una transicion,
  * cada punto que cambia la alerta llama a CalibFlash_ForzarReporte(): el
@@ -257,7 +277,12 @@ typedef enum {
      * configurar, o MODO 2 sin venir de MODO 1). Es TRANSITORIA: va en el uplink
      * inmediato que se fuerza y despues se restaura la alerta anterior. Sumar a
      * NOMBRES_ALERTA de decoder.py (AWS). */
-    ALERTA_MODO_RECHAZADO                      = 13
+    ALERTA_MODO_RECHAZADO                      = 13,
+    /* Retroceso del supervisor de fuga de MODO=2 (2026-10-14): cada vez que
+     * baja 20 s a ralenti antes de reintentar (intentos 1-3). Se limpia
+     * cuando el aspersor llega a su objetivo; el 4to fallo pasa a la
+     * alerta 2. Sumar a NOMBRES_ALERTA de decoder.py (AWS). */
+    ALERTA_MODO_REMOTO_RETROCESO               = 14
 } CodigoAlerta_t;
 
 /* USER CODE END PD */
@@ -847,7 +872,7 @@ int main(void)
   	  /* REPORTAR_PARAMETROS (ID 27, 2026-10-01): al arrancar (en cuanto hay
   	   * red) y cada vez que se pide, manda el valor guardado de cada
   	   * parametro por FPort 3, en partes de 7 grupos [ID][8][VAL_H][VAL_L]
-  	   * (28 bytes, el tamano del LIVE). Una parte cada 5 s como minimo,
+  	   * (28 bytes, entra en el uplink de 32 del LIVE). Una parte cada 5 s como minimo,
   	   * cediendo el canal al LIVE y al ACK. Si el modulo rechaza una parte
   	   * (resultado != OK) se reintenta la misma hasta 3 veces. */
   	  {
@@ -1282,11 +1307,18 @@ int main(void)
   			  : ((modoMotor == CALIB_MODO_CALIBRACION && AutotunePsi_EsCalib(CalibFlash_GetCalib()))
   					  ? AutotunePsi_ObjetivoPsi() /* objetivo de prueba de la autosintonia, en RAM -- no toca PRESION_OBJETIVO_LOCAL */
   					  : CalibFlash_GetPresionObjetivoLocal());
-  	  /* Ancla de la rampa de llenado -- la presion medida en el instante de
-  	   * entrar a la cascada. Si la tuberia ya estaba parcialmente llena, la
-  	   * rampa arranca mas arriba y llega antes al objetivo, sola. */
+  	  /* Presion medida al entrar a la cascada: define la velocidad de subida
+  	   * de MODO=1 ((objetivo - inicio) / TIEMPO_LLENADO_S, con tope). */
   	  static float presionLlenadoInicioPsi = 0.0f;
-  	  static uint32_t presionLlenadoInicioMs = 0U;
+  	  /* Objetivo APLICADO de MODO=1 (2026-10-14): avanza hacia el objetivo a
+  	   * velocidad fija en cada vuelta. Con el objetivo fijo da la misma rampa
+  	   * que el ancla por tiempo de antes (inicio + tasa * t). Cuando la
+  	   * cascada corre en otro modo (MODO=2/3, CALIB 12, autotune PID#2) se
+  	   * copia lo que esos modos aplican, asi que al volver a MODO=1 (MODO=2
+  	   * degradado, CALIB 12 terminado, MODO 3 -> 1) sigue desde ahi en vez de
+  	   * saltar. Con el sensor en falla se re-ancla en la presion medida. */
+  	  static float rampaLocalAplicadaPsi = 0.0f;
+  	  static uint32_t rampaLocalUltimoMs = 0U;
   	  /* MODO=3: SET_PRESION se puede cambiar varias veces sin salir de la
   	   * cascada, asi que en vez de un ancla fija lleva un objetivo aplicado
   	   * que sube hacia SET_PRESION al tope y baja directo. */
@@ -1295,16 +1327,21 @@ int main(void)
   	  if (presionLocalActivoAhora && !presionLocalActivoAntes) {
   		  setPresionAplicadaPsi = PresionV_GetPresionPsi();
   		  setPresionUltimoMs = HAL_GetTick();
-  		  /* MODO=3: arranque sin salto desde la RPM real (el motor puede venir
-  		   * acelerado por SET_RPM). Los demas casos (MODO=1/2 desde ralenti,
-  		   * autotunes) siguen arrancando en RPM_MIN como se validaron. */
-  		  if (modoMotor == CALIB_MODO_MANUAL_BANCO) {
+  		  /* Arranque sin salto desde la RPM real (el motor puede venir
+  		   * acelerado): MODO=3 siempre, MODO=1 si el motor viene arriba de
+  		   * RPM_MIN (degradacion 3 -> 1 por enlace perdido). MODO=1 desde
+  		   * ralenti y los autotunes siguen arrancando en RPM_MIN como se
+  		   * validaron (la identificacion de CALIB 14 asume esa base). */
+  		  if (modoMotor == CALIB_MODO_MANUAL_BANCO
+  		      || (modoMotor == CALIB_MODO_PRESION_LOCAL
+  		          && Tacometro_GetRPMFiltrada() > CalibFlash_GetRpmMin() + PRESION_PID_BUMPLESS_MARGEN_RPM)) {
   			  PresionPid_InitDesdeRpm(Tacometro_GetRPMFiltrada());
   		  } else {
   			  PresionPid_Init();
   		  }
   		  presionLlenadoInicioPsi = PresionV_GetPresionPsi();
-  		  presionLlenadoInicioMs = HAL_GetTick();
+  		  rampaLocalAplicadaPsi = presionLlenadoInicioPsi;
+  		  rampaLocalUltimoMs = HAL_GetTick();
   		  if (s_codigoAlertaActual != ALERTA_ENLACE_PERDIDO) {
   			  s_codigoAlertaActual = ALERTA_SIN_ALERTA; /* arranque fresco, sin arrastrar una alerta vieja */
   		  }
@@ -1322,9 +1359,10 @@ int main(void)
   	   * solo con reportes nuevos del aspersor) calcula un AJUSTE en PSI --
   	   * positivo o negativo -- que se suma a esa base para que el aspersor
   	   * llegue a PRESION_OBJETIVO_REMOTO. El objetivo local resultante:
-  	   *   - SUBE directo y BAJA al ritmo de llenado
-  	   *     (CalibFlash_GetTasaLlenadoPsiS) -- 2026-10-09, antes las dos
-  	   *     direcciones; ademas salto inicial (REMOTO_SALTO_FRAC);
+  	   *   - SUBE con el tope PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S (2026-10-13;
+  	   *     del 09 al 13 subio directo) y BAJA al ritmo de llenado
+  	   *     (CalibFlash_GetTasaLlenadoPsiS); ademas salto inicial
+  	   *     (REMOTO_SALTO_FRAC);
   	   *   - se recorta a [0, PRESION_MAX * REMOTO_TECHO_FRAC];
   	   *   - vive solo en RAM: PRESION_OBJETIVO_LOCAL nunca se modifica.
   	   * La cascada local (PID#2, rampa, falla de sensor) es la MISMA de MODO=1
@@ -1424,24 +1462,45 @@ int main(void)
   		  presionLocalSensorFallaAhora = !PresionV_SensorValido();
   		  if (presionLocalSensorFallaAhora) {
   			  setpointRpmCrudo = 0.0f; /* sin comandar -- cae a ralenti natural mas abajo */
-  			  /* MODO=3: al volver el sensor, la subida sigue desde ahi, sin
-  			   * el salto de todo el tiempo que estuvo en falla. */
+  			  /* Al volver el sensor, las rampas siguen desde la presion real,
+  			   * sin el salto de todo el tiempo que estuvo en falla (MODO=3,
+  			   * MODO=1 y, desde 2026-10-14, MODO=2: su objetivo aplicado
+  			   * seguia subiendo durante la falla). */
   			  setPresionAplicadaPsi = PresionV_GetPresionPsi();
   			  setPresionUltimoMs = HAL_GetTick();
+  			  rampaLocalAplicadaPsi = PresionV_GetPresionPsi();
+  			  rampaLocalUltimoMs = HAL_GetTick();
+  			  if (modoMotor == CALIB_MODO_REMOTO) {
+  				  PresionPidRemoto_ReiniciarRampa(PresionV_GetPresionPsi());
+  			  }
   		  } else {
+  			  if (presionLocalSensorFallaAntes) {
+  				  /* Sensor valido de nuevo (2026-10-14): el PID#2 no corrio
+  				   * durante la falla, y su primer calculo sumaba al integral
+  				   * error x (toda la falla, hasta 60 s): +cientos de RPM de
+  				   * golpe. Arranca limpio, desde la RPM real si el motor
+  				   * todavia viene bajando. */
+  				  if (Tacometro_GetRPMFiltrada() > CalibFlash_GetRpmMin() + PRESION_PID_BUMPLESS_MARGEN_RPM) {
+  					  PresionPid_InitDesdeRpm(Tacometro_GetRPMFiltrada());
+  				  } else {
+  					  PresionPid_Init();
+  				  }
+  			  }
   			  /* Rampa de llenado: en vez de mandarle el objetivo directo al
-  			   * PID#2, se le manda uno que sube desde presionLlenadoInicioPsi
-  			   * hasta el objetivo en TIEMPO_LLENADO_S (con tope de velocidad,
-  			   * ver abajo). El "if (rampaObjetivo < objetivoFinal)"
-  			   * recorta solo al llegar, asi que no hace falta una fase aparte.
-  			   * TIEMPO_LLENADO_S = 0 -> rampa al tope fijo (antes: sin rampa).
-  			   * MODO=3 usa solo el tope (ver setPresionAplicadaPsi). Sin rampa:
-  			   * el autotune PID#2 (su escalon tiene que ser limpio para que la
-  			   * identificacion y la validacion sirvan). */
+  			   * PID#2, se le manda uno que se mueve hacia el objetivo a
+  			   * velocidad fija (ver rampaLocalAplicadaPsi). TIEMPO_LLENADO_S
+  			   * = 0 -> tope fijo (antes: sin rampa). MODO=3 usa solo el tope
+  			   * (ver setPresionAplicadaPsi). Sin rampa: el autotune PID#2 (su
+  			   * escalon tiene que ser limpio para que la identificacion y la
+  			   * validacion sirvan) y CALIB 12 (su escalon ya va con su propia
+  			   * rampa y el retardo se mide contra ella). */
   			  float objetivoFinal = presionObjetivoVigente;
   			  float objetivoDelInstante = objetivoFinal;
-  			  bool esAutotunePsi = (modoMotor == CALIB_MODO_CALIBRACION
-  					  && AutotunePsi_EsCalib(CalibFlash_GetCalib()));
+  			  bool calib12Activo = (CalibFlash_GetCalib() == CALIB_AUTOTUNE_PID3
+  					  && AutotuneAsp_CascadaActiva());
+  			  uint32_t ahoraRampaMs = HAL_GetTick();
+  			  float dtRampaS = (ahoraRampaMs - rampaLocalUltimoMs) / 1000.0f;
+  			  rampaLocalUltimoMs = ahoraRampaMs;
   			  /* MODO=2 tampoco pasa por esta rampa: su objetivo local ya llega
   			   * limitado al mismo ritmo por PresionPidRemoto_ObjetivoAplicado()
   			   * (ver bloque MODO=2 mas arriba). */
@@ -1456,32 +1515,40 @@ int main(void)
   					  setPresionAplicadaPsi = objetivoFinal;
   				  }
   				  objetivoDelInstante = setPresionAplicadaPsi;
-  			  } else if (modoMotor != CALIB_MODO_REMOTO && !esAutotunePsi) {
-  				  /* TIEMPO_LLENADO_S = lo que tarda la rampa en llegar al
-  				   * objetivo DESDE la presion con la que se entro a la cascada
-  				   * (2026-10-13, usuario; antes era el tiempo desde 0 PSI, asi
-  				   * que con la tuberia a medio llenar llegaba antes de lo
-  				   * puesto). Nunca sube mas rapido que antes: el tramo
-  				   * (objetivo - inicio) es <= objetivo.
-  				   * Tope de velocidad (2026-10-12): nunca mas rapido que
-  				   * PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S, tampoco con
+  			  } else if (modoMotor == CALIB_MODO_PRESION_LOCAL && !calib12Activo) {
+  				  /* SUBIDA: TIEMPO_LLENADO_S = lo que tarda la rampa en llegar
+  				   * al objetivo DESDE la presion con la que se entro a la
+  				   * cascada (2026-10-13, usuario; antes era el tiempo desde
+  				   * 0 PSI). Tope de velocidad (2026-10-12): nunca mas rapido
+  				   * que PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S, tampoco con
   				   * TIEMPO_LLENADO_S = 0. Si el tiempo pide algo mas lento,
-  				   * gana el tiempo. */
+  				   * gana el tiempo.
+  				   * BAJADA (2026-10-14, solo pasa al volver de MODO=2 o de
+  				   * CALIB 12, o entrando con la presion arriba del objetivo):
+  				   * al ritmo de llenado (objetivo / TIEMPO_LLENADO_S, como la
+  				   * bajada de MODO=2), o al tope si TIEMPO_LLENADO_S = 0. Antes
+  				   * el objetivo saltaba de golpe y el motor caia a ralenti. */
   				  float tramoPsi = objetivoFinal - presionLlenadoInicioPsi;
   				  uint16_t tiempoLlenadoS = CalibFlash_GetTiempoLlenadoS();
-  				  float tasaLlenado = (tiempoLlenadoS > 0U && tramoPsi > 0.0f)
-  						  ? tramoPsi / (float)tiempoLlenadoS : 0.0f;
-  				  if (tasaLlenado <= 0.0f || tasaLlenado > PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S) {
-  					  tasaLlenado = PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S;
+  				  float tasaSubida = PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S;
+  				  if (tiempoLlenadoS > 0U && tramoPsi > 0.0f
+  				      && tramoPsi / (float)tiempoLlenadoS < tasaSubida) {
+  					  tasaSubida = tramoPsi / (float)tiempoLlenadoS;
   				  }
-  				  {
-  					  float segundosTranscurridos = (HAL_GetTick() - presionLlenadoInicioMs) / 1000.0f;
-  					  float rampaObjetivo = presionLlenadoInicioPsi + tasaLlenado * segundosTranscurridos;
-  					  if (rampaObjetivo < objetivoFinal) {
-  						  objetivoDelInstante = rampaObjetivo;
-  					  }
+  				  float tasaBajada = CalibFlash_GetTasaLlenadoPsiS();
+  				  if (tasaBajada <= 0.0f) tasaBajada = PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S;
+  				  if (objetivoFinal > rampaLocalAplicadaPsi) {
+  					  float siguiente = rampaLocalAplicadaPsi + tasaSubida * dtRampaS;
+  					  rampaLocalAplicadaPsi = (siguiente < objetivoFinal) ? siguiente : objetivoFinal;
+  				  } else {
+  					  float siguiente = rampaLocalAplicadaPsi - tasaBajada * dtRampaS;
+  					  rampaLocalAplicadaPsi = (siguiente > objetivoFinal) ? siguiente : objetivoFinal;
   				  }
+  				  objetivoDelInstante = rampaLocalAplicadaPsi;
   			  }
+  			  /* Los demas casos no usan la rampa de MODO=1, pero la dejan
+  			   * donde estan ellos para que una vuelta a MODO=1 no salte. */
+  			  rampaLocalAplicadaPsi = objetivoDelInstante;
   			  setpointRpmCrudo = PresionPid_CalcularSetpointRpm(
   					  objetivoDelInstante, PresionV_GetPresionPsi());
   		  }
@@ -1524,6 +1591,16 @@ int main(void)
   		  sensorFallaDesdeTick = 0U;
   	  }
   	  presionLocalSensorFallaAntes = presionLocalSensorFallaAhora;
+
+  	  /* "MODO=1 lleno" (2026-10-14): la rampa del objetivo ya llego a
+  	   * PRESION_OBJETIVO_LOCAL y la presion medida esta a <=
+  	   * MODO1_LLENADO_COMPLETO_TOL_PSI. Sin eso calibracion_flash.c rechaza
+  	   * MODO=2 (APPLY_ERROR + alerta 13). La vuelta automatica 1 -> 2 tras
+  	   * una degradacion no pasa por aca (la tuberia ya estaba llena). */
+  	  CalibFlash_SetLlenadoModo1Completo(modoMotor == CALIB_MODO_PRESION_LOCAL
+  			  && presionLocalActivoAhora && !presionLocalSensorFallaAhora
+  			  && fabsf(rampaLocalAplicadaPsi - CalibFlash_GetPresionObjetivoLocal()) < 0.01f
+  			  && PresionV_GetPresionPsi() >= CalibFlash_GetPresionObjetivoLocal() - MODO1_LLENADO_COMPLETO_TOL_PSI);
 
   	  /* Supervisor de "no se puede llegar al objetivo de presion" (ver
   	   * PRESION_SUPERVISOR_* arriba y README seccion 8). Solo detecta, no
@@ -1582,6 +1659,44 @@ int main(void)
   		   * rama propia: su setpoint sale de la cascada de arriba. */
   		  setpointRpmCrudo = CalibFlash_GetSetRpm();
   	  }
+
+  	  /* MODO=3 con SET_RPM y el sensor de presion que SE CAE (2026-10-14): la
+  	   * bomba esta cargada pero la guarda PRESION_MAX no puede ver nada. Igual
+  	   * que la cascada: ralenti (con la rampa de bajada) y, si la falla dura
+  	   * SENSOR_PRESION_FALLA_A_MODO0_MS, MODO=0. Al volver el sensor antes de
+  	   * eso, el operador vuelve a mandar SET_RPM (se limpia aca). Solo cuando
+  	   * el sensor pasa de valido a invalido estando en MODO=3: en banco sin
+  	   * sensor (invalido desde antes) MODO=3 sigue funcionando como siempre. */
+  	  static bool     manualSinSensorAntes = false;
+  	  static bool     manualSensorValidoAntes = false;
+  	  static uint32_t manualSinSensorDesdeMs = 0U;
+  	  bool manualSensorValido = PresionV_SensorValido();
+  	  bool manualEnSetRpm = (modoMotor == CALIB_MODO_MANUAL_BANCO) && !presionLocalActivoAhora
+  			  && motorOperandoAhora;
+  	  bool manualSinSensorAhora = manualEnSetRpm && !manualSensorValido
+  			  && (manualSinSensorAntes || manualSensorValidoAntes);
+  	  manualSensorValidoAntes = manualSensorValido;
+  	  if (manualSinSensorAhora) {
+  		  setpointRpmCrudo = 0.0f;
+  		  if (!manualSinSensorAntes) {
+  			  manualSinSensorDesdeMs = HAL_GetTick();
+  			  CalibFlash_LimpiarComandosManuales();
+  			  printf("MODO_MANUAL: sensor de presion en falla con SET_RPM -- forzando ralenti, SET_RPM=0\r\n");
+  			  s_codigoAlertaActual = ALERTA_SENSOR_PRESION_LOCAL_FALLA;
+  			  CalibFlash_ForzarReporte();
+  		  } else if (HAL_GetTick() - manualSinSensorDesdeMs >= SENSOR_PRESION_FALLA_A_MODO0_MS) {
+  			  CalibFlash_SetModo(CALIB_MODO_RALENTI);
+  			  printf("MODO_MANUAL: sensor de presion en falla por mas de %lus -- MODO=3 -> MODO=0\r\n",
+  					 (unsigned long)(SENSOR_PRESION_FALLA_A_MODO0_MS / 1000UL));
+  			  CalibFlash_ForzarReporte();
+  		  }
+  	  } else if (manualSinSensorAntes && s_codigoAlertaActual == ALERTA_SENSOR_PRESION_LOCAL_FALLA
+  	             && modoMotor == CALIB_MODO_MANUAL_BANCO) {
+  		  printf("MODO_MANUAL: sensor de presion valido de nuevo\r\n");
+  		  s_codigoAlertaActual = ALERTA_SIN_ALERTA;
+  		  CalibFlash_ForzarReporte();
+  	  }
+  	  manualSinSensorAntes = manualSinSensorAhora;
 
   	  /* Supervisor de fuga de MODO=2 (ver PRESION_SUPERVISOR_REMOTO_* arriba):
   	   * 1) Cuenta REPORTES NUEVOS del aspersor, no segundos: su cadencia
@@ -1649,7 +1764,19 @@ int main(void)
   						  ? (saturadoEnMax && lejosDelObjetivo) : saturadoEnMax;
 
   				  if (!alertarEsteReporte) {
-  					  remotoSupervisorIntentosFallidos = 0U;
+  					  /* El contador vuelve a 0 solo si el aspersor LLEGO a su
+  					   * banda (2026-10-14). Antes bastaba un reporte sin
+  					   * saturar: tras cada retroceso el objetivo local sube de
+  					   * a +3 PSI por reporte (ventana del PID#3), el primero ya
+  					   * no estaba en el techo y borraba la cuenta -- con una
+  					   * fuga real nunca llegaba al 4to intento ni a MODO=0. */
+  					  if (!lejosDelObjetivo) {
+  						  remotoSupervisorIntentosFallidos = 0U;
+  						  if (s_codigoAlertaActual == ALERTA_MODO_REMOTO_RETROCESO) {
+  							  s_codigoAlertaActual = ALERTA_SIN_ALERTA;
+  							  CalibFlash_ForzarReporte();
+  						  }
+  					  }
   				  } else {
   					  remotoSupervisorIntentosFallidos++;
   					  if (remotoSupervisorIntentosFallidos >= PRESION_SUPERVISOR_REMOTO_INTENTOS_MAX) {
@@ -1667,6 +1794,10 @@ int main(void)
   						  remotoEnRetroceso = true;
   						  remotoRetrocesoInicioMs = HAL_GetTick();
   						  setpointRpmCrudo = 0.0f;
+  						  /* Visible en AWS (2026-10-14): antes el operador no
+  						   * veia nada hasta el 4to intento. */
+  						  s_codigoAlertaActual = ALERTA_MODO_REMOTO_RETROCESO;
+  						  CalibFlash_ForzarReporte();
   					  }
   				  }
   			  }
@@ -1993,23 +2124,46 @@ int main(void)
   	   * alerta en MODO=1).
   	   *
   	   * 2026-10-12: tambien salta con la lectura RAPIDA (sin el limitador de
-  	   * 0.4 PSI/s del filtro) sostenida PRESION_MAX_RAPIDA_CONFIRMAR_MS; la
+  	   * 0.4 PSI/s del filtro) sostenida PRESION_MAX_CONFIRMAR_MS; la
   	   * filtrada sola llego a ir ~23 PSI atras de la real en campo. Se
   	   * libera solo cuando las dos bajan del 90 %. */
-  	  static bool presionMaxExcedidaAntes = false;
+  	  /* Cambios 2026-10-14:
+  	   *   - la filtrada tambien necesita PRESION_MAX_CONFIRMAR_MS seguidos
+  	   *     (con el techo de MODO=2 en el 100 % el ruido la disparaba en ciclo);
+  	   *   - el estado "excedida" (presionMaxLatch) sigue a la PRESION aunque
+  	   *     el modo ya no tenga carga: RECUPERADA sale solo cuando la presion
+  	   *     baja de verdad del 90 %, no al pasar a MODO=0;
+  	   *   - con el sensor invalido el estado se mantiene (antes se soltaba
+  	   *     sola justo cuando no se puede ver la presion);
+  	   *   - al dispararse se cortan los setpoints manuales (MODO=3) y los
+  	   *     autotunes de presion (CALIB 9/14 seguian subiendo el SET_RPM
+  	   *     mientras la guarda los tenia en ralenti);
+  	   *   - al recuperarse vuelve la alerta que habia antes. */
+  	  static bool presionMaxLatch = false;
+  	  static bool presionMaxFiltradaArriba = false;
+  	  static uint32_t presionMaxFiltradaDesdeMs = 0U;
   	  static bool presionMaxRapidaArriba = false;
   	  static uint32_t presionMaxRapidaDesdeMs = 0U;
+  	  static CodigoAlerta_t alertaAntesDePresionMax = ALERTA_SIN_ALERTA;
   	  bool modoConCarga = (modoMotor == CALIB_MODO_PRESION_LOCAL)
   			  || (modoMotor == CALIB_MODO_REMOTO)
   			  || (modoMotor == CALIB_MODO_MANUAL_BANCO)
   			  || (modoMotor == CALIB_MODO_CALIBRACION
-  				  && (CalibFlash_GetCalib() == 12U
+  				  && (CalibFlash_GetCalib() == CALIB_AUTOTUNE_PID3
   					  || AutotunePsi_EsCalib(CalibFlash_GetCalib())));
-  	  bool presionMaxExcedidaAhora = false;
-  	  if (modoConCarga && PresionV_SensorValido()) {
+  	  bool presionMaxLatchAntes = presionMaxLatch;
+  	  if (PresionV_SensorValido()) {
   		  float presionMax = CalibFlash_GetPresionMax();
   		  float presionMedida = PresionV_GetPresionPsi();
   		  float presionRapida = PresionV_GetPresionRapidaPsi();
+  		  if (presionMedida > presionMax) {
+  			  if (!presionMaxFiltradaArriba) {
+  				  presionMaxFiltradaArriba = true;
+  				  presionMaxFiltradaDesdeMs = HAL_GetTick();
+  			  }
+  		  } else {
+  			  presionMaxFiltradaArriba = false;
+  		  }
   		  if (presionRapida > presionMax) {
   			  if (!presionMaxRapidaArriba) {
   				  presionMaxRapidaArriba = true;
@@ -2018,39 +2172,59 @@ int main(void)
   		  } else {
   			  presionMaxRapidaArriba = false;
   		  }
+  		  bool filtradaConfirmada = presionMaxFiltradaArriba
+  				  && (HAL_GetTick() - presionMaxFiltradaDesdeMs >= PRESION_MAX_CONFIRMAR_MS);
   		  bool rapidaConfirmada = presionMaxRapidaArriba
-  				  && (HAL_GetTick() - presionMaxRapidaDesdeMs >= PRESION_MAX_RAPIDA_CONFIRMAR_MS);
-  		  presionMaxExcedidaAhora = presionMaxExcedidaAntes
-  				  ? (presionMedida > presionMax * 0.9f || presionRapida > presionMax * 0.9f)
-  				  : (presionMedida > presionMax || rapidaConfirmada);
+  				  && (HAL_GetTick() - presionMaxRapidaDesdeMs >= PRESION_MAX_CONFIRMAR_MS);
+  		  if (presionMaxLatch) {
+  			  presionMaxLatch = (presionMedida > presionMax * 0.9f || presionRapida > presionMax * 0.9f);
+  		  } else {
+  			  /* Solo se dispara con la bomba cargada (MODO=0 exento). */
+  			  presionMaxLatch = modoConCarga && (filtradaConfirmada || rapidaConfirmada);
+  		  }
   	  } else {
+  		  presionMaxFiltradaArriba = false;
   		  presionMaxRapidaArriba = false;
+  		  /* presionMaxLatch se queda como estaba */
   	  }
+  	  /* Actua solo mientras el modo tiene carga (en MODO=0 ya no hay nada
+  	   * que cortar, pero el estado sigue hasta que la presion baje). */
+  	  bool presionMaxExcedidaAhora = presionMaxLatch && modoConCarga;
   	  if (presionMaxExcedidaAhora) {
   		  setpointRpmCrudo = 0.0f;
   		  controlSolicitado = false;
   	  }
-  	  if (presionMaxExcedidaAhora != presionMaxExcedidaAntes) {
-  		  if (presionMaxExcedidaAhora) {
+  	  if (presionMaxLatch != presionMaxLatchAntes) {
+  		  if (presionMaxLatch) {
   			  printf("ALERTA,PRESION_MAX_EXCEDIDA,presion_max=%.2f,presion_actual=%.2f,presion_rapida=%.2f -- forzando ralenti\r\n",
   					  CalibFlash_GetPresionMax(), PresionV_GetPresionPsi(), PresionV_GetPresionRapidaPsi());
+  			  if (s_codigoAlertaActual != ALERTA_PRESION_MAX_EXCEDIDA) {
+  				  alertaAntesDePresionMax = (CodigoAlerta_t)s_codigoAlertaActual;
+  			  }
   			  s_codigoAlertaActual = ALERTA_PRESION_MAX_EXCEDIDA;
   			  /* CALIB 12 no se enteraba del ralenti forzado y seguia
   			   * validando con el aspersor cayendo 38 -> 14 PSI (campo
   			   * 2026-10-09). Se aborta; en la proxima vuelta su salida deja
-  			   * el codigo AUTOTUNE_PID3_FALLO. */
+  			   * el codigo AUTOTUNE_PID3_FALLO. Mismo caso CALIB 9/14. */
   			  if (CalibFlash_GetCalib() == CALIB_AUTOTUNE_PID3 && AutotuneAsp_CascadaActiva()) {
   				  AutotuneAsp_Abortar("presion_max_excedida");
   			  }
+  			  if (AutotunePsi_EsCalib(CalibFlash_GetCalib())) {
+  				  AutotunePsi_Abortar("presion_max_excedida");
+  			  }
+  			  /* MODO=3: al soltarse, el motor volvia solo al SET_RPM y la
+  			   * guarda se disparaba otra vez, en ciclo. */
+  			  if (modoMotor == CALIB_MODO_MANUAL_BANCO) {
+  				  CalibFlash_LimpiarComandosManuales();
+  			  }
   		  } else {
-  			  printf("ALERTA,PRESION_MAX_RECUPERADA\r\n");
+  			  printf("ALERTA,PRESION_MAX_RECUPERADA,presion_actual=%.2f\r\n", PresionV_GetPresionPsi());
   			  if (s_codigoAlertaActual == ALERTA_PRESION_MAX_EXCEDIDA) {
-  				  s_codigoAlertaActual = ALERTA_SIN_ALERTA;
+  				  s_codigoAlertaActual = alertaAntesDePresionMax;
   			  }
   		  }
   		  CalibFlash_ForzarReporte();
   	  }
-  	  presionMaxExcedidaAntes = presionMaxExcedidaAhora;
 
   	  /* Rampa de BAJADA (2026-10-01, decision del usuario): una caida brusca
   	   * de presion con la bomba cargada puede reventar la tuberia (golpe de

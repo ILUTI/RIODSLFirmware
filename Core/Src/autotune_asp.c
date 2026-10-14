@@ -50,6 +50,16 @@
 #define AUTOTUNE3_BANDA_FRAC             0.05f
 #define AUTOTUNE3_CRUCES_MAX               2U
 #define AUTOTUNE3_HISTORIAL_MAX          120U    /* reportes guardados durante el escalon (tiempo, valor) */
+/* Aspersor que no responde (2026-10-14, campo 2026-10-13: aspersor en 7 PSI
+ * con la local en 45, no se movio con la local en 50):
+ *   - base no creible: el aspersor reporta 0, o menos de esta fraccion de la
+ *     presion local (aspersor lejano 10-12: 16/35 = 0.46; 10-13: 7/45 = 0.16);
+ *   - ya con la presion local en su nuevo objetivo, estos reportes seguidos
+ *     sin moverse AUTOTUNE3_RESPUESTA_MIN_PSI de la base;
+ *   - o el aspersor se mueve al reves del escalon mas de esto. */
+#define AUTOTUNE3_BASE_FRAC_MIN          0.2f
+#define AUTOTUNE3_SIN_RESPUESTA_REPORTES   4U
+#define AUTOTUNE3_CONTRARIO_PSI          3.0f
 
 /* ==================== ESTADO ==================== */
 
@@ -59,8 +69,7 @@ typedef enum {
     ST_BASE,          /* reportes estables del aspersor en la base */
     ST_ESCALON,       /* objetivo local +-5 PSI, esperando la respuesta del aspersor */
     ST_VOLVER,        /* de regreso a la base antes de validar */
-    ST_VALIDAR,       /* triple cascada con la candidata */
-    ST_FINALIZANDO    /* solo desde MODO=1: bajar el objetivo local a la base antes de soltar */
+    ST_VALIDAR        /* triple cascada con la candidata */
 } Estado_t;
 
 static Estado_t  s_estado = ST_ESPERA;
@@ -97,8 +106,12 @@ static uint8_t   s_nTecho = 0U;
 /* Ultimo reporte del aspersor y presion local en ese momento (ver saltoSinCausa). */
 static bool      s_hayPrev = false;
 static float     s_vPrev = 0.0f, s_psiPrev = 0.0f;
-static Autotune_Resultado_t s_pendiente = AUTOTUNE_SIN_RESULTADO;
 static Autotune_Resultado_t s_ultimo = AUTOTUNE_SIN_RESULTADO;
+
+/* Escalon sin respuesta del aspersor (2026-10-14, campo 2026-10-13: se
+ * quedo en 7 PSI con la local 45 -> 50 y el ensayo siguio ~26 min). */
+static bool      s_respondio = false;
+static uint8_t   s_nSinRespuesta = 0U;
 
 /* ==================== AUXILIARES ==================== */
 
@@ -117,17 +130,14 @@ static void abortar(const char *motivo)
     terminar(AUTOTUNE_RESULTADO_FALLO);
 }
 
-/* Desde MODO=1 no se suelta de golpe: primero se regresa el objetivo local a
- * la base (al ritmo de llenado) y recien ahi se deja CALIB=0. */
+/* Desde MODO=1 tampoco se suelta de golpe, termine bien, mal o abortado: la
+ * rampa de MODO=1 (main.c, rampaLocalAplicadaPsi) arranca donde quedo el
+ * objetivo de CALIB 12 y lo regresa a la base a su ritmo de bajada
+ * (2026-10-14). Antes habia un estado ST_FINALIZANDO aca que solo cubria el
+ * final normal, y con TIEMPO_LLENADO_S = 0 bajaba directo. */
 static void finalizar(Autotune_Resultado_t r)
 {
-    if (s_desdeModo1) {
-        s_pendiente = r;
-        s_deseado = s_base;
-        s_estado = ST_FINALIZANDO;
-    } else {
-        terminar(r);
-    }
+    terminar(r);
 }
 
 /* Tiempo razonable para un cambio de 'psi' al ritmo de llenado. */
@@ -354,7 +364,7 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
          * en las dos direcciones (regla de la tuberia). */
         s_aplicado = PresionPidRemoto_ObjetivoAplicado(s_deseado, CalibFlash_GetTasaLlenadoPsiS(),
                                                        CalibFlash_GetTasaLlenadoPsiS());
-        if (s_estado != ST_FINALIZANDO && ahora - s_t0Ms >= s_timeoutMs) {
+        if (ahora - s_t0Ms >= s_timeoutMs) {
             if (s_estado == ST_VALIDAR) {
                 rechazar("no_asienta", ahora);   /* candidata mas suave, no abortar */
             } else {
@@ -392,6 +402,13 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
          * 3 tardaba ~1:45 min). El MODO 1 ya venia estable. */
         if (nuevoReporte(&v)) {
             (void)saltoSinCausa(v, psi);   /* solo fija la referencia */
+            if (v <= 0.0f || v < AUTOTUNE3_BASE_FRAC_MIN * psi) {
+                printf("AUTOTUNE_PID3,BASE_NO_CREIBLE,aspersor=%.2f,local=%.2f\r\n", v, psi);
+                abortar("aspersor_no_creible_frente_a_la_presion_local");
+                break;
+            }
+            s_respondio = false;
+            s_nSinRespuesta = 0U;
             s_r0 = v;
             s_l0 = psi;
             s_delta = (s_base + AUTOTUNE3_ESCALON_PSI <= s_techo) ? AUTOTUNE3_ESCALON_PSI : -AUTOTUNE3_ESCALON_PSI;
@@ -427,6 +444,19 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
                 s_nHist++;
             }
             printf("AUTOTUNE_PID3,REPORTE,t_s=%.0f,aspersor=%.2f,local=%.2f\r\n", tS, v, psi);
+            /* Respuesta = el aspersor se movio en el sentido del escalon. */
+            float movido = (s_delta > 0.0f) ? (v - s_r0) : (s_r0 - v);
+            if (movido < -AUTOTUNE3_CONTRARIO_PSI) {
+                abortar("aspersor_en_sentido_contrario_al_escalon");
+                break;
+            }
+            if (movido >= AUTOTUNE3_RESPUESTA_MIN_PSI) {
+                s_respondio = true;
+            } else if (!s_respondio && s_localLlego
+                       && ++s_nSinRespuesta >= AUTOTUNE3_SIN_RESPUESTA_REPORTES) {
+                abortar("aspersor_no_responde_al_escalon");
+                break;
+            }
             /* El final solo cuenta cuando la presion local ya llego. */
             if (s_localLlego && remotaEstable(v, &prom)) {
                 s_rf = prom;
@@ -486,12 +516,6 @@ void AutotuneAsp_Paso(bool motorOperando, CalibFlash_Modo_t modo)
             } else if (s_nRepVal >= AUTOTUNE3_VAL_REPORTES_MAX) {
                 rechazar("no_asienta", ahora);
             }
-        }
-        break;
-
-    case ST_FINALIZANDO:
-        if (absf(s_aplicado - s_base) < 0.01f) {
-            terminar(s_pendiente);
         }
         break;
     }

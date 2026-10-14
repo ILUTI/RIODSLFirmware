@@ -11,7 +11,8 @@ CalibFlash_ProtocoloStatus_t Modo_ValidarEntrada(CalibFlash_Modo_t actual,
                                                  uint8_t solicitado,
                                                  bool motorOperando,
                                                  float presionObjetivoRemoto,
-                                                 bool remotoDisponible)
+                                                 bool remotoDisponible,
+                                                 bool llenadoModo1Completo)
 {
     /* MODO 1/2 no se arman con el motor detenido (decision 2026-09-22): si el
      * PID de presion entrara a controlar desde el primer instante que el motor
@@ -38,6 +39,13 @@ CalibFlash_ProtocoloStatus_t Modo_ValidarEntrada(CalibFlash_Modo_t actual,
          * aspersor reportando (decision 2026-10-02): sin eso el watchdog de
          * main.c lo degradaria a MODO 1 en la vuelta siguiente. */
         if (!remotoDisponible) {
+            return CALIB_STATUS_APPLY_ERROR;
+        }
+        /* Desde MODO 1, solo con el llenado terminado (2026-10-14): MODO 2
+         * asume la tuberia llena y sube al tope de 0.35 PSI/s, que en un
+         * llenado lento (TIEMPO_LLENADO_S largo) rompia la regla de la
+         * tuberia. */
+        if (actual == CALIB_MODO_PRESION_LOCAL && !llenadoModo1Completo) {
             return CALIB_STATUS_APPLY_ERROR;
         }
     }

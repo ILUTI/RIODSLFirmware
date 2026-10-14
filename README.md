@@ -442,7 +442,7 @@ se puede cambiar con el motor operando:
 | Categoría | Se permite con el motor operando | Parámetros |
 |---|---|---|
 | CALIBRACION | Sí por categoría; cada uno tiene su candado propio (ver arriba) | `SET_RATIO`, `SET_RATIO_AUTO`, `ALPHA`, `PID_RPM_KP/KI`, `PID_ASP_KP/KI`, `PID_PSI_KP/KI`, `CALIB` (rechaza `1`/`2` con el motor operando), `MODO` (reglas de `modo_fsm.c`) |
-| PROCESO | Sí, siempre (es su función) | `SET_RPM`, `SET_PRESION`, `PRESION_REMOTO`, `PRESION_OBJETIVO_LOCAL` (solo `MODO=4`, 2026-10-12), `PRESION_OBJETIVO_REMOTO`, `TIEMPO_LLENADO_S`, `PRESION_MAX` (desde 2026-10-13; sigue pidiendo `MODO=4`) |
+| PROCESO | Sí, siempre (es su función) | `SET_RPM`, `SET_PRESION`, `PRESION_REMOTO`, `PRESION_OBJETIVO_LOCAL` (solo `MODO=4`, 2026-10-12), `PRESION_OBJETIVO_REMOTO`, `TIEMPO_LLENADO_S` (solo `MODO=4`, 2026-10-14), `PRESION_MAX` (desde 2026-10-13; sigue pidiendo `MODO=4`) |
 | COMANDO | Evaluado aparte (byte `0xA5`) | `REPORTAR_PARAMETROS`, `FORZAR_REPORTE`, `RESET_REMOTO` |
 | CONFIGURACION | **No** — se rechaza | `RPM_MAX`, `RPM_MIN`, `RPM_MAX_CARGA`, `SERVO_PULSO_MIN/MAX`, `INTERVALO_ENVIO_*`, y cualquier ID desconocido |
 
@@ -955,7 +955,7 @@ GIO manda los parámetros por **nombre**, así que no se entera del cambio.
 | ID | Antes | Nombre | Escala | Ancho | Categoría | Candado | Rango / notas |
 |---|---|---|---|---|---|---|---|
 | | | **Modos** | | | | | |
-| 1 | 16 | `MODO` | 0–4 | 1B | Calibración | reglas de `modo_fsm.c` (sección 4.3.3) | `0` ralentí, `1` presión local, `2` remoto, `3` manual, `4` calibración. `1`/`2` con el motor detenido → `6`; `2` sin objetivo remoto → `7`; `2` solo desde `1`. Solo RAM, el arranque lo deja en `0` |
+| 1 | 16 | `MODO` | 0–4 | 1B | Calibración | reglas de `modo_fsm.c` (sección 4.3.3) | `0` ralentí, `1` presión local, `2` remoto, `3` manual, `4` calibración. `1`/`2` con el motor detenido → `6`; `2` sin objetivo remoto → `7`; `2` solo desde `1` y, desde 2026-10-14, **con el llenado de `MODO=1` terminado** (la rampa ya llegó a `PRESION_OBJETIVO_LOCAL` y la presión está a ≤2 PSI; si no → `4`). La vuelta automática 1→2 tras una degradación no lo pide. Solo RAM, el arranque lo deja en `0` |
 | 2 | 13 | `CALIB` | 0–14 | 1B | Calibración | ver sección 4.4 / hoja CALIB | ≠0 exige `MODO=4` (salvo `12`, que también arranca desde `MODO=1`); `1`/`2` exigen el motor detenido (`REJECTED_ENGINE_RUNNING`); `3`–`14` solo desde `CALIB=0`. Entrar a cualquier ≠0 limpia `SET_RPM`. Solo RAM, el arranque lo deja en `0` |
 | | | **Proceso** (se aceptan con el motor operando) | | | | | |
 | 3 | 3 | `SET_RPM` | x10 | uint16 | Proceso | `MODO=3` | Solo RAM. Setpoint directo; limpia `SET_PRESION`. Sin rango propio (el control lo recorta a `RPM_MIN`/`RPM_MAX_CARGA`) |
@@ -963,12 +963,12 @@ GIO manda los parámetros por **nombre**, así que no se entera del cambio.
 | 5 | 23 | `PRESION_OBJETIVO_LOCAL` | x10 | uint16 | Proceso | `MODO=4` | (0, `PRESION_MAX`). Objetivo del lazo de presión de `MODO=1`. Solo en `MODO=4` (2026-10-12): la rampa de llenado arranca al entrar a `MODO=1`, así que cambiarlo en `MODO=1/2` saltaba directo sin rampa. Se acepta con el motor andando |
 | 6 | 30 | `PRESION_OBJETIVO_REMOTO` | x10 | uint16 | Proceso | — | [0, 500]. Setpoint del PID de `MODO=2`; `0` = sin configurar (`MODO=2` se rechaza con `7`) |
 | 7 | 17 | `PRESION_REMOTO` | x10 | uint16 | Proceso | — | Solo RAM. Lectura que manda el aspersor; refresca el watchdog de `TIMEOUT_SIN_COMANDO_S` (fijo, 360 s) |
-| 8 | 8 | `TIEMPO_LLENADO_S` | directo (s) | uint16 | Proceso | — | `0` o ≥ 60 s. Segundos para llenar la tubería de 0 PSI a `PRESION_OBJETIVO_LOCAL`. La velocidad de la rampa de `MODO=1/2` se calcula al usarla (`objetivo / segundos`), así que cambiar el objetivo después la ajusta sola. En `MODO=1` (2026-10-12) la rampa nunca sube más rápido que 0.35 PSI/s (`PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S`): con `0`, o con un tiempo que pida más rápido, se usa ese tope. **Desde 2026-10-13, en `MODO=1` el tiempo es lo que tarda la rampa desde la presión con la que se entra hasta el objetivo** (ej. 18 → 35 PSI con 600 s dura 600 s; antes eran ~290 s porque contaba desde 0 PSI); la presión queda a 0.5 PSI del objetivo ~1–1.5 min después (lo que el PID#2 va atrás de la rampa). La bajada de `MODO=2` y los `CALIB` siguen usando `objetivo / segundos` (la subida de `CALIB=9/14`, desde 2026-10-13, también con el tope de 0.35 PSI/s: si el tiempo pide más rápido se alarga, y el `llenado_s` del log muestra el tiempo efectivo). La subida de `MODO=2` usa solo el tope de 0.35 PSI/s. También lo usan `CALIB=9/14`. El ACK devuelve los segundos. (Hasta 2026-10-01 el 8 era `TASA_LLENADO_PSI_S`, y antes `PID_KD`; el mínimo de 60 s rechaza un valor viejo de PSI/s.) |
+| 8 | 8 | `TIEMPO_LLENADO_S` | directo (s) | uint16 | Proceso | `MODO=4` (desde 2026-10-14; cambiarlo a mitad de una rampa le cambiaba la velocidad en el aire) | `0` o ≥ 60 s. **Bajada de `MODO=1`** (2026-10-14: al volver de `MODO=2` o de `CALIB=12`, o entrando con la presión arriba del objetivo): a `objetivo / segundos`, o a 0.35 PSI/s con `0`; antes el objetivo saltaba y el motor caía a ralentí. Segundos para llenar la tubería de 0 PSI a `PRESION_OBJETIVO_LOCAL`. La velocidad de la rampa de `MODO=1/2` se calcula al usarla (`objetivo / segundos`), así que cambiar el objetivo después la ajusta sola. En `MODO=1` (2026-10-12) la rampa nunca sube más rápido que 0.35 PSI/s (`PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S`): con `0`, o con un tiempo que pida más rápido, se usa ese tope. **Desde 2026-10-13, en `MODO=1` el tiempo es lo que tarda la rampa desde la presión con la que se entra hasta el objetivo** (ej. 18 → 35 PSI con 600 s dura 600 s; antes eran ~290 s porque contaba desde 0 PSI); la presión queda a 0.5 PSI del objetivo ~1–1.5 min después (lo que el PID#2 va atrás de la rampa). La bajada de `MODO=2` y los `CALIB` siguen usando `objetivo / segundos` (la subida de `CALIB=9/14`, desde 2026-10-13, también con el tope de 0.35 PSI/s: si el tiempo pide más rápido se alarga, y el `llenado_s` del log muestra el tiempo efectivo). La subida de `MODO=2` usa solo el tope de 0.35 PSI/s. También lo usan `CALIB=9/14`. El ACK devuelve los segundos. (Hasta 2026-10-01 el 8 era `TASA_LLENADO_PSI_S`, y antes `PID_KD`; el mínimo de 60 s rechaza un valor viejo de PSI/s.) |
 | | | **Configuración** (solo con el motor detenido) | | | | | |
 | 9 | 5 | `RPM_MIN` | x10 | uint16 | Configuración | `MODO=4` | [0, `RPM_MAX`). Ralentí. `CALIB=8` lo calcula solo |
 | 10 | 4 | `RPM_MAX` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, 6000]. Techo MECÁNICO del motor, fijo por modelo |
 | 11 | 32 | `RPM_MAX_CARGA` | x10 | uint16 | Configuración | `MODO=4` | (`RPM_MIN`, `RPM_MAX`]. Techo con carga (hidráulico) de la instalación |
-| 12 | 34 | `PRESION_MAX` | x10 | uint16 | Configuración (desde 2026-10-13 se acepta **también con el motor encendido**) | `MODO=4` | (0, 500] y mayor que `PRESION_OBJETIVO_LOCAL` y `SET_PRESION`. Guarda dura: si se supera, ralentí + alerta `5` (se libera al 90 %). Exenta en `MODO=0`. Desde 2026-10-12 también salta si la lectura rápida (promedio de 0.5 s sin el limitador de 0.4 PSI/s del filtro, columna `Rapida` del log) la pasa 1 s seguido |
+| 12 | 34 | `PRESION_MAX` | x10 | uint16 | Configuración (desde 2026-10-13 se acepta **también con el motor encendido**) | `MODO=4` | (0, **150**] (era 500 hasta 2026-10-14; 150 es el fondo de escala del sensor, más arriba la guarda no ve la presión) y mayor que `PRESION_OBJETIVO_LOCAL` y `SET_PRESION`. Guarda dura: si la lectura filtrada **o** la rápida (promedio de 0.5 s sin el limitador de 0.4 PSI/s, columna `Rapida` del log) la pasan **1 s seguido**, ralentí + alerta `5`; se libera cuando las dos bajan del 90 %. Exenta en `MODO=0` para dispararse. Desde 2026-10-14: la filtrada también pide 1 s; con el sensor inválido la guarda **no se suelta**; el estado sigue a la presión aunque se pase a `MODO=0` (`RECUPERADA` sale cuando de verdad bajó); al dispararse aborta `CALIB=9/12/14` y en `MODO=3` borra `SET_RPM`/`SET_PRESION` (el operador vuelve a comandar); al recuperarse vuelve la alerta que había antes |
 | 13 | 9 | `SERVO_PULSO_MIN` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | [500, `SERVO_PULSO_MAX`). En sesión 1/2 queda en RAM y se guarda al salir. `CALIB=4` lo calcula solo |
 | 14 | 10 | `SERVO_PULSO_MAX` | directo (µs) | uint16 | Configuración | `CALIB=1/2` | (`SERVO_PULSO_MIN`, 2500] |
 | 15 | 14 | `INTERVALO_ENVIO_OPERATIVO_S` | directo (s) | uint16 | Configuración | — | 5–3600, default 30. Cada cuánto sale el uplink LIVE con el motor encendido (estado `ENCENDIDO`/`ACTIVO`). Conectado 2026-10-01 |
@@ -2304,6 +2304,7 @@ en `decoder.py`):
 | 5–11 | `PRESION_MAX_EXCEDIDA` y los resultados de autotune (`AUTOTUNE_PID1/2/3_OK/FALLO`) | Ver `main.c` (`CodigoAlerta_t`) y sección de autotune |
 | 12 | `ENLACE_PERDIDO` | Enlace LoRaWAN perdido en `MODO=2/3/4` (sección 4.3.3). Se limpia cuando el enlace vuelve |
 | 13 | `MODO_RECHAZADO` | Downlink/comando `MODO` rechazado. Transitoria: va en un solo uplink y luego se restaura la alerta anterior |
+| 14 | `MODO_REMOTO_RETROCESO` | (2026-10-14) Retroceso del supervisor de fuga de `MODO=2`: 20 s a ralentí antes de reintentar (intentos 1–3). Se limpia cuando el aspersor llega a su objetivo; el 4.º fallo pasa a la alerta 2 y `MODO=0`. Agregada a `decoder.py` (sin desplegar) |
 
 `codigoAlerta` es un **snapshot del estado actual** (viaja en cada
 uplink LIVE, periódico o forzado, mientras la alerta siga activa), no
@@ -2772,7 +2773,44 @@ intento (decisión del usuario).
   (un pico de 50.7 un instante). ✅ El tope se comporta como en la
   simulación.
 
-**Pendiente de probar en campo:** `CALIB=14` con tau_c = 8·L (debería dar
+**Cambios 2026-10-14 (revisión de código, compilado, sin probar en campo).**
+Salen de una revisión del código ya implementado. Cada punto está en su
+sección:
+- **`MODO=2` → `MODO=1`** (enlace perdido, timeout del aspersor o a mano): el
+  objetivo ya no salta a la base; la rampa de `MODO=1` arranca donde estaba
+  `MODO=2` y baja a `objetivo/T` (0.35 PSI/s con T=0). Antes el motor caía a
+  ralentí con la bomba cargada. La rampa de `MODO=1` ahora es "incremental"
+  (objetivo aplicado que avanza cada vuelta); simulada contra la anterior en
+  18→35 (T=0 y 600 s), 18→45 y 24→50: diferencia máxima 0.006 PSI, mismo
+  tiempo de llegada.
+- **`MODO=3` con `SET_RPM` → `MODO=1`** (degradación por enlace): el PID#2
+  arranca desde la RPM real si el motor viene más de 30 RPM arriba de
+  `RPM_MIN`. Desde ralentí no cambia nada.
+- **`MODO=2` solo con el llenado de `MODO=1` terminado** (tabla de
+  parámetros, `MODO`).
+- **Supervisor de fuga de `MODO=2`:** el contador vuelve a 0 solo si el
+  aspersor llega a su banda; antes se borraba después de cada retroceso y
+  nunca llegaba al 4.º intento. Alerta nueva 14 en cada retroceso.
+- **Guarda `PRESION_MAX`:** 1 s de confirmación también para la filtrada, no
+  se suelta con el sensor inválido, aborta `CALIB=9/14`, borra `SET_RPM` en
+  `MODO=3`, `PRESION_MAX` ≤ 150.
+- **`MODO=3` con `SET_RPM`:** si el sensor se cae (pasa de válido a
+  inválido), ralentí + `SET_RPM=0` y `MODO=0` a los 60 s. En banco con el
+  sensor ya desconectado, `MODO=3` sigue igual.
+- **Sensor de vuelta tras una falla:** el PID#2 arranca limpio (antes sumaba
+  toda la falla al integral, hasta cientos de RPM de golpe) y las rampas de
+  `MODO=1/2/3` siguen desde la presión real.
+- **`TIEMPO_LLENADO_S` solo en `MODO=4`.**
+- **`CALIB=12`:** corta si el aspersor no responde; desde `MODO=1` siempre
+  vuelve a la base con la rampa de `MODO=1`.
+- **Flash:** `main.c`, `calibracion_flash.c` y `presion_voltaje.c` con `-Os`
+  también en Debug: de 121.4 a 112.4 KB. No se pueden depurar paso a paso.
+  Se quitó código muerto de `autotune.c`.
+
+**Pendiente de probar en campo:** los cambios del 2026-10-14 (arriba): pasar
+de `MODO=2` a `MODO=1` a mano y ver que baje con rampa; pedir `MODO=2` a
+mitad del llenado (debe rechazarse); `CALIB=12` con el aspersor lejano.
+`CALIB=14` con tau_c = 8·L (debería dar
 Kp ~2–4 / Ki ~0.3–0.6); `CALIB=12` con el aspersor lejano (esperado
 Ki ~0.008–0.015); `MODO=2` con el tope de subida, el rearme del supervisor
 y el techo al 100 %; `TIEMPO_LLENADO_S` > 0 contando desde la presión
@@ -3734,18 +3772,32 @@ local → presión del aspersor**:
      (`salto_del_aspersor_sin_cambio_local`, también en el escalón y la
      vuelta); o salta `PRESION_MAX_EXCEDIDA` (`presion_max_excedida`, desde
      main.c — antes seguía validando con el motor en ralentí forzado).
+   - **Aspersor que no responde (2026-10-14**, campo 2026-10-13: el aspersor
+     se quedó en 7 PSI con la local en 45→50 y el ensayo iba a durar ~26 min):
+     aborta en la base si el aspersor reporta 0 o menos del 20 % de la
+     presión local (`aspersor_no_creible_frente_a_la_presion_local`; el
+     aspersor lejano del 12/10 daba 46 %); en el escalón, si con la local ya
+     llegada pasan 4 reportes sin moverse 1.5 PSI
+     (`aspersor_no_responde_al_escalon`), o si se mueve más de 3 PSI al revés
+     del escalón (`aspersor_en_sentido_contrario_al_escalon`). Revisado contra
+     todas las corridas de campo del 8 y 9/10: ninguna buena se habría cortado
+     (todas respondieron ≥1.5 PSI en el 1.º o 2.º reporte).
 6. **Resultado:**
    - Aprobada: guarda `PID_ASP_KP=0` y `PID_ASP_KI`.
    - Rechazada: reintenta con tau_c ×2, hasta **2 intentos** (eran 3). Si
      ninguna pasa, las ganancias quedan como estaban.
-   - Si arrancó desde MODO=1, al terminar regresa el objetivo local a la base
-     al ritmo de llenado antes de soltar.
+   - Si arrancó desde MODO=1, al terminar (bien, mal **o abortado**) suelta
+     y la rampa de `MODO=1` regresa el objetivo local a la base: a
+     `objetivo / TIEMPO_LLENADO_S`, o a 0.35 PSI/s con `0` (2026-10-14).
+     Antes lo hacía CALIB 12 con un estado propio (`FINALIZANDO`) solo en el
+     final normal, y con `TIEMPO_LLENADO_S=0` bajaba directo; un aborto
+     soltaba de golpe.
    - Resultado por LoRa: código 10 (bien) u 11 (falló).
 
 **Log serie:** `AUTOTUNE_PID3,...` (`BASE_LOCAL`, `ESCALON`, `REPORTE`, `ID`,
-`CANDIDATA`, `VALIDANDO`, `VAL_REPORTE`, `OK`/`FALLO`). Entre `CANDIDATA` y
-`VALIDANDO` no imprime nada mientras vuelve a la base (es normal). Los códigos
-10/11 todavía **no** están en el decoder de AWS: seguir el resultado por serie.
+`CANDIDATA`, `VALIDANDO`, `VAL_REPORTE`, `OK`/`FALLO`, `BASE_NO_CREIBLE`).
+Entre `CANDIDATA` y `VALIDANDO` no imprime nada mientras vuelve a la base (es
+normal). Los códigos 10/11 ya están en el decoder de AWS (desde 2026-10-02).
 
 **Prueba de campo 2026-10-08** (logs `COM3_2026_10_08.12.49.46.588` y
 `.14.28.23.597`, siempre desde MODO 1, `PRESION_OBJETIVO_REMOTO=45`):

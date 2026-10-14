@@ -19,10 +19,9 @@
  * -- eso lo resuelve main.c según MODO: SET_RPM directo (MODO 3/4), la
  * salida del PID#2 (MODO 1/2), o lo que pida un autotune.
  *
- * Ganancias PID_RPM_KP/KI (calibracion_flash.h). Default de fábrica Kp=1,
- * Ki=0 (solo para ver que el servo se mueve hacia el lado correcto); las de
- * campo validadas son Kp=0.047 / Ki=0.11, y CALIB=13 las calcula solo
- * (SIMC, ver autotune_rpm.h y README sección 9).
+ * Ganancias PID_RPM_KP/KI (calibracion_flash.h). Default = las de campo
+ * validadas, Kp=0.047 / Ki=0.11 (desde 2026-10-13; antes Kp=1, Ki=0), y
+ * CALIB=13 las calcula solo (SIMC, ver autotune_rpm.h y README sección 9).
  *
  * Solo P+I (sin derivativo) -- PID_KD se eliminó del protocolo
  * 2026-09-23: el ruido de RPM lo hacía inútil en la práctica.

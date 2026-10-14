@@ -53,9 +53,11 @@ extern "C" {
  * lectura real). 0 = sin configurar: MODO=2 se rechaza. */
 #define CALIB_ID_PRESION_OBJETIVO_REMOTO           6U
 #define CALIB_ID_PRESION_REMOTO                    7U
-/* 8: segundos para llenar la tubería de 0 PSI a PRESION_OBJETIVO_LOCAL. La
- * velocidad de la rampa de MODO=1/2 (PSI/s) se calcula al usarla:
- * objetivo / segundos. 0 = sin rampa. También lo usan CALIB=9/14. */
+/* 8: TIEMPO_LLENADO_S, solo en MODO=4 (2026-10-14). En MODO=1 es lo que
+ * tarda la rampa desde la presion con la que se entra hasta el objetivo,
+ * nunca mas rapido que PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S (0 = al tope).
+ * La bajada de MODO=1/2 y CALIB=9/12/14 usan objetivo / segundos desde
+ * 0 PSI (ver CalibFlash_GetTasaLlenadoPsiS). */
 #define CALIB_ID_TIEMPO_LLENADO_S                  8U
 
 /* ---- Configuración (solo con el motor detenido) ---- */
@@ -195,7 +197,7 @@ float    CalibFlash_GetAlphaFiltro(void);
 float    CalibFlash_GetRpmMax(void);
 float    CalibFlash_GetRpmMaxCarga(void);
 float    CalibFlash_GetPresionMax(void);
-uint16_t CalibFlash_GetTiempoLlenadoS(void);   /* TIEMPO_LLENADO_S, 0 = sin rampa */
+uint16_t CalibFlash_GetTiempoLlenadoS(void);   /* TIEMPO_LLENADO_S; en MODO=1, 0 = al tope de 0.35 PSI/s */
 float    CalibFlash_GetRpmMin(void);
 float    CalibFlash_GetPidRpmKp(void);
 float    CalibFlash_GetPidRpmKi(void);
@@ -210,7 +212,7 @@ uint16_t CalibFlash_GetHisteresisModoS(void);        /* fijo, 30 s */
 float    CalibFlash_GetPresionObjetivoLocal(void);
 float    CalibFlash_GetTasaMaxCambioRpmLlenadoS(void); /* fijo, 10 RPM/s */
 float    CalibFlash_GetPresionObjetivoRemoto(void); /* setpoint de MODO=2; 0 = sin configurar */
-float    CalibFlash_GetTasaLlenadoPsiS(void);       /* objetivo local / TIEMPO_LLENADO_S; 0 = sin rampa */
+float    CalibFlash_GetTasaLlenadoPsiS(void);       /* objetivo local / TIEMPO_LLENADO_S; 0 si TIEMPO_LLENADO_S = 0 (cada uso decide: tope o directo) */
 float    CalibFlash_GetPidAspKp(void);              /* lazo remoto, MODO=2 */
 float    CalibFlash_GetPidAspKi(void);
 float    CalibFlash_GetPidPsiKp(void);              /* lazo local, MODO=1 */
@@ -229,6 +231,10 @@ bool CalibFlash_ConsumirRechazoModo(void);
 
 /** true si el último arranque cargó defaults (flash sin magic válido). */
 bool CalibFlash_ArranqueConDefaults(void);
+
+/** main.c lo llama en cada vuelta: true = MODO=1 termino de llenar (rampa en
+ *  el objetivo y presion a <= 2 PSI). Sin eso se rechaza MODO=2 (2026-10-14). */
+void CalibFlash_SetLlenadoModo1Completo(bool completo);
 
 /* ==================== SETTERS ==================== */
 /* Validan rango y persisten igual que un downlink, sin el candado de MODO.

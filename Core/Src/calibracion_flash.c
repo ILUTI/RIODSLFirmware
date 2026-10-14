@@ -14,6 +14,9 @@
  * segundo byte.
  */
 
+/* -Os tambien en Debug (2026-10-14), mismo motivo que main.c. */
+#pragma GCC optimize ("Os")
+
 #include "calibracion_flash.h"
 #include "main.h"
 #include "modo_fsm.h"
@@ -116,9 +119,9 @@ typedef struct {
     uint16_t intervaloOperativoS;      /* INTERVALO_ENVIO_OPERATIVO_S */
     uint16_t intervaloStandbyS;        /* INTERVALO_ENVIO_STANDBY_S */
     uint16_t reservado7;               /* antes histeresisModoS (ahora fijo 2026-10-01) */
-    uint16_t tiempoLlenadoS;           /* TIEMPO_LLENADO_S: segundos para llenar de 0 PSI a
-                                         * PRESION_OBJETIVO_LOCAL. 0 = sin rampa. Lo usan la rampa
-                                         * de MODO=1/2 y CALIB=9/14 */
+    uint16_t tiempoLlenadoS;           /* TIEMPO_LLENADO_S, ver CALIB_ID_TIEMPO_LLENADO_S en el .h
+                                         * (MODO=1: desde la presion de entrada, 0 = al tope;
+                                         * bajadas y CALIB=9/12/14: objetivo / segundos) */
 
     uint8_t  calib;                    /* CALIB -- vive en RAM, Init lo fuerza a 0 */
     uint8_t  modo;                     /* MODO -- vive en RAM, Init lo fuerza a RALENTI */
@@ -152,6 +155,9 @@ static bool s_huboPresionRemota = false;
  * de main.c) -- ver CalibFlash_GetModoDownlinkCount(). */
 static uint32_t s_modoDownlinkCount = 0U;
 static bool s_rechazoModoPendiente = false;
+/* main.c avisa en cada vuelta si MODO=1 termino de llenar (ver
+ * CalibFlash_SetLlenadoModo1Completo); sin eso se rechaza MODO=2. */
+static bool s_llenadoModo1Completo = false;
 static bool s_arranqueConDefaults = false;
 
 /* Banderas de comandos */
@@ -227,7 +233,9 @@ static const Param_t k_params[] = {
     { CALIB_ID_PRESION_OBJETIVO_LOCAL,        CAT_PROC, T_F_U16,   C_MODO_CAL,        CAMPO(presionObjetivoLocal), 1,   10.0f },
     { CALIB_ID_PRESION_OBJETIVO_REMOTO,       CAT_PROC, T_F_U16,   C_NINGUNO,         CAMPO(presionObjetivoRemoto),1,   10.0f },
     { CALIB_ID_PRESION_REMOTO,                CAT_PROC, T_NINGUNO, C_NINGUNO,         0U,                          0,    1.0f },
-    { CALIB_ID_TIEMPO_LLENADO_S,              CAT_PROC, T_U16,     C_NINGUNO,         CAMPO(tiempoLlenadoS),       1,    1.0f },
+    /* TIEMPO_LLENADO_S: solo en MODO=4 (2026-10-14, usuario). Cambiarlo a
+     * mitad de una rampa le cambiaba la velocidad en el aire. */
+    { CALIB_ID_TIEMPO_LLENADO_S,              CAT_PROC, T_U16,     C_MODO_CAL,        CAMPO(tiempoLlenadoS),       1,    1.0f },
     { CALIB_ID_RPM_MIN,                       CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMin),               1,   10.0f },
     { CALIB_ID_RPM_MAX,                       CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMax),               1,   10.0f },
     { CALIB_ID_RPM_MAX_CARGA,                 CAT_CONF, T_F_U16,   C_MODO_CAL,        CAMPO(rpmMaxCarga),          1,   10.0f },
@@ -382,9 +390,6 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id, c
 
     switch (id) {
 
-        /* El operador manda el RPM que marca un tacómetro externo y el
-         * firmware despeja el ratio con su propia frecuencia (misma fórmula
-         * que Tacometro_Update()). Sin motor girando no hay qué calcular. */
         /* Fija el horometro (horas enteras); despues sigue sumando solo.
          * Categoria CONFIGURACION: solo con el motor detenido. */
         case CALIB_ID_HOROMETRO_H: {
@@ -394,6 +399,9 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id, c
             return StatusDe(ok);
         }
 
+        /* El operador manda el RPM que marca un tacómetro externo y el
+         * firmware despeja el ratio con su propia frecuencia (misma fórmula
+         * que Tacometro_Update()). Sin motor girando no hay qué calcular. */
         case CALIB_ID_SET_RATIO_AUTO: {
             float rpmReferencia = (float)LeerUint16BigEndian(datos) / 10.0f;
             bool ok = (rpmReferencia > 0.0f && frecuenciaHzActual > 0.0f)
@@ -489,7 +497,7 @@ CalibFlash_ProtocoloStatus_t CalibFlash_ProcesarParametroConEstado(uint8_t id, c
                        < CalibFlash_GetTimeoutSinComandoS() * 1000UL;
             CalibFlash_ProtocoloStatus_t statusEntrada = Modo_ValidarEntrada(
                     anterior, solicitado, motorOperando, s_datos.presionObjetivoRemoto,
-                    remotoDisponible);
+                    remotoDisponible, s_llenadoModo1Completo);
             if (statusEntrada != CALIB_STATUS_OK) {
                 s_rechazoModoPendiente = true;
                 *valorAplicadoRaw = (uint16_t)anterior;
@@ -589,7 +597,10 @@ static bool RangoValido(uint8_t id, float v)
         case CALIB_ID_RPM_MAX:                return v > s_datos.rpmMin && v <= 6000.0f;
         case CALIB_ID_RPM_MIN:                return v >= 0.0f && v < s_datos.rpmMax;
         case CALIB_ID_RPM_MAX_CARGA:          return v > s_datos.rpmMin && v <= s_datos.rpmMax;
-        case CALIB_ID_PRESION_MAX:            return v > 0.0f && v <= 500.0f
+        /* Tope 150 (2026-10-14, era 500): fondo de escala del sensor
+         * (PRESIONV_PSI_EN_VOLTAJE_MAX). Mas arriba la guarda no puede ver
+         * la presion: el sensor se marca invalido antes de llegar. */
+        case CALIB_ID_PRESION_MAX:            return v > 0.0f && v <= 150.0f
                                                      && v > s_datos.presionObjetivoLocal
                                                      && v > s_setPresion;
         case CALIB_ID_SERVO_PULSO_MIN:        return v >= 500.0f && v < (float)s_datos.servoPulsoMaxUs;
@@ -598,7 +609,7 @@ static bool RangoValido(uint8_t id, float v)
         case CALIB_ID_INTERVALO_ENVIO_STANDBY_S: return v >= 5.0f && v <= 3600.0f;
         case CALIB_ID_PRESION_OBJETIVO_LOCAL: return v > 0.0f && v <= 500.0f && v < s_datos.presionMax;
         case CALIB_ID_PRESION_OBJETIVO_REMOTO: return v >= 0.0f && v <= 500.0f; /* 0 = sin configurar */
-        /* 0 = sin rampa; si no, al menos 1 min. El mínimo también rechaza un
+        /* 0 (al tope en MODO=1) o al menos 1 min. El mínimo también rechaza un
          * valor viejo de TASA_LLENADO_PSI_S (PSI/s x100, que usaba este mismo
          * ID 8) mandado por una Lambda sin actualizar. */
         case CALIB_ID_TIEMPO_LLENADO_S:       return v == 0.0f || v >= 60.0f;
@@ -699,7 +710,9 @@ bool     CalibFlash_ArranqueConDefaults(void)          { return s_arranqueConDef
 /* Velocidad de la rampa de llenado (PSI/s): llenar de 0 PSI a
  * PRESION_OBJETIVO_LOCAL en TIEMPO_LLENADO_S segundos. Se calcula al
  * leerla, así que si después cambia el objetivo la velocidad se ajusta
- * sola. 0 = sin rampa. */
+ * sola. Devuelve 0 si TIEMPO_LLENADO_S = 0; cada uso decide qué hace con
+ * eso (la bajada de MODO=1 usa el tope, la de MODO=2 y CALIB 12 van directo,
+ * CALIB 9/14 usan 300 s). La subida de MODO=1 no usa esta función. */
 float CalibFlash_GetTasaLlenadoPsiS(void)
 {
     if (s_datos.tiempoLlenadoS == 0U) return 0.0f;
@@ -707,6 +720,8 @@ float CalibFlash_GetTasaLlenadoPsiS(void)
 }
 
 /* ==================== REPORTE DE PARÁMETROS ==================== */
+
+void CalibFlash_SetLlenadoModo1Completo(bool completo) { s_llenadoModo1Completo = completo; }
 
 bool CalibFlash_HayReportePendiente(void)    { return s_reporteConfigPendiente; }
 void CalibFlash_TerminarReporte(void)        { s_reporteConfigPendiente = false; }

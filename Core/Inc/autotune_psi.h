@@ -9,13 +9,14 @@
  * banco antes de confiar en ella.
  *
  * Requisitos: MODO=CALIBRACION, motor operando CON la bomba embragada,
- * PID#1 ya sintonizado (PID_RPM_KP > 0), PRESION_OBJETIVO_LOCAL y
- * TIEMPO_LLENADO_S configurados, PRESION_MAX > objetivo.
+ * PID#1 ya sintonizado (PID_RPM_KP > 0), PRESION_OBJETIVO_LOCAL
+ * configurado (TIEMPO_LLENADO_S = 0 usa 300 s), PRESION_MAX > objetivo.
  *
- * Secuencia (sin laptop; dura ~TIEMPO_LLENADO_S + ~10-15 min):
+ * Secuencia (sin laptop; ~10-15 min):
  *   1. BASE      : SET_RPM=RPM_MIN, mide la presion base (5 s).
  *   2. SUBIDA    : rampa de SET_RPM en lazo abierto, PAUSADA por PSI real al
  *                  ritmo de llenado (PRESION_OBJETIVO_LOCAL / TIEMPO_LLENADO_S,
+ *                  nunca mas rapido que PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S,
  *                  regla de seguridad de la tuberia) hasta
  *                  PRESION_OBJETIVO_LOCAL. Registra el RPM al cruzar 4 tramos
  *                  de presion y con la K del primero calcula la Kp de PRUEBA
@@ -25,14 +26,15 @@
  *                  prueba y Ki=0 (180 s), identificado como
  *                  `identify-presion` -- el mismo ensayo con el que salio la
  *                  1.72/0.39 de campo.
- *   5. SIMC      : Kp/Ki candidatas, fila "Medio" (tau_c = 2L).
+ *   5. SIMC      : Kp/Ki candidatas con tau_c = 8L (2026-10-12; era 2L,
+ *                  "Medio", que daba ~3 veces mas rapido que 1.72/0.39).
  *   6. VALIDACION: vuelve a ralenti, espera presion estable y prueba la
  *                  candidata en la cascada REAL con un escalon de +5 PSI desde
  *                  ralenti (o hasta el objetivo si queda mas cerca), con vigia
  *                  de oscilacion en vivo. Un escalon grande hasta el objetivo
  *                  iria sin rampa de llenado, por eso no se hace.
  *   7. Aprobada -> persiste PID_PSI_KP/KI. Si no, reintenta con tau_c x2
- *                  (hasta 3 veces). Si ninguna pasa, deja las ganancias
+ *                  (hasta AUTOTUNE2_INTENTOS_MAX veces). Si ninguna pasa, deja las ganancias
  *                  guardadas como estaban.
  * Todo con ganancias temporales en RAM; flash se escribe una sola vez, al
  * final. PRESION_OBJETIVO_LOCAL tampoco se modifica (objetivo de prueba en
@@ -59,7 +61,7 @@ extern "C" {
  *   CALIB 10 ID      : con la Kp de prueba de CALIB 9 (si no hay, aborta):
  *                      base, escalon CERRADO de +5 PSI con Ki=0 (180 s, log
  *                      PRESION_PID_TEST -> `identify-presion --kp`), SIMC
- *                      Medio, imprime la candidata.
+ *                      (tau_c = 8L), imprime la candidata.
  *   CALIB 11 VALIDAR : base + validacion zona 1 (+5 PSI desde ralenti) de las
  *                      PID_PSI_KP/KI YA guardadas, sin reintentos.
  *   CALIB 14 completo (9 -> 10 -> validacion), el unico que guarda. */
@@ -75,6 +77,8 @@ static inline bool AutotunePsi_EsCalib(uint8_t calib)
 void AutotunePsi_Iniciar(uint8_t etapa);
 void AutotunePsi_Paso(bool motorOperando, bool modoCalibracion);
 void AutotunePsi_Limpiar(void);
+/** Corta la etapa en curso con FALLO (la guarda PRESION_MAX, 2026-10-14). */
+void AutotunePsi_Abortar(const char *motivo);
 Autotune_Resultado_t AutotunePsi_UltimoResultado(void);
 
 /** true mientras corre la cascada real (escalon de identificacion y

@@ -20,9 +20,9 @@
  * asumir.
  *
  * Ganancias propias (PID_PSI_KP/KI, independientes de PID_RPM_KP/KI del
- * lazo interno) -- ver calibracion_flash.h. Default 0/0 (sin calibrar);
- * las validadas en campo son Kp=1.72 / Ki=0.39 (SIMC "Medio"), y CALIB=14
- * las calcula solo (ver autotune_psi.h).
+ * lazo interno) -- ver calibracion_flash.h. Default = las validadas en campo,
+ * Kp=1.72 / Ki=0.39 (desde 2026-10-13; antes 0/0), y CALIB=14 las calcula
+ * solo (ver autotune_psi.h).
  */
 
 #ifndef PRESION_PID_H

@@ -182,8 +182,7 @@ Autotune_IdResultado_t Autotune_IdentificarLazoCerrado(const float *y, uint16_t 
 
 Autotune_IdResultado_t Autotune_IdentificarLazoAbierto(const float *y, uint16_t n,
         float dtS, float y0, float deltaCmd, float ventanaFinalS,
-        float umbralMin, float umbralFrac, uint16_t semiVentana, bool dosPuntos,
-        Autotune_Planta_t *out)
+        float umbralMin, uint16_t semiVentana, Autotune_Planta_t *out)
 {
     if (n < 20U || dtS <= 0.0f || deltaCmd == 0.0f) {
         return AUTOTUNE_ID_DATOS_INSUFICIENTES;
@@ -198,9 +197,7 @@ Autotune_IdResultado_t Autotune_IdentificarLazoAbierto(const float *y, uint16_t 
     if (!(k > 0.0f)) return AUTOTUNE_ID_K_INVALIDA; /* mas comando tiene que dar mas respuesta */
 
     float l = 0.0f, tau = 0.0f;
-    r = dosPuntos
-        ? medirDosPuntos(y, n, dtS, y0, deltaSs, semiVentana, &l, &tau)
-        : medirLyTau(y, n, dtS, y0, deltaSs, umbralMin, umbralFrac, semiVentana, &l, &tau);
+    r = medirDosPuntos(y, n, dtS, y0, deltaSs, semiVentana, &l, &tau);
     if (r != AUTOTUNE_ID_OK) return r;
 
     out->gcl = 0.0f;
@@ -359,7 +356,6 @@ void Autotune_OscReiniciar(Autotune_Osc_t *o)
 {
     o->estado = 0;
     o->cuenta = 0U;
-    o->total = 0U;
     for (uint8_t i = 0U; i < AUTOTUNE_OSC_CRUCES; i++) o->t[i] = 0U;
 }
 
@@ -371,7 +367,6 @@ bool Autotune_OscActualizar(Autotune_Osc_t *o, float error, float umbral,
     else if (error < -umbral) nuevo = -1;
 
     if (nuevo != o->estado && o->estado != 0 && nuevo != 0) {
-        o->total++;
         if (o->cuenta < AUTOTUNE_OSC_CRUCES) {
             o->t[o->cuenta++] = ahoraMs;
         } else {

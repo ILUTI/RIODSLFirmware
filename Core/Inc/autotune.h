@@ -105,13 +105,12 @@ Autotune_IdResultado_t Autotune_IdentificarLazoCerrado(const float *y, uint16_t 
  */
 Autotune_IdResultado_t Autotune_IdentificarLazoAbierto(const float *y, uint16_t n,
         float dtS, float y0, float deltaCmd, float ventanaFinalS,
-        float umbralMin, float umbralFrac, uint16_t semiVentana, bool dosPuntos,
-        Autotune_Planta_t *out);
-/* dosPuntos: false = mismo metodo que pid_tuning.py (L = cuando se movio mas
- * del umbral, tau = de ahi al 63%); true = metodo de dos puntos de Smith
- * (28% y 63%), sin sesgo en tau. PID#1 usa true (reproduce el tau=0.43 con
- * el que se sacaron 0.047/0.11); PID#2 usa false (1.72/0.39 salio con
- * `identify-presion`, que usa el metodo de umbral). */
+        float umbralMin, uint16_t semiVentana, Autotune_Planta_t *out);
+/* L y tau por el metodo de dos puntos de Smith (28% y 63%), sin sesgo en
+ * tau: reproduce el tau=0.43 con el que se sacaron 0.047/0.11 (PID#1, su
+ * unico usuario). El metodo de umbral (medirLyTau) lo sigue usando la
+ * identificacion en lazo cerrado del PID#2. Hasta 2026-10-14 habia un
+ * parametro para elegir, pero nadie pedia el de umbral aca. */
 
 /* ==================== GRABADOR DE MUESTRAS ==================== */
 
@@ -190,7 +189,6 @@ typedef struct {
     int8_t   estado;                        /* -1/0/+1, lado actual del error (Schmitt) */
     uint32_t t[AUTOTUNE_OSC_CRUCES];        /* instantes (ms) de los ultimos cruces */
     uint8_t  cuenta;                        /* cruces guardados (<= AUTOTUNE_OSC_CRUCES) */
-    uint32_t total;                         /* cruces totales desde el reinicio (el log de CALIB=7/11 lo imprime) */
 } Autotune_Osc_t;
 
 void Autotune_OscReiniciar(Autotune_Osc_t *o);

@@ -225,8 +225,8 @@ static void analizarIdentificacion(uint32_t ahora)
     float deltaPulso = (float)(s_pulsoId - CalibFlash_GetServoPulsoMinUs());
     Autotune_IdResultado_t r = Autotune_IdentificarLazoAbierto(
             Autotune_Buffer(), s_grab.n, AUTOTUNE1_DT_MS / 1000.0f, s_y0, deltaPulso,
-            AUTOTUNE1_VENTANA_FINAL_S, AUTOTUNE1_UMBRAL_MOV_RPM, 0.2f,
-            AUTOTUNE1_SEMIVENTANA, true /* dos puntos: tau sin sesgo, como el 0.43 de campo */, &s_planta);
+            AUTOTUNE1_VENTANA_FINAL_S, AUTOTUNE1_UMBRAL_MOV_RPM,
+            AUTOTUNE1_SEMIVENTANA, &s_planta);   /* dos puntos: tau sin sesgo, como el 0.43 de campo */
     if (r != AUTOTUNE_ID_OK) {
         printf("AUTOTUNE_PID1,ID_FALLIDA,motivo=%s\r\n", Autotune_IdNombre(r));
         abortar("identificacion_fallida");

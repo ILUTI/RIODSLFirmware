@@ -32,9 +32,10 @@
  * El objetivo local que realmente se aplica al PID#2 cambia a ritmo
  * limitado (PRESION_OBJETIVO_LOCAL / TIEMPO_LLENADO_S, ver
  * CalibFlash_GetTasaLlenadoPsiS() y PresionPidRemoto_ObjetivoAplicado()).
- * En MODO=2, desde 2026-10-09, solo al BAJAR (golpe de ariete): la subida es
- * directa porque MODO=2 viene de MODO=1 con la tuberia llena. CALIB 12 sigue
- * con rampa en las dos direcciones (puede arrancar desde MODO=4).
+ * En MODO=2 la subida va al tope PRESION_LOCAL_TASA_MAX_SUBIDA_PSI_S
+ * (2026-10-13; del 09 al 13 fue directa) y la bajada a ese ritmo de llenado
+ * (golpe de ariete). CALIB 12 usa el ritmo de llenado en las dos direcciones
+ * (puede arrancar desde MODO=4). Tasa <= 0 = directo en ese sentido.
  */
 
 #ifndef PRESION_PID_REMOTO_H
