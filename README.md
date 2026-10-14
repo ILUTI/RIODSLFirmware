@@ -2810,6 +2810,13 @@ sección:
 **Pendiente de probar en campo:** los cambios del 2026-10-14 (arriba): pasar
 de `MODO=2` a `MODO=1` a mano y ver que baje con rampa; pedir `MODO=2` a
 mitad del llenado (debe rechazarse); `CALIB=12` con el aspersor lejano.
+**Observar en campo (decisión 2026-10-14, sin cambiar código):** el salto de
+entrada de `MODO=2` (0.8·Δ/K) queda recortado por la ventana de ±3 PSI del
+PID#3 mientras el objetivo sube al tope de 0.35 PSI/s (ej. +22 → ~+13 en el
+1.º reporte, después +3 por reporte). Ver si `MODO=2` llega más lento que el
+9/10 y si sigue sin sobrepaso antes de tocar la ventana. El tope en la rampa
+de `CALIB=12` se descartó (los escalones son de ~5 PSI y la corrida buena del
+9/10 fue así).
 `CALIB=14` con tau_c = 8·L (debería dar
 Kp ~2–4 / Ki ~0.3–0.6); `CALIB=12` con el aspersor lejano (esperado
 Ki ~0.008–0.015); `MODO=2` con el tope de subida, el rearme del supervisor
